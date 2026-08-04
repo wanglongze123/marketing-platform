@@ -50,7 +50,7 @@
 
 | 模块 | 职责 |
 | --- | --- |
-| `mp-gateway` | 接入层，V0/V1 单进程启动入口 |
+| `mp-gateway` | 接入层，V0–V2 单进程启动入口 |
 | `mp-fission` | 裂变关系、好友过滤、双向发奖编排 |
 | `mp-benefit-order` | 订单、支付对接、履约编排、退款回收 |
 | `mp-activity` | 活动配置、配置版本、资格决策 |
@@ -59,7 +59,7 @@
 | `mp-common` | 结果码、四分类枚举、单号与幂等键生成、异常 |
 | `mp-api` | 对外接口定义，按服务拆五个子模块 |
 
-数据按服务分库：`db_activity` / `db_fission` / `db_benefit` / `db_reward`，禁止跨库 JOIN 与跨库事务。
+数据按服务分库：`db_activity` / `db_fission` / `db_benefit` / `db_reward`，禁止跨库 JOIN 与跨库事务。该形态为终态；V1/V2 阶段以单数据源承载全部表，多数据源在 V2 配置（见[分阶段方案](docs/营销活动平台-分阶段方案.md) §7.3 第 8 条）。
 
 ## 一致性设计
 
@@ -102,9 +102,11 @@
 | 阶段 | 范围 | 退出标准 | 状态 |
 | --- | --- | --- | --- |
 | V0 | 工程骨架、CI、冒烟链路 | CI 全绿，依赖方向编译期可拦截 | ✅ |
-| V1 | 权益售卖正向链路 | 下单 → 支付回调 → 发放 → 查询 e2e 通过 | 进行中 |
+| V1 | 权益售卖正向链路 | 下单 → 支付回调 → 发放 → 查询 e2e 通过 | ✅ |
 | V2 | 四分类收敛、可靠任务、幂等三道闸、库存 | 注入超时自动收敛无重复发放；500VU 抢 100 无超卖 | |
 | V3 | 裂变全链路、逆向、对账、分布式化 | 新玩法接入公共能力层零改动；kill 实例任务被接管 | |
+
+V1 实测记录（实施偏差、缺陷、形状冻结落地情况）见[分阶段方案](docs/营销活动平台-分阶段方案.md) §4.8。
 
 各阶段详细范围与退出标准见[分阶段方案](docs/营销活动平台-分阶段方案.md)。
 
@@ -119,8 +121,23 @@ mvn verify                            # 编译、单测、集成测试
 mvn -pl mp-gateway spring-boot:run
 ```
 
+权益售卖正向链路演示（演示数据由 seed 脚本初始化，活动 `ACT_DEMO_001`、SKU `SKU_DEMO_001` 售价 99 元）：
+
 ```bash
-curl http://localhost:8080/smoke/BZ001
+# ① 下单，返回 bizNo 与 tradeNo
+curl -s -X POST localhost:8080/api/benefit/trade \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"U001","activityId":"ACT_DEMO_001","skuId":"SKU_DEMO_001",
+       "clientReqNo":"REQ001","quantity":1}'
+
+# ② 支付结果通知，outTradeNo 填上一步的 bizNo
+curl -s -X POST localhost:8080/api/benefit/pay-callback \
+  -H 'Content-Type: application/json' \
+  -d '{"outTradeNo":"<bizNo>","tradeNo":"<tradeNo>","notifySeq":"NS001",
+       "payStatus":"SUCCESS","payAmount":9900,"currency":"CNY"}'
+
+# ③ 查单，pay_status=PAY_SUCCESS、grant_status=GRANT_SUCCESS、两条履约明细
+curl -s localhost:8080/api/benefit/order/<bizNo>
 ```
 
 macOS 环境搭建注意事项见[环境与依赖](docs/营销活动平台-环境与依赖.md) §1.1。

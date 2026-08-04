@@ -5,14 +5,23 @@
 用法：python3 check-docs.py
 退出码：0 = 全通过，1 = 有不一致
 
-覆盖 17 项：Flyway 编号与撞号、四分类枚举、幂等键公式、退避序列、
-module 清单、退出标准编号连续性、依赖方向规则、重复段落。
+两类校验：
+  A 文档之间：Flyway 编号与撞号、四分类枚举、幂等键公式、退避序列、
+    退出标准编号连续性、依赖方向规则、重复段落。
+  B 文档与代码：module 清单、Flyway 脚本名、依赖版本号、HTTP 端点。
+
+B 类以仓库实际状态为基准。文档之间互相比对存在盲区 —— 两份同时写错时
+「一致」但都不对（mp-api-mock 曾在两份文档中同时缺失，V1 才发现）。
 
 查不了的：语义矛盾（同一件事两处给了不同做法）。那个只能靠人读。
 """
+import os
 import re
 import sys
 import collections
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DOCS_DIR = os.path.join(ROOT, 'docs')
 
 DOCS = {
     '技术方案': '营销活动平台-技术方案.md',
@@ -21,18 +30,89 @@ DOCS = {
     '分阶段方案': '营销活动平台-分阶段方案.md',
 }
 
+PASSED = []
 FAILED = []
 
 
 def check(cond, msg):
     print(('  ✓ ' if cond else '  ✗ ') + msg)
-    if not cond:
-        FAILED.append(msg)
+    (PASSED if cond else FAILED).append(msg)
+
+
+def section(title):
+    print()
+    print('=' * 66)
+    print(title)
+    print('=' * 66)
+
+
+def read(path):
+    """读仓库文件，不存在时返回空串 —— 校验项自行判断缺失是否算失败。"""
+    try:
+        return open(os.path.join(ROOT, path), encoding='utf-8').read()
+    except OSError:
+        return ''
+
+
+def check_against_repo(txt):
+    """B 类：文档 vs 仓库实际状态。"""
+    section('文档 vs 仓库')
+
+    # module 清单：以根 pom 的 <module> 与 mp-api 子 pom 为准
+    declared = set(re.findall(r'<module>([\w-]+)</module>', read('pom.xml')))
+    declared |= set(re.findall(r'<module>([\w-]+)</module>', read('mp-api/pom.xml')))
+    for name, t in (('开发规范', txt['开发规范']), ('分阶段方案', txt['分阶段方案'])):
+        doc = set(re.findall(r'(mp-[a-z-]+)/', t))
+        miss, extra = declared - doc, doc - declared
+        check(not miss and not extra,
+              f'{name} module 清单与 pom 一致（{len(declared)} 个）'
+              + (f'  文档漏: {sorted(miss)}' if miss else '')
+              + (f'  文档多: {sorted(extra)}' if extra else ''))
+
+    # Flyway 脚本：文档引用的文件名必须真实存在
+    on_disk = set()
+    for dirpath, _, files in os.walk(ROOT):
+        if 'target' in dirpath.split(os.sep):
+            continue
+        on_disk |= {f for f in files if re.match(r'V\d{4}__.*\.sql$', f)}
+    quoted = set(re.findall(r'`(V\d{4}__\w+\.sql)`', ''.join(txt.values())))
+    ghost = quoted - on_disk
+    check(not ghost, f'文档引用的迁移脚本均存在（{len(quoted)} 个）'
+          + (f'  查无此文件: {sorted(ghost)}' if ghost else ''))
+
+    # 依赖版本：《环境与依赖》§2.1 的版本号必须与根 pom 的 properties 一致
+    props = dict(re.findall(r'<([\w.-]+)\.version>([\d.]+)</[\w.-]+\.version>', read('pom.xml')))
+    env = txt['环境与依赖']
+    for key, label in [('spring-boot', 'Spring Boot'), ('dubbo', 'Dubbo'),
+                       ('mybatis-plus', 'MyBatis-Plus'), ('flyway', 'Flyway'),
+                       ('testcontainers', 'Testcontainers')]:
+        want = props.get(key)
+        if not want:
+            check(False, f'根 pom 未声明 {key}.version')
+            continue
+        check(want in env, f'{label} 版本与 pom 一致（{want}）')
+
+    # HTTP 端点：文档表格中的路径必须在 controller 中存在
+    ctl = ''.join(read(os.path.join('mp-gateway/src/main/java/com/mp/gateway/controller', f))
+                  for f in os.listdir(os.path.join(
+                      ROOT, 'mp-gateway/src/main/java/com/mp/gateway/controller')))
+    base = re.search(r'@RequestMapping\("([^"]+)"\)', ctl)
+    paths = {(base.group(1) if base else '') + p
+             for p in re.findall(r'@(?:Get|Post|Put|Delete)Mapping\("([^"]*)"\)', ctl)}
+    quoted_paths = set(re.findall(r'`(/api/[\w/{}-]+)`', txt['分阶段方案']))
+    ghost_paths = {p for p in quoted_paths if p not in paths}
+    check(not ghost_paths, f'文档列出的 HTTP 端点均已实现（{len(paths)} 个）'
+          + (f'  未实现: {sorted(ghost_paths)}' if ghost_paths else ''))
+
+    # V0 脚手架：smoke 端点删除后，文档不得再让人 curl 它
+    readme = read('README.md')
+    check('/smoke' not in readme, 'README 未引用已删除的 smoke 端点')
 
 
 def main():
     try:
-        txt = {k: open(v, encoding='utf-8').read() for k, v in DOCS.items()}
+        txt = {k: open(os.path.join(DOCS_DIR, v), encoding='utf-8').read()
+               for k, v in DOCS.items()}
     except FileNotFoundError as e:
         print(f'找不到文档：{e.filename}')
         return 1
@@ -91,13 +171,19 @@ def main():
             kind + r'[^\n|。]{0,8}?([\dsm]+\s*→\s*[\dsm]+\s*→\s*[\dsm]+)', allt))
         check(v == {exp}, f'{kind} 统一: {v}')
 
-    m1 = set(re.findall(r'(mp-[a-z-]+)/', txt['开发规范']))
-    m2 = set(re.findall(r'(mp-[a-z-]+)/', txt['分阶段方案']))
-    check(m1 == m2, f'module 清单两份一致（{len(m1)} 个）'
-          + ('' if m1 == m2 else f'  差异: {m1 ^ m2}'))
-
     check('跨层向下' in txt['开发规范'], '依赖方向已写明「跨层向下允许」')
     check(txt['开发规范'].count('已合入 `main` 的脚本不得修改') == 1, 'Flyway 历史脚本规则未重复')
+
+    # §7.3 的条目数写在标题里，与表格行数容易脱节
+    m = re.search(r'### 7\.3 V1 明知不对但先这么做的(\S+?)处(.*?)####', txt['分阶段方案'], re.S)
+    if m:
+        cn = {'七': 7, '八': 8, '九': 9, '十': 10, '十一': 11, '十二': 12}
+        rows = len(re.findall(r'^\| \d+ \|', m.group(2), re.M))
+        check(cn.get(m.group(1)) == rows,
+              f'§7.3 标题条目数与表格行数一致（{rows} 行）'
+              + ('' if cn.get(m.group(1)) == rows else f'  标题写「{m.group(1)}」'))
+    else:
+        check(False, '§7.3 章节未找到')
 
     print()
     print('=' * 66)
@@ -113,15 +199,18 @@ def main():
         check(nums == list(range(1, len(nums) + 1)),
               f'{sec} 编号连续 (1-{len(nums)})' + ('' if nums == list(range(1, len(nums) + 1)) else f'  实测={nums}'))
 
+    check_against_repo(txt)
+
+    total = len(PASSED) + len(FAILED)
     print()
     print('=' * 66)
     if FAILED:
-        print(f'✗ {len(FAILED)} 项不一致：')
+        print(f'✗ {len(FAILED)}/{total} 项不一致：')
         for f in FAILED:
             print(f'    - {f}')
         print('=' * 66)
         return 1
-    print('✓ 全部通过（17 项）')
+    print(f'✓ 全部通过（{total} 项）')
     print('=' * 66)
     return 0
 
