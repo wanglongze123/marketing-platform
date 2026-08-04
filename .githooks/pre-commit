@@ -1,0 +1,18 @@
+#!/bin/sh
+# 提交前检查代码格式（只查不改），见《开发规范》§0
+# 失败时跑 mvn spotless:apply 后重新提交
+
+echo "→ spotless:check ..."
+
+if ! mvn -q -o spotless:check 2>/dev/null; then
+    # 离线失败时回退到在线
+    if ! mvn -q spotless:check; then
+        echo ""
+        echo "✗ 代码格式不合规"
+        echo "  修复: mvn spotless:apply"
+        echo ""
+        exit 1
+    fi
+fi
+
+exit 0

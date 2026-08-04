@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: mp-gateway
+  profiles:
+    active: local
+  threads:
+    virtual:
+      # 从 V1 起就开启，越晚开启改动面越大（《环境与依赖》§2.2 ③）
+      enabled: true
+
+server:
+  port: 8080
+
+dubbo:
+  application:
+    name: mp-gateway
+    qos-enable: false
+    logger: slf4j
+  protocol:
+    name: injvm
+  registry:
+    # V0/V1 单进程：不注册，全部 injvm 本地调用。V3 改为 nacos
+    address: N/A
+  scan:
+    base-packages: com.mp
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+
+logging:
+  level:
+    root: INFO
+    com.mp: DEBUG

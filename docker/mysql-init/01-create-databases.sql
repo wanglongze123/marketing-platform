@@ -1,0 +1,5 @@
+-- 只建库，表结构全部由 Flyway 管理（见《开发规范》§4.1）
+CREATE DATABASE IF NOT EXISTS db_activity DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS db_benefit  DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS db_reward   DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS db_fission  DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;

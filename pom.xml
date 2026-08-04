@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.mp</groupId>
+  <artifactId>marketing-platform</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>marketing-platform</name>
+  <description>营销活动平台：裂变 + 权益售卖</description>
+
+  <modules>
+    <module>mp-common</module>
+    <module>mp-api</module>
+    <module>mp-mock-downstream</module>
+    <module>mp-activity</module>
+    <module>mp-reward</module>
+    <module>mp-fission</module>
+    <module>mp-benefit-order</module>
+    <module>mp-gateway</module>
+  </modules>
+
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <!-- 版本以《环境与依赖》§2.1 为准，子模块不得单独指定 -->
+    <spring-boot.version>3.5.16</spring-boot.version>
+    <dubbo.version>3.3.6</dubbo.version>
+    <mybatis-plus.version>3.5.17</mybatis-plus.version>
+    <flyway.version>11.15.1</flyway.version>
+    <testcontainers.version>1.21.3</testcontainers.version>
+    <uuid-creator.version>6.0.0</uuid-creator.version>
+
+    <spotless.version>2.44.0</spotless.version>
+    <git-build-hook.version>3.5.0</git-build-hook.version>
+    <surefire.version>3.5.2</surefire.version>
+    <failsafe.version>3.5.2</failsafe.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- Boot BOM 必须在最前，压住 Dubbo 传递进来的 Spring 版本 -->
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.dubbo</groupId>
+        <artifactId>dubbo-bom</artifactId>
+        <version>${dubbo.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers-bom</artifactId>
+        <version>${testcontainers.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <!-- Boot 3.x 必须用 boot3 专属 starter，见《环境与依赖》§2.2 ① -->
+      <dependency>
+        <groupId>com.baomidou</groupId>
+        <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        <version>${mybatis-plus.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.github.f4b6a3</groupId>
+        <artifactId>uuid-creator</artifactId>
+        <version>${uuid-creator.version}</version>
+      </dependency>
+
+      <!-- 本工程各模块 -->
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-common</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-api-activity</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-api-reward</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-api-fission</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-api-benefit</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-api-mock</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-activity</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-reward</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-fission</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-benefit-order</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.mp</groupId>
+        <artifactId>mp-mock-downstream</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.springframework.boot</groupId>
+          <artifactId>spring-boot-maven-plugin</artifactId>
+          <version>${spring-boot.version}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
+    <plugins>
+      <!-- -parameters 是 Spring 必需：@PathVariable / @RequestParam / 构造器注入
+           都靠反射读参数名。spring-boot-starter-parent 默认带此标志，
+           本工程不继承它，必须手动补，否则运行时报
+           "Name for argument of type [X] not specified" -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <parameters>true</parameters>
+        </configuration>
+      </plugin>
+
+      <!-- 代码格式：AOSP 风格 4 空格，对齐阿里手册缩进 -->
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <version>${spotless.version}</version>
+        <configuration>
+          <java>
+            <includes>
+              <include>src/main/java/**/*.java</include>
+              <include>src/test/java/**/*.java</include>
+            </includes>
+            <googleJavaFormat>
+              <style>AOSP</style>
+            </googleJavaFormat>
+            <removeUnusedImports/>
+            <trimTrailingWhitespace/>
+            <endWithNewline/>
+          </java>
+        </configuration>
+        <executions>
+          <execution>
+            <id>spotless-check</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>check</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Git 钩子：mvn validate 时把 .githooks 装为仓库钩子 -->
+      <plugin>
+        <groupId>com.rudikershaw.gitbuildhook</groupId>
+        <artifactId>git-build-hook-maven-plugin</artifactId>
+        <version>${git-build-hook.version}</version>
+        <configuration>
+          <gitConfig>
+            <core.hooksPath>.githooks/</core.hooksPath>
+          </gitConfig>
+        </configuration>
+        <executions>
+          <execution>
+            <id>install-hooks</id>
+            <phase>validate</phase>
+            <goals>
+              <goal>configure</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- 单测：*Test.java，mvn test 阶段 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${surefire.version}</version>
+        <configuration>
+          <includes>
+            <include>**/*Test.java</include>
+          </includes>
+          <excludes>
+            <exclude>**/*IT.java</exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+
+      <!-- 集成测试：*IT.java，mvn verify 阶段，起 Testcontainers -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <version>${failsafe.version}</version>
+        <configuration>
+          <includes>
+            <include>**/*IT.java</include>
+          </includes>
+          <!-- 无 IT 的模块不报错：聚合工程里多数模块没有集成测试 -->
+          <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+          <!-- 必须指向编译输出而非 repackage 后的 fat jar。
+               failsafe 默认用 fat jar，其类嵌在 BOOT-INF/classes 下，测试 classloader
+               解析不到注解元数据，报 "Failed to find merged annotation for @BootstrapWith"。
+               本工程不继承 spring-boot-starter-parent，需手动补上它的这项配置。
+               见 spring-boot#25473 -->
+          <classesDirectory>${project.build.outputDirectory}</classesDirectory>
+        </configuration>
+        <executions>
+          <execution>
+            <id>integration-tests</id>
+            <goals>
+              <!-- verify 必须绑定，否则测试失败不会让构建失败 -->
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

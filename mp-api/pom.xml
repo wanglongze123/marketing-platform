@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.mp</groupId>
+    <artifactId>marketing-platform</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>mp-api</artifactId>
+  <packaging>pom</packaging>
+  <description>对外接口定义（Dubbo 接口 + DTO）</description>
+
+  <modules>
+    <module>mp-api-activity</module>
+    <module>mp-api-reward</module>
+    <module>mp-api-fission</module>
+    <module>mp-api-benefit</module>
+    <module>mp-api-mock</module>
+  </modules>
+</project>

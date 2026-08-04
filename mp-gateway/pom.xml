@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.mp</groupId>
+    <artifactId>marketing-platform</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>mp-gateway</artifactId>
+  <description>接入层：鉴权、限流、路由、统一响应。V0/V1 为单进程启动入口</description>
+
+  <!-- 依赖方向：接入层在最上层，可依赖全部下层 -->
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.dubbo</groupId>
+      <artifactId>dubbo-spring-boot-starter</artifactId>
+    </dependency>
+
+    <!-- 玩法层 -->
+    <dependency>
+      <groupId>com.mp</groupId>
+      <artifactId>mp-api-benefit</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.mp</groupId>
+      <artifactId>mp-benefit-order</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.mp</groupId>
+      <artifactId>mp-api-fission</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.mp</groupId>
+      <artifactId>mp-fission</artifactId>
+    </dependency>
+
+    <!-- V0/V1 单进程：其余模块以 injvm 在同进程内调用，需一并打包 -->
+    <dependency>
+      <groupId>com.mp</groupId>
+      <artifactId>mp-activity</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.mp</groupId>
+      <artifactId>mp-reward</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.mp</groupId>
+      <artifactId>mp-mock-downstream</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>mysql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>repackage</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

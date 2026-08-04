@@ -1,0 +1,33 @@
+#!/bin/sh
+# 校验 Conventional Commits 格式，见《开发规范》§1
+# 由 git-build-hook-maven-plugin 在 mvn validate 阶段安装（core.hooksPath=.githooks/）
+
+msg_file="$1"
+first_line=$(head -1 "$msg_file")
+
+# 允许 merge / revert 提交
+case "$first_line" in
+    "Merge "*|"Revert "*) exit 0 ;;
+esac
+
+pattern='^(feat|fix|refactor|perf|test|docs|chore|style)(\([a-z-]+\))?: .{1,72}$'
+
+if ! echo "$first_line" | grep -qE "$pattern"; then
+    echo ""
+    echo "✗ commit message 不符合 Conventional Commits 规范"
+    echo ""
+    echo "  实际: $first_line"
+    echo ""
+    echo "  格式: <type>(<scope>): <描述>"
+    echo "  type: feat|fix|refactor|perf|test|docs|chore|style"
+    echo "  scope: activity|reward|fission|benefit|gateway|common|api（可省略）"
+    echo ""
+    echo "  示例:"
+    echo "    feat(benefit): 实现支付回调与主单条件更新"
+    echo "    fix(reward): 修正重试时重新生成 opNo 导致的重复发放"
+    echo "    chore: 引入 Spotless 与 commit-msg 钩子"
+    echo ""
+    exit 1
+fi
+
+exit 0

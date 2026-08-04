@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # commit 校验需要看到 PR 的全部提交
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      # ① commit message 格式（本地钩子可被 --no-verify 绕过，此处兜底）
+      - name: Check commit messages
+        if: github.event_name == 'pull_request'
+        run: |
+          PATTERN='^(feat|fix|refactor|perf|test|docs|chore|style)(\([a-z-]+\))?: .{1,72}$'
+          FAILED=0
+          RANGE="origin/${{ github.base_ref }}..HEAD"
+          while IFS= read -r msg; do
+            case "$msg" in
+              "Merge "*|"Revert "*) continue ;;
+            esac
+            if ! echo "$msg" | grep -qE "$PATTERN"; then
+              echo "::error::不符合 Conventional Commits: $msg"
+              FAILED=1
+            fi
+          done < <(git log --format=%s "$RANGE")
+          exit $FAILED
+
+      # ② 代码格式
+      - name: Spotless check
+        run: mvn -B spotless:check
+
+      # ③ 编译
+      - name: Compile
+        run: mvn -B clean compile
+
+      # ④ 单测（surefire，*Test.java）
+      - name: Unit tests
+        run: mvn -B test
+
+      # ⑤⑥ 集成测试（failsafe，*IT.java）+ Flyway 从零执行
+      #    Testcontainers 每次起全新容器，迁移必须从零跑通
+      - name: Integration tests
+        run: mvn -B verify
+
+# 注意：CI 不跑 mvn validate 装 git 钩子 —— CI 环境不需要钩子，
+# 且 git-build-hook-maven-plugin 在 detached HEAD 下可能报错。
