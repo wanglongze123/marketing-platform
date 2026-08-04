@@ -61,6 +61,9 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private static final Logger log = LoggerFactory.getLogger(BenefitOrderServiceImpl.class);
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    /** 单号碰撞重试次数。UUIDv7 连撞三次实际不可能，超出即视为库层异常而非碰撞 */
+    private static final int BIZ_NO_RETRY = 3;
+
     // V0/V1 单进程用 Spring 注入；V3 拆服务后改回 @DubboReference(protocol="tri")
     @Autowired private ActivityService activityService;
     @Autowired private RewardService rewardService;
@@ -111,37 +114,29 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         }
 
         List<SnapshotItem> snapshot = buildSnapshot(sku);
-        String bizNo = BizNoGenerator.bizNo();
+        String priceSnapshot =
+                toJson(Map.of("listPrice", sku.getListPrice(), "salePrice", sku.getSalePrice()));
+        String benefitSnapshot = toJson(snapshot);
 
-        // 事务一：建单 + 写操作记录
-        PlayBizRecord record;
-        try {
-            record =
-                    tx.createOrder(
-                            req,
-                            bizNo,
-                            sku.getSalePrice(),
-                            // 读活动当前版本并冻结，而非硬编码 —— 逻辑与终态一致，V1 阶段该值恒为 1
-                            activity.getCurVersion(),
-                            toJson(
-                                    Map.of(
-                                            "listPrice", sku.getListPrice(),
-                                            "salePrice", sku.getSalePrice())),
-                            toJson(snapshot));
-        } catch (DuplicateKeyException e) {
-            // uk_idempotent 命中：同一 clientReqNo 重复下单，返回原单（《开发规范》§7.3）
-            log.info(
-                    "createTrade duplicated, return existing order, user={}, clientReqNo={}",
-                    req.getUserId(),
-                    req.getClientReqNo());
-            return toCreateResp(findByIdempotent(req));
+        // 读活动当前版本并冻结，而非硬编码 —— 逻辑与终态一致，V1 阶段该值恒为 1
+        Insert inserted =
+                insertOrder(
+                        req,
+                        sku.getSalePrice(),
+                        activity.getCurVersion(),
+                        priceSnapshot,
+                        benefitSnapshot);
+        if (inserted.duplicated()) {
+            return toCreateResp(inserted.record());
         }
+
+        String bizNo = inserted.record().getPlayBizRecordNo();
 
         // 事务外：调支付下单。事务内调 RPC 违反《开发规范》§7.4
         PayCreateReq payReq = new PayCreateReq();
         payReq.setOutTradeNo(bizNo);
-        payReq.setAmount(record.getOrderAmount());
-        payReq.setCurrency(record.getCurrency());
+        payReq.setAmount(inserted.record().getOrderAmount());
+        payReq.setCurrency(inserted.record().getCurrency());
         payReq.setUserId(req.getUserId());
         PayCreateResp payResp = mockPayService.createPay(payReq);
 
@@ -152,10 +147,59 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
 
         // 事务二：回填支付单号
         tx.fillTradeNo(bizNo, payResp.getTradeNo());
-        record.setTradeNo(payResp.getTradeNo());
+        inserted.record().setTradeNo(payResp.getTradeNo());
 
         log.info("createTrade done, bizNo={}, tradeNo={}", bizNo, payResp.getTradeNo());
-        return toCreateResp(record);
+        return toCreateResp(inserted.record());
+    }
+
+    /** 建单结果：{@code duplicated} 为真时 {@code record} 是已存在的原单。 */
+    private record Insert(PlayBizRecord record, boolean duplicated) {}
+
+    /**
+     * 建单，区分两种唯一冲突。
+     *
+     * <p>{@code play_biz_record} 上有三道唯一索引，冲突原因不同、处置也不同：
+     *
+     * <ul>
+     *   <li>{@code uk_idempotent} —— 同一 clientReqNo 重复下单，是幂等命中，返回原单（《开发规范》§7.3）
+     *   <li>{@code uk_biz_no} —— 单号生成碰撞。UUIDv7 概率极低但非零，<b>生成器只是概率保证， 唯一索引才是确定性保证</b>，故换号重试而非返回原单
+     * </ul>
+     *
+     * <p>两者不能合并处理：把碰撞当幂等命中，会把<b>另一个用户的订单</b>作为本次结果返回。 反过来把幂等命中当碰撞去重试，则会为同一请求建出第二笔单。
+     */
+    private Insert insertOrder(
+            CreateTradeReq req,
+            long salePrice,
+            int configVersion,
+            String priceSnapshot,
+            String benefitSnapshot) {
+        for (int attempt = 1; attempt <= BIZ_NO_RETRY; attempt++) {
+            String bizNo = BizNoGenerator.bizNo();
+            try {
+                return new Insert(
+                        tx.createOrder(
+                                req,
+                                bizNo,
+                                salePrice,
+                                configVersion,
+                                priceSnapshot,
+                                benefitSnapshot),
+                        false);
+            } catch (DuplicateKeyException e) {
+                PlayBizRecord existing = findByIdempotent(req);
+                if (existing != null) {
+                    log.info(
+                            "createTrade duplicated, return existing order, user={}, clientReqNo={}",
+                            req.getUserId(),
+                            req.getClientReqNo());
+                    return new Insert(existing, true);
+                }
+                // 幂等键查不到 → 冲突来自单号本身，换一个再试
+                log.warn("bizNo collision, retry {}/{}, bizNo={}", attempt, BIZ_NO_RETRY, bizNo);
+            }
+        }
+        throw new BizException(ErrorCode.DOWNSTREAM_UNKNOWN, "业务单号连续冲突，建单失败");
     }
 
     // ------------------------------------------------------------------
