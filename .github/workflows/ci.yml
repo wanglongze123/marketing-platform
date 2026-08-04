@@ -57,5 +57,10 @@ jobs:
       - name: Integration tests
         run: mvn -B verify
 
+      # ⑦ 文档一致性：文档之间 + 文档与仓库实际状态
+      #    放在最后 —— 前六项失败时文档对不对已无意义
+      - name: Docs consistency
+        run: python3 docs/check-docs.py
+
 # 注意：CI 不跑 mvn validate 装 git 钩子 —— CI 环境不需要钩子，
 # 且 git-build-hook-maven-plugin 在 detached HEAD 下可能报错。
