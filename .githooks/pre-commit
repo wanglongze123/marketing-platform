@@ -2,6 +2,31 @@
 # 提交前检查代码格式（只查不改），见《开发规范》§0
 # 失败时跑 mvn spotless:apply 后重新提交
 
+# git 钩子在非交互 shell 下执行，不读 .zshrc / .bash_profile —— 那里 export 的
+# JAVA_HOME 到不了这里。表现是终端里 mvn 跑得好好的，一提交就报
+# 「JAVA_HOME 未正确定义」。故此处自行解析：先用已有值，再按《环境与依赖》
+# §1.1 的 brew formula 路径兜底（Apple Silicon / Intel 两处）。
+if [ ! -x "$JAVA_HOME/bin/java" ]; then
+    for candidate in \
+        "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home" \
+        "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+    do
+        if [ -x "$candidate/bin/java" ]; then
+            JAVA_HOME="$candidate"
+            export JAVA_HOME
+            break
+        fi
+    done
+fi
+
+if [ ! -x "$JAVA_HOME/bin/java" ]; then
+    echo ""
+    echo "✗ 找不到 JDK 21，无法执行格式检查"
+    echo "  按《环境与依赖》§1.1 安装并设置 JAVA_HOME"
+    echo ""
+    exit 1
+fi
+
 echo "→ spotless:check ..."
 
 if ! mvn -q -o spotless:check 2>/dev/null; then
