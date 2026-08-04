@@ -17,17 +17,17 @@ import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 /**
- * 统一异常处理：对外只输出 {@code {code, message, data, traceId}}，不暴露内部四分类语义。
+ * 统一异常处理：对外只输出 {@code {code, message, data, traceId}}，不暴露四分类语义。
  *
- * <p><b>两类失败分开处置</b>：
+ * <p>两类失败分开处置：
  *
  * <ul>
- *   <li><b>业务拒绝</b> —— HTTP 200 + 业务码。端侧据 code 分支，HTTP 状态留给传输层
- *   <li><b>请求级失败</b>（路由不存在、方法不支持、报文不可读）—— 保留框架给出的 4xx。 请求根本没进业务逻辑，包成 200 会要求端侧解析响应体才知道自己调错了
+ *   <li><b>业务拒绝</b> —— HTTP 200 + 业务码，端侧据 code 分支
+ *   <li><b>请求级失败</b>（路由不存在、方法不支持、报文不可读）—— 保留框架 4xx。未进业务逻辑，包成 200 会迫使端侧解析响应体才知道调错了
  * </ul>
  *
- * <p><b>为什么继承 {@link ResponseEntityExceptionHandler}</b>：Spring 已为十余种 MVC 异常定好了 正确的状态码映射，自己用
- * {@code @ExceptionHandler} 逐个枚举既易漏又会随版本失准。 此处只覆写出口处的响应体包装，状态码沿用框架判断。
+ * <p>继承 {@link ResponseEntityExceptionHandler} 以复用 Spring 对十余种 MVC 异常的状态码映射，
+ * 自行枚举既易漏又随版本失准。此处只覆写响应体包装。
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
@@ -43,10 +43,9 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     /**
-     * 兜底：未预期异常。
+     * 兜底：业务逻辑内的未预期异常。请求级异常由父类分支拦下，不应到达此处。
      *
-     * <p>只有真正到不了这里才对 —— 请求级异常应由父类分支拦下。5xxx 的语义是「结果未知， 按 UNKNOWN 查单收敛」，一个 URL 拼错的请求若报
-     * 5001，调用方会为一件根本没发生的事 发起重试与对账。把客户端错误报成服务端错误，代价不只是状态码不准。
+     * <p>5xxx 语义为「结果未知，按 UNKNOWN 查单收敛」，故客户端错误不得落到这里 —— 调用方会为一件未发生的事发起重试与对账。
      */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> onUnexpected(Exception e) {

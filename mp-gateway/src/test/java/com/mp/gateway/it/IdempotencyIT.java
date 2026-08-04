@@ -18,11 +18,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
 /**
- * V1 幂等与重入。
+ * V1 幂等与重入。对应《分阶段方案》§4.7 退出标准 8–11、15–17。
  *
- * <p>对应《分阶段方案》§4.7 退出标准 8–11、15–17。
- *
- * <p>这些用例验的是<b>「重复请求不产生第二份副作用」</b>，而非「重复请求被拒绝」—— 两者不同：前者要求第二次调用正常返回原结果，后者会让调用方误以为出错而再次重试。
+ * <p>验的是「重复请求不产生第二份副作用」，而非「重复请求被拒绝」—— 后者会让调用方误判为出错而再次重试。
  */
 class IdempotencyIT extends AbstractMySqlIT {
 
@@ -45,13 +43,9 @@ class IdempotencyIT extends AbstractMySqlIT {
     }
 
     /**
-     * 幂等命中不得把<b>别人的单</b>当成本次结果返回。
+     * 幂等命中不得返回他人订单。{@code uk_idempotent} 命中返回原单，{@code uk_biz_no} 碰撞须换号重试，合并处理会让 B 用户拿到 A 用户的单。
      *
-     * <p>{@code play_biz_record} 上三道唯一索引，冲突原因不同：{@code uk_idempotent} 是幂等命中， {@code uk_biz_no}
-     * 是单号碰撞。前者返回原单，后者必须换号重试 —— 合并处理会让 B 用户 拿到 A 用户的订单。
-     *
-     * <p><b>本用例只覆盖幂等命中一侧</b>：单号由服务内部生成，集成测试无法在不注入生成器的前提下 制造碰撞。碰撞分支由 {@code BizNoGeneratorTest} 的 10
-     * 万次无重复 + 代码 review 保证。
+     * <p><b>只覆盖幂等命中一侧</b>：单号由服务内部生成，不注入生成器无法制造碰撞。碰撞分支无自动化覆盖， 待 V2 引入注入点后补测（《分阶段方案》§4.8）。
      */
     @Test
     void idempotentHitNeverReturnsAnotherUsersOrder() {
@@ -127,10 +121,10 @@ class IdempotencyIT extends AbstractMySqlIT {
     }
 
     /**
-     * 标准 11：不同 notifySeq 的第二条回调新增操作记录，但主单状态不变。
+     * 标准 11：不同 notifySeq 的第二条回调新增操作记录，主单状态不变。
      *
-     * <p>这条最能说明 op_seq 与条件更新的分工：<b>留痕是 op_record 的事，拦截是条件更新的事</b>。 若 op_seq 取空串，第二条通知会在 uk_biz_op
-     * 上冲突被拒 —— 既丢了痕迹，也永远执行不到条件更新， V2 的乱序防线就架空了。
+     * <p>体现 op_seq 与条件更新的分工：留痕归 op_record，拦截归条件更新。若 op_seq 取空串， 第二条通知在 uk_biz_op
+     * 上被拒，既丢痕迹又执行不到条件更新，V2 的乱序防线随之落空。
      */
     @Test
     void secondNotifyWithDifferentSeqIsRecordedButDoesNotAdvanceState() {
@@ -188,9 +182,8 @@ class IdempotencyIT extends AbstractMySqlIT {
     /**
      * 标准 16：GRANTING 中途重入不抛 DuplicateKeyException。
      *
-     * <p>手工把主单置回 GRANTING 模拟「上一次履约发出 RPC 后进程崩溃」。重入会再次走到 三处写入：{@code op_record} 已有一行、{@code
-     * benefit_fulfillment_record} 已有两行、 主单条件更新前置状态已不匹配。三处都必须按重入路径处理 —— 任一处写成普通 insert
-     * 都会抛异常中断，而崩溃恢复恰恰是这条路径存在的理由。
+     * <p>置回 GRANTING 模拟「RPC 发出后进程崩溃」。重入时三处写入均已有数据：{@code op_record} 一行、 {@code
+     * benefit_fulfillment_record} 两行、主单条件更新前置状态不匹配。任一处写成普通 insert 都会抛异常中断崩溃恢复。
      */
     @Test
     void reentrantGrantWhileGrantingDoesNotThrow() {

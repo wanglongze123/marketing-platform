@@ -59,7 +59,7 @@
 | `mp-common` | 结果码、四分类枚举、单号与幂等键生成、异常 |
 | `mp-api` | 对外接口定义，按服务拆五个子模块 |
 
-数据按服务分库：`db_activity` / `db_fission` / `db_benefit` / `db_reward`，禁止跨库 JOIN 与跨库事务。该形态为终态；V1/V2 阶段以单数据源承载全部表，多数据源在 V2 配置（见[分阶段方案](docs/营销活动平台-分阶段方案.md) §7.3 第 8 条）。
+数据按服务分库：`db_activity` / `db_fission` / `db_benefit` / `db_reward`，禁止跨库 JOIN 与跨库事务。V1 以单数据源承载全部表，多数据源在 V2 配置（[分阶段方案](docs/营销活动平台-分阶段方案.md) §7.3 第 8 条）。
 
 ## 一致性设计
 
@@ -121,7 +121,7 @@ mvn verify                            # 编译、单测、集成测试
 mvn -pl mp-gateway spring-boot:run
 ```
 
-权益售卖正向链路演示（演示数据由 seed 脚本初始化，活动 `ACT_DEMO_001`、SKU `SKU_DEMO_001` 售价 99 元）：
+权益售卖正向链路演示。演示数据由 seed 脚本初始化：活动 `ACT_DEMO_001`、SKU `SKU_DEMO_001`、售价 99 元、含两个分属不同供应方的权益项。
 
 ```bash
 # ① 下单，返回 bizNo 与 tradeNo

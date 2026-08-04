@@ -23,10 +23,9 @@ import org.junit.jupiter.api.Test;
 /**
  * 八项形状冻结的机器化校验，对应《分阶段方案》§4.7 退出标准 21、23–27、29。
  *
- * <p><b>为什么写成测试而不是靠 review</b>：这些约束在 V2/V3 每次改动时都要重新成立，而人读代码 只在写的当天可靠。四个月后有人把 {@code
- * advanceGrantStatus} 的 {@code WHERE} 去掉，评审 未必看得出来 —— 但这里会红。
+ * <p>写成测试而非人工核对：这些约束在 V2/V3 每次改动时都需重新成立。若有人去掉 {@code advanceGrantStatus} 的 {@code WHERE}，此处会红。
  *
- * <p>是 {@code *Test} 不是 {@code *IT}：纯静态检查，不需要数据库。
+ * <p>命名为 {@code *Test} 而非 {@code *IT}：纯静态检查，不依赖数据库。
  */
 class ShapeFreezeTest {
 
@@ -40,8 +39,7 @@ class ShapeFreezeTest {
     /**
      * 失败值刻意拼写不同：{@code RetStatus.FAIL} 是下游回报，{@code OpStatus.FAILED} 是本地判断。
      *
-     * <p>若两者同名，把下游的 UNKNOWN 误写进本地态、或反过来，编译期与运行期都不会报错， 要到对账发现「本地记为失败、下游其实成功」时才暴露 —— 那时钱已经赔出去了。拼写不同
-     * 使这类错至少在 code review 里显形。
+     * <p>若同名，两者互串编译期与运行期均不报错，要到对账发现「本地记为失败、下游实际成功」时才暴露。
      */
     @Test
     void downstreamResultAndLocalStatusUseDifferentFailureSpelling() {
@@ -104,9 +102,8 @@ class ShapeFreezeTest {
     // ------------------------------------------------------------------
 
     /**
-     * {@code GrantRewardReq} 的字段必须对两个玩法都成立。
-     *
-     * <p>掺进 orderId / tradeNo / skuId，裂变接入时就得加一批可空字段或另开一个方法 —— 而「同一个能力有两个入口」正是中台化想避免的东西。
+     * {@code GrantRewardReq} 的字段须对两个玩法都成立。掺进 orderId / tradeNo / skuId，裂变接入时就要加一批可空字段或另开方法，
+     * 使同一能力出现两个入口。
      */
     @Test
     void grantRewardRequestCarriesNoPlaySpecificConcept() {

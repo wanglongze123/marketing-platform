@@ -157,16 +157,14 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private record Insert(PlayBizRecord record, boolean duplicated) {}
 
     /**
-     * 建单，区分两种唯一冲突。
-     *
-     * <p>{@code play_biz_record} 上有三道唯一索引，冲突原因不同、处置也不同：
+     * 建单，按冲突来源分流 —— {@code play_biz_record} 上三道唯一索引，处置相反：
      *
      * <ul>
-     *   <li>{@code uk_idempotent} —— 同一 clientReqNo 重复下单，是幂等命中，返回原单（《开发规范》§7.3）
-     *   <li>{@code uk_biz_no} —— 单号生成碰撞。UUIDv7 概率极低但非零，<b>生成器只是概率保证， 唯一索引才是确定性保证</b>，故换号重试而非返回原单
+     *   <li>{@code uk_idempotent}：幂等命中，返回原单（《开发规范》§7.3）
+     *   <li>{@code uk_biz_no}：单号碰撞，换号重试。生成器是概率保证，唯一索引才是确定性保证
      * </ul>
      *
-     * <p>两者不能合并处理：把碰撞当幂等命中，会把<b>另一个用户的订单</b>作为本次结果返回。 反过来把幂等命中当碰撞去重试，则会为同一请求建出第二笔单。
+     * <p>合并处理的后果：碰撞当幂等命中会返回<b>另一用户的订单</b>；幂等命中当碰撞则为同一请求建出第二笔单。
      */
     private Insert insertOrder(
             CreateTradeReq req,
