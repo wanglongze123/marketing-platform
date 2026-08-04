@@ -148,10 +148,12 @@ macOS 环境搭建注意事项见[环境与依赖](docs/营销活动平台-环�
 | --- | --- |
 | [技术方案](docs/营销活动平台-技术方案.md) | 架构、DDL、接口、时序、一致性实现、监控压测 |
 | [分阶段方案](docs/营销活动平台-分阶段方案.md) | 阶段划分、形状冻结清单、各阶段退出标准 |
-| [开发规范](docs/营销活动平台-开发规范.md) | 工程结构、建表、幂等键、事务边界、review 约定 |
+| [开发规范](docs/营销活动平台-开发规范.md) | 工程结构、建表、幂等键、事务边界、合入前检查 |
 | [环境与依赖](docs/营销活动平台-环境与依赖.md) | 版本锁定、环境搭建、中间件配置 |
 | [PRD](docs/营销活动平台-PRD.md) | 业务需求与验收标准 |
 
 ## 协作约定
 
-`main` + 短分支 + PR + squash merge。提交遵循 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/v1.0.0/)，编码规范采用《阿里巴巴 Java 开发手册》黄山版，格式由 Spotless（AOSP 风格）统一。详见[开发规范](docs/营销活动平台-开发规范.md)。
+`main` + 短分支 + PR + squash merge。提交遵循 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/v1.0.0/)，编码规范采用《阿里巴巴 Java 开发手册》黄山版，格式由 Spotless（AOSP 风格）统一。
+
+合入前提为 CI 七项全绿（commit 格式、Spotless、编译、单测、集成测试、Flyway 从零执行、文档一致性），review 非必需。涉及资金路径的变更由提交者按[开发规范](docs/营销活动平台-开发规范.md) §11 自查并在 PR 中给出结论。

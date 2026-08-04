@@ -185,6 +185,12 @@ def main():
     else:
         check(False, '§7.3 章节未找到')
 
+    # review 闸已于 V1 取消（《分阶段方案》§4.8）。若某处又写回「review 通过方可合入」，
+    # 与《开发规范》§2 的「合入前提：CI 全绿」直接矛盾 —— 两条并存时不知道该信哪条。
+    gate = [k for k, t in txt.items() if re.search(r'review\s*通过.{0,6}方?可?合入', t)]
+    check(not gate, 'review 未被重新写成合入闸'
+          + (f'  出现于: {gate}' if gate else ''))
+
     print()
     print('=' * 66)
     print('退出标准编号连续性')
