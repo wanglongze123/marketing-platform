@@ -1,0 +1,22 @@
+CREATE TABLE marketing_activity (
+  id              BIGINT       NOT NULL AUTO_INCREMENT,
+  activity_id     VARCHAR(64)  NOT NULL COMMENT '活动业务号',
+  name            VARCHAR(128) NOT NULL,
+  play_type       VARCHAR(32)  NOT NULL COMMENT 'FISSION / BENEFIT_SELL',
+  scene           VARCHAR(64)  NOT NULL COMMENT '场景路由',
+  status          VARCHAR(16)  NOT NULL COMMENT 'DRAFT/SCHEDULED/ONLINE/PAUSED/ENDED',
+  start_time      DATETIME(3)  NOT NULL,
+  end_time        DATETIME(3)  NOT NULL,
+  city_scope      VARCHAR(512) NULL COMMENT 'JSON 数组，空=不限',
+  channel_scope   VARCHAR(512) NULL,
+  crowd_rule      JSON         NULL,
+  risk_rule       JSON         NULL,
+  cur_version     INT          NOT NULL DEFAULT 0 COMMENT '当前发布配置版本',
+  operator        VARCHAR(64)  NULL COMMENT '最近一次创建/发布/状态变更的操作人（BR-C-27）',
+  deleted         TINYINT      NOT NULL DEFAULT 0 COMMENT '软删除标志（配置类表）',
+  create_time     DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  update_time     DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_activity_id (activity_id),
+  KEY idx_scene_status (scene, status, start_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='活动主表';

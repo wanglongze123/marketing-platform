@@ -1,0 +1,20 @@
+CREATE TABLE benefit_sku (
+  id                     BIGINT      NOT NULL AUTO_INCREMENT,
+  sku_id                 VARCHAR(64) NOT NULL,
+  activity_id            VARCHAR(64) NOT NULL,
+  sku_name               VARCHAR(128) NOT NULL,
+  sku_type               VARCHAR(32) NOT NULL COMMENT 'SINGLE_PACK/MONTH_CARD',
+  sale_status            VARCHAR(16) NOT NULL COMMENT 'ON_SALE/PAUSED/SOLD_OUT/OFFLINE',
+  list_price             BIGINT      NOT NULL COMMENT '划线价，分',
+  sale_price             BIGINT      NOT NULL COMMENT '售卖价，分',
+  benefit_package_id     VARCHAR(64) NOT NULL,
+  package_version        INT         NOT NULL,
+  refund_rule_id         VARCHAR(64) NULL,
+  inventory_rule_id      VARCHAR(64) NULL,
+  purchase_limit_rule_id VARCHAR(64) NULL,
+  create_time            DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  update_time            DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_sku_id (sku_id),
+  KEY idx_activity (activity_id, sale_status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='售卖商品';
