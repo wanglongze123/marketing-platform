@@ -1,99 +1,143 @@
 # marketing-platform
 
-营销活动平台：**裂变**（社交邀请，纯补贴）+ **权益售卖**（支付履约，含退款回收）两个玩法，共用活动配置、资格决策、统一发奖三项公共能力。
+营销活动平台。把「用户完成某个行为 → 获得奖励」抽象成可配置的玩法，让新活动上线不必重复开发资格判断、发奖对接、订单管理、对账补偿这四件事。
+
+首期落两个形态完全不同的玩法，用它们验证抽象是否成立：
+
+| | 裂变 | 权益售卖 |
+| --- | --- | --- |
+| 用户行为 | 邀请好友完成任务 | 支付购买权益包 |
+| 资金方向 | 纯补贴（平台出钱） | 用户付钱（涉及退款） |
+| 触发凭证 | 确权事件 | 支付回调 |
+| 逆向链路 | 无 | 退款 + 权益回收 |
 
 ---
 
-## 克隆后第一件事
+## 这个项目在解决什么
 
-```bash
-mvn validate
+**核心难题不是「消息会不会丢」，而是「调用下游超时后，它到底执行了没有」。**
+
+发奖 RPC 超时的那一刻，调用方面临三个选择：
+
+- 判**失败** → 若下游其实成功了，触发补偿会把已发的权益回收、或重新发一次 → **一个奖发两次**
+- 直接**重试** → 同样可能重复发放
+- 判**成功** → 若下游其实失败了，用户付了钱没拿到东西
+
+三个都可能造成资金损失。正确做法是**保持中间态，以原幂等号主动查单**，让下游告诉你真实结果。
+
+这一条判断贯穿了整个系统的设计：
+
+```java
+switch (rpcResult.getRetStatus()) {
+    case SUCCESS    -> advanceToTerminal();
+    case FAIL       -> compensate();                    // 只有这一类允许判失败
+    case PROCESSING -> scheduleQuery(opNo, LONG_BACKOFF);   // 30s → 2m → 10m
+    case UNKNOWN    -> scheduleQuery(opNo, SHORT_BACKOFF);  // 1s → 5s → 30s
+}
 ```
 
-**必须先跑这一条**，否则 git 钩子不生效，commit message 与格式检查都不会拦你。
+`PROCESSING` 与 `UNKNOWN` 不能合并：前者下游已确认受理、最终会有通知，高频查单是浪费；后者连请求是否到达都不知道，资金悬空，必须尽快查证。
 
-> `git-build-hook-maven-plugin` 在 `validate` 阶段把 `.githooks/` 装为仓库钩子（`core.hooksPath`）。
-> 本地钩子可被 `--no-verify` 绕过，CI 端会重复校验一次。
+## 关键设计
 
-## 跑起来
+**四层防线，各挡一类失效**
 
-```bash
-mvn validate                    # ① 装 git 钩子（仅首次）
-docker compose up -d mysql      # ② 起 MySQL
-mvn verify                      # ③ 编译 + 单测 + 集成测试
-mvn -pl mp-gateway spring-boot:run   # ④ 启动（单进程，其余模块 injvm 调用）
+| 层 | 手段 | 挡什么 |
+| --- | --- | --- |
+| L1 | 凭证签名 | 篡改价格、伪造请求 |
+| L2 | 分布式锁 | 并发碰撞（**这是性能优化，不是正确性保证**） |
+| L3 | 唯一索引 | 重复执行（**正确性的最终兜底**） |
+| L4 | 操作记录 + 可靠任务 | 结果未定 → 查单收敛 |
+
+常见误区是把 L2 当正确性保证。锁会因超时、Redis 故障、GC 停顿而失效——失效时正确性必须仍然成立，所以真正兜底的是 L3。
+
+**幂等三道闸**
+
+唯一索引保护的是**幂等键的唯一性**，不是**业务动作的唯一性**。客服在后台连点两次退款、各自生成一个退款号，第一类索引全部放行。所以需要三道：
+
+1. 幂等键唯一 —— 挡同一个键发两次（网络重传、任务重试）
+2. 单据级唯一 `uk_biz_op(bizNo, opType, opSeq)` —— 挡同一业务语义生成了两个不同的键
+3. 主单条件更新 `WHERE status = 期望值` —— 挡乱序到达的回调
+
+**幂等键必须确定性可重算**
+
+若键由 UUID 生成，唯一索引只挡得住网络重传，挡不住业务重入——同一动作重试两次得到两个键，两条记录都能插入。因此一律确定性字符串拼接，来源必须是外部输入或已落库的稳定值：
+
+```java
+grantOpNo   = bizNo + "_G_" + providerType     // 一次调用 = 一个供应方
+payCallback = tradeNo + "_" + notifySeq        // status 不入键，否则乱序通知两条都能插入
+refundNo    = bizNo + "_R_" + refundReqNo      // 取上游请求号，不是内部计数器
 ```
 
-冒烟验证：
+**两个玩法的收敛点**
+
+`FissionFollowerDone`（裂变确权）与 `payCallback`（支付回调）入参、上游、触发条件完全不同，但在架构上占据同一位置——都是「确权事件 → 触发公共能力层发放」。这是后段能被两个玩法复用的根因，也是接第二个玩法时才能被真正验证的设计。
+
+## 架构
+
+```
+接入层      gateway                              鉴权、限流、路由
+              ↓
+玩法层      fission        benefit-order         各玩法私有逻辑
+              ↓                  ↓
+公共能力层  activity  ·  reward                  两玩法共用
+              ↓                  ↓
+下游        mock 支付  ·  mock 供应方             外部系统（本期 mock）
+```
+
+依赖严格自上而下，**由 `pom.xml` 编译期强制**：上层可依赖下层（允许跨层），下层不得依赖上层，同层不互调。写反了构建直接失败，不依赖 code review 的注意力。
+
+一致性只用一套机制：**可靠任务表**。任务写入与业务状态变更同一本地事务，宕机重启后调度器续跑。RocketMQ 只用于跨层事件广播（供应方回调打到公共能力层，若同步 RPC 回调玩法层就构成下层调上层）——事件负责**加速**收敛，查单任务负责**保证**收敛。
+
+## 技术栈
+
+JDK 21（虚拟线程）· Spring Boot 3.5 · Dubbo 3.3 · MySQL 8 · MyBatis-Plus · Redis/Redisson · RocketMQ · Flyway · Testcontainers · k6
+
+选型的价值在于「为什么不用备选」，逐项理由见[技术方案](docs/营销活动平台-技术方案.md) §2。举一例：不用 Seata，因为本方案的难点是「下游结果未知」而非「多库事务回滚」，而下游是外部系统本就无法回滚；既然可轮询的持久任务表无论如何都要存在，再叠分布式事务框架就是同一职责的两套实现。
+
+## 开发进度
+
+分三阶段，每一刀落在「能不能演示一个现象」上，而非「模块做完没」。
+
+| 阶段 | 目标 | 演示什么 | 状态 |
+| --- | --- | --- | --- |
+| **V0** | 工程骨架 | CI 全绿，冒烟链路贯穿四层 | ✅ |
+| **V1** | 跑通 | 下单 → 支付回调 → 发放 → 查得到 | 进行中 |
+| **V2** | 扛住 | 注入超时能自动收敛不重复发放；500VU 抢 100 不超卖 | |
+| **V3** | 铺开 | 新玩法接入后段零改动；kill 实例任务被接管 | |
+
+先做权益售卖再做裂变：前者链路短、状态机简单，适合把「主单 + 操作记录 + 可靠任务」这套骨架立起来。
+
+各阶段范围与退出标准见[分阶段方案](docs/营销活动平台-分阶段方案.md)。
+
+## 快速开始
+
+```bash
+mvn validate                          # 装 git 钩子（克隆后必跑一次）
+docker compose up -d mysql
+mvn verify                            # 编译 + 单测 + 集成测试
+mvn -pl mp-gateway spring-boot:run
+```
 
 ```bash
 curl http://localhost:8080/smoke/BZ001
-# {"code":0,"data":{"bizNo":"BZ001","chain":["gateway","benefit-order","reward","mock"]},"traceId":"..."}
+# {"code":0,"data":{"chain":["gateway","benefit-order","reward","mock"]},"traceId":"..."}
 ```
 
-## 环境要求
-
-| 项 | 版本 |
-| --- | --- |
-| JDK | 21 |
-| Maven | 3.9+ |
-| Docker Desktop | 最新（Apple Silicon 需先装 Rosetta） |
-
-**装环境前先读 [`docs/营销活动平台-环境与依赖.md`](docs/营销活动平台-环境与依赖.md) §1.1**，里面记了三个实测踩过的坑：Homebrew 换清华源、Docker 要 Rosetta、镜像加速必配。照着装能少走弯路。
-
-## 常用命令
-
-| 命令 | 作用 |
-| --- | --- |
-| `mvn spotless:apply` | 格式化代码，**提交前必跑** |
-| `mvn spotless:check` | 检查格式（CI 会跑） |
-| `mvn test` | 单测（`*Test.java`） |
-| `mvn verify` | 单测 + 集成测试 + 格式检查，**合入前必跑** |
-| `mvn dependency:tree -Dverbose` | 排查版本冲突 |
-| `docker compose down -v` | 删库重建，验证 Flyway 从零可跑 |
-
-## 工程结构
-
-```
-mp-common/            结果码、四分类枚举、单号生成、幂等键工具、异常
-mp-api/               对外接口定义（按服务拆 5 个子 module）
-mp-gateway/           接入层，V0/V1 的单进程启动入口
-mp-activity/          公共能力：活动配置、资格决策
-mp-reward/            公共能力：统一发奖
-mp-fission/           玩法：裂变（V3 填充）
-mp-benefit-order/     玩法：权益售卖
-mp-mock-downstream/   mock 支付、mock 供应方
-```
-
-**依赖方向由 `pom.xml` 编译期强制**：上层可依赖下层（可跨层），下层不得依赖上层，同层不互调。
+环境要求 JDK 21 / Maven 3.9+ / Docker。macOS 装环境的三个坑（Homebrew 换源、Docker 需 Rosetta、镜像加速）见[环境与依赖](docs/营销活动平台-环境与依赖.md) §1.1。
 
 ## 文档
 
-| 文档 | 回答什么 |
+| | |
 | --- | --- |
-| [技术方案](docs/营销活动平台-技术方案.md) | 怎么设计的、为什么这么设计。**终态**，不随阶段修改 |
-| [分阶段方案](docs/营销活动平台-分阶段方案.md) | 每阶段从终态里裁哪一块、做到什么程度算完 |
-| [开发规范](docs/营销活动平台-开发规范.md) | 提交、分支、建表、幂等键、review 的项目专属约定 |
-| [环境与依赖](docs/营销活动平台-环境与依赖.md) | 用什么版本、怎么跑起来 |
+| [技术方案](docs/营销活动平台-技术方案.md) | 怎么设计的、为什么这么设计。终态，不随阶段修改 |
+| [分阶段方案](docs/营销活动平台-分阶段方案.md) | 每阶段裁哪一块、做到什么程度算完 |
+| [开发规范](docs/营销活动平台-开发规范.md) | 建表、幂等键、事务边界、review 的项目专属约定 |
+| [环境与依赖](docs/营销活动平台-环境与依赖.md) | 版本锁定与环境搭建 |
 | [PRD](docs/营销活动平台-PRD.md) | 业务需求 |
 
-改完文档跑 `python3 docs/check-docs.py`，17 项机器可核对的一致性会自动回归。
+## 贡献
 
-## 当前阶段
+三人协作。`main` + 短分支 + PR + squash merge；提交遵循 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/v1.0.0/)；编码规范以《阿里巴巴 Java 开发手册》黄山版为准，格式由 Spotless 统一（提交前跑 `mvn spotless:apply`）。
 
-**V0 · 工程骨架** —— 不写业务代码，只验证构建、CI、测试基础设施能跑通。
-
-`/smoke` 链路与 `smoke_record` 表是脚手架，V1 结束时删除。
-
-阶段划分与退出标准见[分阶段方案](docs/营销活动平台-分阶段方案.md)。
-
-## 提交规范
-
-[Conventional Commits 1.0.0](https://www.conventionalcommits.org/zh-hans/v1.0.0/)：
-
-```
-feat(benefit): 实现支付回调与主单条件更新
-fix(reward): 修正重试时重新生成 opNo 导致的重复发放
-```
-
-编码规范以《阿里巴巴 Java 开发手册》黄山版为准，格式由 Spotless（AOSP 风格）统一。
+Code review 使用对抗式提示词，只提供 diff 与当阶段方案、不提供实现过程——同频的 review 找不出问题。模板见[开发规范](docs/营销活动平台-开发规范.md) §11.3。
