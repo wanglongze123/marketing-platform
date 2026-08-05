@@ -79,6 +79,7 @@ class BranchRejectionIT extends AbstractMySqlIT {
 
         assertThat(
                         count(
+                                benefitJdbc,
                                 "SELECT COUNT(*) FROM play_biz_record WHERE client_req_no = ?",
                                 "REQ_qty3"))
                 .isZero();

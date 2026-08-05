@@ -1,14 +1,43 @@
 spring:
   datasource:
-    url: jdbc:mysql://localhost:3306/db_reward?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
-    username: root
-    password: root
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    hikari:
-      # 虚拟线程开启后连接池必须显式设定，否则数万虚拟线程抢连接会打爆数据库
-      maximum-pool-size: 20
-      minimum-idle: 5
-  flyway:
-    enabled: true
-    locations: classpath:db/migration
-    baseline-on-migrate: true
+    # 四库各用仅授权自身 schema 的账号 —— 权限隔离让「禁止跨库 JOIN」在运行期成为约束，
+    # 而非仅靠多数据源（同实例下带库名限定的 JOIN 照常执行）。见《分阶段方案》§5.6 ①
+    #
+    # 迁移由各模块的 DataSourceConfig 以独立 Flyway 实例驱动，不走 spring.flyway —— 后者
+    # 只认单一 DataSource，四库共用一份配置正是 V1 九张表全落 db_reward 的原因。
+    activity:
+      url: jdbc:mysql://localhost:3306/db_activity?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_activity
+      password: mp_activity
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        # 虚拟线程开启后连接池必须显式设定，否则数万虚拟线程抢连接会打爆数据库。
+        # 四池总上限 40，低于 MySQL 默认 max_connections=151
+        maximum-pool-size: 10
+        minimum-idle: 2
+    benefit:
+      url: jdbc:mysql://localhost:3306/db_benefit?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_benefit
+      password: mp_benefit
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        # 主链路所在库，池最大
+        maximum-pool-size: 15
+        minimum-idle: 5
+    reward:
+      url: jdbc:mysql://localhost:3306/db_reward?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_reward
+      password: mp_reward
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 2
+    fission:
+      url: jdbc:mysql://localhost:3306/db_fission?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_fission
+      password: mp_fission
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        # V3 才有表，池留最小
+        maximum-pool-size: 5
+        minimum-idle: 1

@@ -49,10 +49,12 @@ class ForwardChainIT extends AbstractMySqlIT {
         // 标准 18：下单时冻结的配置版本 = 活动当前版本，不是硬编码
         Integer curVersion =
                 num(
+                        activityJdbc,
                         "SELECT cur_version FROM marketing_activity WHERE activity_id = ?",
                         ACTIVITY_ID);
         assertThat(
                         num(
+                                benefitJdbc,
                                 "SELECT config_version FROM play_biz_record WHERE play_biz_record_no = ?",
                                 bizNo))
                 .isEqualTo(curVersion)
@@ -71,7 +73,7 @@ class ForwardChainIT extends AbstractMySqlIT {
         assertThat(fulfillmentCount(bizNo)).isEqualTo(2);
 
         List<Map<String, Object>> rows =
-                jdbc.queryForList(
+                benefitJdbc.queryForList(
                         "SELECT benefit_item_id, provider_type, provider_order_no, grant_status,"
                                 + " grant_op_no FROM benefit_fulfillment_record"
                                 + " WHERE play_biz_record_no = ? ORDER BY benefit_item_id",
@@ -100,7 +102,7 @@ class ForwardChainIT extends AbstractMySqlIT {
         String bizNo = payAndGrant("op");
 
         List<Map<String, Object>> ops =
-                jdbc.queryForList(
+                benefitJdbc.queryForList(
                         "SELECT op_type, op_seq, status, idempotent_key FROM play_op_record"
                                 + " WHERE play_biz_record_no = ? ORDER BY id",
                         bizNo);
@@ -134,7 +136,7 @@ class ForwardChainIT extends AbstractMySqlIT {
         assertThat(grantItemCount(bizNo)).isEqualTo(2);
 
         List<Map<String, Object>> records =
-                jdbc.queryForList(
+                rewardJdbc.queryForList(
                         "SELECT op_no, play_type, result FROM reward_grant_record"
                                 + " WHERE biz_order_no = ? ORDER BY op_no",
                         bizNo);
@@ -153,7 +155,7 @@ class ForwardChainIT extends AbstractMySqlIT {
         // 若误用全局下标，第二组会是 1，而 uk_op_item 的第一维 op_no 已隔开不同组 —— 全局编号既多余又会
         // 让「按供应方重发某一组」时下标对不上
         List<Integer> seqs =
-                jdbc.queryForList(
+                rewardJdbc.queryForList(
                         "SELECT i.item_seq FROM reward_grant_item i JOIN reward_grant_record r"
                                 + " ON i.op_no = r.op_no WHERE r.biz_order_no = ? ORDER BY i.op_no",
                         Integer.class,
@@ -167,7 +169,7 @@ class ForwardChainIT extends AbstractMySqlIT {
         String bizNo = payAndGrant("mid");
 
         List<Map<String, Object>> ops =
-                jdbc.queryForList(
+                benefitJdbc.queryForList(
                         "SELECT status, downstream_result, finish_time, create_time"
                                 + " FROM play_op_record WHERE play_biz_record_no = ? AND op_type = ?",
                         bizNo,
