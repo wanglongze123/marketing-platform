@@ -1,0 +1,304 @@
+/* 设计令牌。颜色只在此处定义，组件用 var() 引用 */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #fafbfc;
+  --line: #e5e7eb;
+  --line-soft: #f1f3f5;
+
+  --text: #1a1d21;
+  --text-2: #4b5563;
+  --text-3: #8b94a3;
+
+  --brand: #2b5cff;
+  --brand-dark: #1e46d6;
+  --brand-soft: #eef2ff;
+
+  --sell: #ff6b2c;
+  --sell-soft: #fff3ec;
+
+  --ok: #00a870;
+  --ok-soft: rgba(0, 168, 112, 0.1);
+  --wait: #d97706;
+  --wait-soft: rgba(217, 119, 6, 0.11);
+  --error: #e5384b;
+  --error-soft: rgba(229, 56, 75, 0.09);
+  --unknown: #8a5cf6;
+  --unknown-soft: rgba(138, 92, 246, 0.11);
+  --idle: #8b94a3;
+  --idle-soft: #f1f3f5;
+
+  --radius: 10px;
+  --radius-sm: 7px;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 16px rgba(16, 24, 40, 0.05);
+  --shadow-lg: 0 12px 48px rgba(16, 24, 40, 0.18);
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font:
+    14px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text-2);
+  padding: 7px 13px;
+  border-radius: var(--radius-sm);
+  transition: border-color 0.14s, color 0.14s, background 0.14s;
+}
+button:hover:not(:disabled) {
+  border-color: var(--text-3);
+  color: var(--text);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+button.primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+  font-weight: 500;
+}
+button.primary:hover:not(:disabled) {
+  background: var(--brand-dark);
+  border-color: var(--brand-dark);
+  color: #fff;
+}
+button.sell {
+  background: linear-gradient(135deg, var(--sell), #ff8f52);
+  border: none;
+  color: #fff;
+  font-weight: 600;
+}
+button.sell:hover:not(:disabled) {
+  filter: brightness(1.06);
+  color: #fff;
+}
+button.ghost {
+  background: transparent;
+}
+button.sm {
+  padding: 4px 10px;
+  font-size: 12.5px;
+}
+
+input,
+select {
+  font: inherit;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+}
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--brand);
+}
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-3);
+  margin-bottom: 5px;
+}
+
+.card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.card-head {
+  padding: 13px 17px;
+  border-bottom: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 600;
+  font-size: 14px;
+}
+.card-head .sub {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-3);
+  font-family: var(--mono);
+}
+.card-head .right {
+  margin-left: auto;
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+.card-body {
+  padding: 17px;
+}
+
+.muted {
+  color: var(--text-3);
+}
+.empty {
+  padding: 36px 20px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 13px;
+}
+.empty .icon {
+  font-size: 26px;
+  opacity: 0.5;
+  display: block;
+  margin-bottom: 8px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th,
+td {
+  text-align: left;
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--line-soft);
+}
+th {
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-weight: 500;
+  font-size: 12px;
+  white-space: nowrap;
+}
+tbody tr:last-child td {
+  border-bottom: none;
+}
+.table-wrap {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 108px 1fr;
+  gap: 7px 13px;
+  font-size: 13px;
+}
+.kv dt {
+  color: var(--text-3);
+  margin: 0;
+}
+.kv dd {
+  margin: 0;
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+pre {
+  margin: 0;
+  padding: 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-x: auto;
+  max-height: 260px;
+  overflow-y: auto;
+  color: var(--text-2);
+}
+
+.note {
+  font-size: 12.5px;
+  color: var(--text-3);
+  background: var(--surface-2);
+  border-left: 2px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 13px;
+  line-height: 1.65;
+}
+.note code {
+  font-size: 11.5px;
+}
+
+.alert {
+  padding: 11px 13px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+}
+.alert.error {
+  background: var(--error-soft);
+  color: #b3243a;
+}
+.alert.wait {
+  background: var(--wait-soft);
+  color: #92500a;
+}
+.alert.unknown {
+  background: var(--unknown-soft);
+  color: #6b3fd4;
+}
+.alert.ok {
+  background: var(--ok-soft);
+  color: #007a52;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+}
+.row > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.section-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 13px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.section-title .count {
+  font-weight: 400;
+  font-size: 13px;
+  color: var(--text-3);
+}
+.section-title .right {
+  margin-left: auto;
+  display: flex;
+  gap: 7px;
+}
