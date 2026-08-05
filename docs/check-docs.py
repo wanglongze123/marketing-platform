@@ -93,12 +93,20 @@ def check_against_repo(txt):
         check(want in env, f'{label} 版本与 pom 一致（{want}）')
 
     # HTTP 端点：文档表格中的路径必须在 controller 中存在
-    ctl = ''.join(read(os.path.join('mp-gateway/src/main/java/com/mp/gateway/controller', f))
-                  for f in os.listdir(os.path.join(
-                      ROOT, 'mp-gateway/src/main/java/com/mp/gateway/controller')))
-    base = re.search(r'@RequestMapping\("([^"]+)"\)', ctl)
-    paths = {(base.group(1) if base else '') + p
-             for p in re.findall(r'@(?:Get|Post|Put|Delete)Mapping\("([^"]*)"\)', ctl)}
+    #
+    # 逐文件解析，不把多个 controller 拼成一个字符串 —— 拼接后 re.search 只会取到
+    # 第一个 @RequestMapping，把它当成所有路径的 base。加第二个 controller 时，
+    # 字母序在前者的 base 会套到别人的方法上，使已实现的端点被判为「未实现」。
+    ctl_dir = 'mp-gateway/src/main/java/com/mp/gateway/controller'
+    paths = set()
+    for f in os.listdir(os.path.join(ROOT, ctl_dir)):
+        if not f.endswith('.java'):
+            continue
+        src = read(os.path.join(ctl_dir, f))
+        base = re.search(r'@RequestMapping\("([^"]+)"\)', src)
+        prefix = base.group(1) if base else ''
+        paths |= {prefix + p
+                  for p in re.findall(r'@(?:Get|Post|Put|Delete)Mapping\("([^"]*)"\)', src)}
     quoted_paths = set(re.findall(r'`(/api/[\w/{}-]+)`', txt['分阶段方案']))
     ghost_paths = {p for p in quoted_paths if p not in paths}
     check(not ghost_paths, f'文档列出的 HTTP 端点均已实现（{len(paths)} 个）'

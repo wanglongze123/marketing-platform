@@ -199,10 +199,12 @@ class ShapeFreezeTest {
     @Test
     void noCatchAllMapsToFailure() {
         try (Stream<Path> files = Files.walk(REPO)) {
+            // 用 Path 元素比对而非字符串含 "/src/main/java/" —— Windows 上分隔符是 "\"，
+            // 字符串匹配恒为空集，assertThat(sources).isNotEmpty() 会在此处失败，
+            // 使这道闸在 Windows 开发机上根本没检查到任何文件
             List<Path> sources =
-                    files.filter(p -> p.toString().endsWith(".java"))
-                            .filter(p -> p.toString().contains("/src/main/java/"))
-                            .filter(p -> !p.toString().contains("/target/"))
+                    files.filter(p -> p.getFileName().toString().endsWith(".java"))
+                            .filter(p -> underSrcMainJava(p) && !contains(p, "target"))
                             .toList();
             assertThat(sources).isNotEmpty();
 
@@ -248,6 +250,28 @@ class ShapeFreezeTest {
 
     private static List<String> names(Class<? extends Enum<?>> type) {
         return Arrays.stream(type.getEnumConstants()).map(Enum::name).toList();
+    }
+
+    /** 路径中是否含某个目录名。按 Path 元素比对，跨平台。 */
+    private static boolean contains(Path p, String dirName) {
+        for (Path part : p) {
+            if (part.toString().equals(dirName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 是否位于 {@code src/main/java} 之下。要求三段连续，避免误纳 src/test/java。 */
+    private static boolean underSrcMainJava(Path p) {
+        for (int i = 0; i + 2 < p.getNameCount(); i++) {
+            if (p.getName(i).toString().equals("src")
+                    && p.getName(i + 1).toString().equals("main")
+                    && p.getName(i + 2).toString().equals("java")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String read(String relative) {

@@ -1,15 +1,23 @@
 package com.mp.benefit.service.impl;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mp.api.activity.dto.ActivityConfResp;
 import com.mp.api.activity.service.ActivityService;
+import com.mp.api.benefit.dto.BenefitItemView;
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.CreateTradeResp;
 import com.mp.api.benefit.dto.FulfillmentItem;
+import com.mp.api.benefit.dto.OpRecordItem;
+import com.mp.api.benefit.dto.OrderListItem;
 import com.mp.api.benefit.dto.PayCallbackReq;
+import com.mp.api.benefit.dto.QueryOrderPageReq;
+import com.mp.api.benefit.dto.QueryOrderPageResp;
 import com.mp.api.benefit.dto.QueryOrderResp;
+import com.mp.api.benefit.dto.QuerySkuResp;
 import com.mp.api.benefit.service.BenefitOrderService;
 import com.mp.api.mock.dto.PayCreateReq;
 import com.mp.api.mock.dto.PayCreateResp;
@@ -22,10 +30,12 @@ import com.mp.benefit.entity.BenefitFulfillmentRecord;
 import com.mp.benefit.entity.BenefitItem;
 import com.mp.benefit.entity.BenefitSku;
 import com.mp.benefit.entity.PlayBizRecord;
+import com.mp.benefit.entity.PlayOpRecord;
 import com.mp.benefit.repository.BenefitFulfillmentRecordMapper;
 import com.mp.benefit.repository.BenefitItemMapper;
 import com.mp.benefit.repository.BenefitSkuMapper;
 import com.mp.benefit.repository.PlayBizRecordMapper;
+import com.mp.benefit.repository.PlayOpRecordMapper;
 import com.mp.benefit.service.OrderTxService;
 import com.mp.benefit.service.SnapshotItem;
 import com.mp.common.enums.ErrorCode;
@@ -64,6 +74,9 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     /** 单号碰撞重试次数。UUIDv7 连撞三次实际不可能，超出即视为库层异常而非碰撞 */
     private static final int BIZ_NO_RETRY = 3;
 
+    /** 列表页每页上限。兜底而非信任调用方传值 —— 不限制时一次大 size 请求即可拖垮库 */
+    private static final int MAX_PAGE_SIZE = 100;
+
     // V0/V1 单进程用 Spring 注入；V3 拆服务后改回 @DubboReference(protocol="tri")
     @Autowired private ActivityService activityService;
     @Autowired private RewardService rewardService;
@@ -75,17 +88,22 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private final PlayBizRecordMapper bizRecordMapper;
     private final BenefitFulfillmentRecordMapper fulfillmentMapper;
 
+    /** 只读查询用。写路径的操作记录一律经 OrderTxService，不走这里 */
+    private final PlayOpRecordMapper opRecordMapper;
+
     public BenefitOrderServiceImpl(
             OrderTxService tx,
             BenefitSkuMapper skuMapper,
             BenefitItemMapper itemMapper,
             PlayBizRecordMapper bizRecordMapper,
-            BenefitFulfillmentRecordMapper fulfillmentMapper) {
+            BenefitFulfillmentRecordMapper fulfillmentMapper,
+            PlayOpRecordMapper opRecordMapper) {
         this.tx = tx;
         this.skuMapper = skuMapper;
         this.itemMapper = itemMapper;
         this.bizRecordMapper = bizRecordMapper;
         this.fulfillmentMapper = fulfillmentMapper;
+        this.opRecordMapper = opRecordMapper;
     }
 
     // ------------------------------------------------------------------
@@ -369,6 +387,167 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         resp.setConfigVersion(order.getConfigVersion());
         resp.setFulfillments(items);
         return resp;
+    }
+
+    // ------------------------------------------------------------------
+    // ⑤ 只读查询
+    //
+    // 无副作用：不写状态、不落操作记录、不调下游，故不经 OrderTxService。
+    // 加这些接口不改变《分阶段方案》§4.6 的「活动/SKU 管理接口范围外」——
+    // 那条约束配置写入，此处只读。
+    // ------------------------------------------------------------------
+
+    @Override
+    public QueryOrderPageResp queryOrderPage(QueryOrderPageReq req) {
+        // 状态取值先校验再进 SQL：非法值直接拒绝而非当作「查不到」返回空列表 ——
+        // 后者会让端侧把拼错的枚举名误读成「该状态下没有订单」
+        PayStatus payStatus = parseOrNull(req.getPayStatus(), PayStatus.class, "payStatus");
+        GrantStatus grantStatus =
+                parseOrNull(req.getGrantStatus(), GrantStatus.class, "grantStatus");
+
+        int page = Math.max(req.getPage(), 1);
+        // 上限兜底：不限制时一次 size=100000 的请求可拖垮库
+        int size = Math.min(Math.max(req.getSize(), 1), MAX_PAGE_SIZE);
+
+        LambdaQueryWrapper<PlayBizRecord> q =
+                Wrappers.<PlayBizRecord>lambdaQuery()
+                        .eq(hasText(req.getUserId()), PlayBizRecord::getUserId, req.getUserId())
+                        .eq(
+                                hasText(req.getActivityId()),
+                                PlayBizRecord::getActivityId,
+                                req.getActivityId())
+                        .eq(payStatus != null, PlayBizRecord::getPayStatus, name(payStatus))
+                        .eq(grantStatus != null, PlayBizRecord::getGrantStatus, name(grantStatus))
+                        // 与 idx_user(user_id, create_time) 的排序方向一致
+                        .orderByDesc(PlayBizRecord::getCreateTime)
+                        .orderByDesc(PlayBizRecord::getId);
+
+        Page<PlayBizRecord> result = bizRecordMapper.selectPage(Page.of(page, size), q);
+
+        List<OrderListItem> items = new ArrayList<>(result.getRecords().size());
+        for (PlayBizRecord r : result.getRecords()) {
+            OrderListItem item = new OrderListItem();
+            item.setBizNo(r.getPlayBizRecordNo());
+            item.setSkuId(r.getSkuId());
+            item.setActivityId(r.getActivityId());
+            item.setPayStatus(PayStatus.valueOf(r.getPayStatus()));
+            item.setGrantStatus(GrantStatus.valueOf(r.getGrantStatus()));
+            item.setRefundStatus(RefundStatus.valueOf(r.getRefundStatus()));
+            item.setOrderAmount(r.getOrderAmount());
+            item.setPayAmount(r.getPayAmount());
+            item.setTradeNo(r.getTradeNo());
+            item.setCreateTime(r.getCreateTime());
+            items.add(item);
+        }
+
+        QueryOrderPageResp resp = new QueryOrderPageResp();
+        resp.setItems(items);
+        resp.setTotal(result.getTotal());
+        resp.setPage(page);
+        resp.setSize(size);
+        return resp;
+    }
+
+    @Override
+    public QuerySkuResp querySku(String skuId) {
+        if (!hasText(skuId)) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "skuId 不能为空");
+        }
+        BenefitSku sku =
+                skuMapper.selectOne(
+                        Wrappers.<BenefitSku>lambdaQuery().eq(BenefitSku::getSkuId, skuId));
+        if (sku == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "商品不存在: " + skuId);
+        }
+
+        // 不筛 sale_status：下架商品也要能查详情 —— 历史订单详情页需要展示它卖的是什么。
+        // 是否允许下单由 createTrade 判定，不在查询接口这里拦
+        List<BenefitItem> items =
+                itemMapper.selectList(
+                        Wrappers.<BenefitItem>lambdaQuery()
+                                .eq(BenefitItem::getBenefitPackageId, sku.getBenefitPackageId())
+                                .eq(BenefitItem::getPackageVersion, sku.getPackageVersion())
+                                .orderByAsc(BenefitItem::getGrantOrder));
+
+        List<BenefitItemView> views = new ArrayList<>(items.size());
+        for (BenefitItem i : items) {
+            BenefitItemView v = new BenefitItemView();
+            v.setBenefitItemId(i.getBenefitItemId());
+            v.setBenefitType(i.getBenefitType());
+            v.setProviderType(i.getProviderType());
+            v.setProviderProductId(i.getProviderProductId());
+            v.setCore(i.getIsCore() != null && i.getIsCore() == 1);
+            v.setGrantOrder(i.getGrantOrder());
+            views.add(v);
+        }
+
+        QuerySkuResp resp = new QuerySkuResp();
+        resp.setSkuId(sku.getSkuId());
+        resp.setActivityId(sku.getActivityId());
+        resp.setSkuName(sku.getSkuName());
+        resp.setSkuType(sku.getSkuType());
+        resp.setSaleStatus(sku.getSaleStatus());
+        resp.setListPrice(sku.getListPrice());
+        resp.setSalePrice(sku.getSalePrice());
+        resp.setBenefitPackageId(sku.getBenefitPackageId());
+        resp.setPackageVersion(sku.getPackageVersion());
+        resp.setItems(views);
+        return resp;
+    }
+
+    @Override
+    public List<OpRecordItem> queryOpRecords(String bizNo) {
+        // 单不存在时抛错而非回空列表：空列表无法区分「单不存在」与「单存在但无操作记录」，
+        // 而后者本身就是异常信号（建单必落 CREATE_TRADE 记录），排查时不能被掩盖
+        if (findByBizNo(bizNo) == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
+        }
+
+        List<PlayOpRecord> records =
+                opRecordMapper.selectList(
+                        Wrappers.<PlayOpRecord>lambdaQuery()
+                                .eq(PlayOpRecord::getPlayBizRecordNo, bizNo)
+                                .orderByAsc(PlayOpRecord::getCreateTime)
+                                .orderByAsc(PlayOpRecord::getId));
+
+        List<OpRecordItem> items = new ArrayList<>(records.size());
+        for (PlayOpRecord r : records) {
+            OpRecordItem item = new OpRecordItem();
+            item.setOpNo(r.getOpNo());
+            item.setOpType(r.getOpType());
+            item.setOpSeq(r.getOpSeq());
+            // status 与 downstreamResult 分列回显，不合并
+            item.setStatus(r.getStatus());
+            item.setDownstreamResult(r.getDownstreamResult());
+            item.setRetryCount(r.getRetryCount());
+            item.setErrorCode(r.getErrorCode());
+            item.setOutOrderNo(r.getOutOrderNo());
+            item.setParentOpNo(r.getParentOpNo());
+            item.setCreateTime(r.getCreateTime());
+            item.setFinishTime(r.getFinishTime());
+            items.add(item);
+        }
+        return items;
+    }
+
+    private static boolean hasText(String s) {
+        return s != null && !s.isBlank();
+    }
+
+    private static String name(Enum<?> e) {
+        return e == null ? null : e.name();
+    }
+
+    /** 空值放过（不筛该项），非法值拒绝。 */
+    private static <E extends Enum<E>> E parseOrNull(String raw, Class<E> type, String field) {
+        if (!hasText(raw)) {
+            return null;
+        }
+        try {
+            return Enum.valueOf(type, raw);
+        } catch (IllegalArgumentException e) {
+            throw new BizException(ErrorCode.INVALID_PARAM, field + " 取值非法: " + raw);
+        }
     }
 
     // ------------------------------------------------------------------
