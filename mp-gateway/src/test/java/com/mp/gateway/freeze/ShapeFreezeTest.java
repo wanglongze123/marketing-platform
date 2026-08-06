@@ -314,6 +314,56 @@ class ShapeFreezeTest {
         }
     }
 
+    /**
+     * 故障注入的两侧都必须真正读取模式，不能只有端点没有接线。
+     *
+     * <p>《分阶段方案》§5.3 要求注入「作用于 mock 供应方与 mock 支付两侧」。PR-3 初稿里 {@code payMode} 有端点、有存储、有日志，唯独 {@code
+     * MockPayServiceImpl} 不读它 —— 切了模式没有 任何效果，且不报错。这与 PR-2 的 {@code renewLease} 同族：写了 SQL 没有调用点。
+     */
+    @Test
+    void bothMockSidesActuallyReadTheInjectedMode() {
+        assertThat(
+                        read(
+                                "mp-mock-downstream/src/main/java/com/mp/mock/service/impl/"
+                                        + "MockProviderServiceImpl.java"))
+                .as("供应方必须读注入模式")
+                .contains("injector.providerMode()");
+
+        assertThat(
+                        read(
+                                "mp-mock-downstream/src/main/java/com/mp/mock/service/impl/"
+                                        + "MockPayServiceImpl.java"))
+                .as("支付侧必须读注入模式，否则 /api/fault/pay 切了没有任何效果")
+                .contains("injector.payMode()");
+    }
+
+    /**
+     * 查无计数不得复用任务的 {@code retry_count}。
+     *
+     * <p>{@code retry_count} 由调度器对所有非终态结果自增，{@code PROCESSING} 也算在内 —— 于是「连续查无 3 次」退化成「查询 3
+     * 次且最后一次查无」。下游回过 {@code PROCESSING} 即表明已受理， 此后重发是对一笔已受理的请求再发一次。
+     *
+     * <p>行为由 {@code FaultInjectionIT.processingInTheMiddleResetsTheMissStreak} 验证，此处防的是 有人图省事改回
+     * {@code retry_count}。
+     */
+    @Test
+    void missStreakIsCountedSeparatelyFromRetryCount() {
+        String handler =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/task/"
+                                + "QueryGrantTaskHandler.java");
+
+        assertThat(handler)
+                .as("查无计数应独立存储，且遇 PROCESSING 归零")
+                .contains("setMissStreak")
+                .contains("currentMissStreak");
+
+        int idx = handler.indexOf("private RetStatus onMiss(");
+        assertThat(idx).as("未找到 onMiss").isGreaterThan(0);
+        String body = handler.substring(idx, Math.min(handler.length(), idx + 400));
+        assertThat(body).as("onMiss 不得用 retry_count 计连续查无").doesNotContain("getRetryCount()");
+    }
+
     /** 组合注解自身必须指定管理器，否则上一条检查只是把裸注解换了个名字。 */
     @Test
     void eachTxAnnotationDeclaresItsTransactionManager() {

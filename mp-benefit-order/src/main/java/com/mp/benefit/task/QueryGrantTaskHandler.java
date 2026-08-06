@@ -3,9 +3,12 @@ package com.mp.benefit.task;
 import com.mp.api.reward.dto.GrantRewardResp;
 import com.mp.api.reward.service.RewardService;
 import com.mp.benefit.entity.BenefitTask;
+import com.mp.benefit.repository.BenefitTaskMapper;
 import com.mp.benefit.service.OrderTxService;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.enums.TaskType;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -32,10 +35,23 @@ public class QueryGrantTaskHandler implements TaskHandler {
 
     private final RewardService rewardService;
     private final OrderTxService tx;
+    private final BenefitTaskMapper taskMapper;
 
-    public QueryGrantTaskHandler(RewardService rewardService, OrderTxService tx) {
+    public QueryGrantTaskHandler(
+            RewardService rewardService, OrderTxService tx, BenefitTaskMapper taskMapper) {
         this.rewardService = rewardService;
         this.tx = tx;
+        this.taskMapper = taskMapper;
+    }
+
+    /** 从 payload 读连续查无次数，缺失即 0。 */
+    private static int currentMissStreak(BenefitTask task) {
+        String payload = task.getPayload();
+        if (payload == null || !payload.contains("missStreak")) {
+            return 0;
+        }
+        Matcher m = Pattern.compile("\"missStreak\"\\s*:\\s*(\\d+)").matcher(payload);
+        return m.find() ? Integer.parseInt(m.group(1)) : 0;
     }
 
     @Override
@@ -64,7 +80,10 @@ public class QueryGrantTaskHandler implements TaskHandler {
                 return RetStatus.SUCCESS;
             }
             case PROCESSING -> {
-                // 下游已受理、仍在处理：长退避继续查，不重发 —— 重发对已受理的请求毫无意义
+                // 下游已受理、仍在处理：长退避继续查，不重发 —— 重发对已受理的请求毫无意义。
+                // 同时把查无计数归零：「连续」查无才构成「原调用未到达」的证据，中间夹一次
+                // PROCESSING 就说明它到达过了
+                taskMapper.setMissStreak(task.getId(), 0);
                 log.info("queryGrant still PROCESSING, bizNo={}, opNo={}", bizNo, opNo);
                 return RetStatus.PROCESSING;
             }
@@ -75,13 +94,17 @@ public class QueryGrantTaskHandler implements TaskHandler {
     }
 
     /**
-     * 查无一次。累计到阈值才落重发任务。
+     * 查无一次。<b>连续</b>累计到阈值才落重发任务。
      *
-     * <p>用任务自身的 {@code retry_count} 计数，不另建计数器：它由 SQL 自增、随任务持久化，实例重启
-     * 或任务被接管都不丢。另建内存计数器会在接管时归零，重发因此永不触发。
+     * <p>计数存在任务的 {@code payload} 里，随任务持久化 —— 实例重启或任务被接管都不丢，内存计数器 会在接管时归零使重发永不触发。
+     *
+     * <p><b>不复用 {@code retry_count}</b>：它由调度器对所有非终态结果自增，{@code PROCESSING} 也算在内， 于是「连续查无 3
+     * 次」会退化成「查询 3 次且最后一次查无」，中间夹杂的 {@code PROCESSING} 被一并 计入 —— 而下游回过 {@code PROCESSING}
+     * 即表明它已受理，此后重发是对一笔已受理的请求再发一次。
      */
     private RetStatus onMiss(BenefitTask task, String bizNo, String opNo) {
-        int misses = (task.getRetryCount() == null ? 0 : task.getRetryCount()) + 1;
+        int misses = currentMissStreak(task) + 1;
+        taskMapper.setMissStreak(task.getId(), misses);
         if (misses < MISS_THRESHOLD) {
             log.info(
                     "queryGrant found nothing ({}/{}), keep querying, bizNo={}, opNo={}",

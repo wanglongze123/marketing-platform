@@ -124,6 +124,19 @@ public interface BenefitTaskMapper extends BaseMapper<BenefitTask> {
             @Param("owner") String owner,
             @Param("leaseSeconds") int leaseSeconds);
 
+    /**
+     * 记录连续查无次数，写入 {@code payload}。
+     *
+     * <p><b>不能复用 {@code retry_count}</b>：后者由调度器对所有非终态结果自增，{@code PROCESSING} 也算 在内 —— 于是「连续查无 3
+     * 次」会退化成「查询 3 次且最后一次查无」。下游回过 {@code PROCESSING} 即表明它已受理，此后的查无更可能是查询侧抖动，此时重发是对一笔已受理的请求再发一次。
+     *
+     * <p>存 {@code payload} 而非内存：随任务持久化，实例重启或任务被接管都不丢。
+     */
+    @Update(
+            "UPDATE benefit_task SET payload = JSON_SET(COALESCE(payload, '{}'), '$.missStreak',"
+                    + " #{missStreak}) WHERE id = #{id}")
+    int setMissStreak(@Param("id") Long id, @Param("missStreak") int missStreak);
+
     /** 可观测端点用：按业务号取全部任务快照。 */
     @Select("SELECT * FROM benefit_task WHERE biz_no = #{bizNo} ORDER BY task_type, op_no")
     List<BenefitTask> selectByBizNo(@Param("bizNo") String bizNo);

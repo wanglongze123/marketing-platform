@@ -83,6 +83,13 @@ public class RewardServiceImpl implements RewardService {
             // 重发被 put-if-absent 挡下并返回首次的单号，不产生第二笔发放
             log.info("grantReward re-dispatched with original opNo, opNo={}", opNo);
             record = existingRecord(opNo);
+            if (record == null) {
+                // 记录在 queryGrant 与此处之间消失（人工清理等）。返回 UNKNOWN 而非抛异常：
+                // 这条链路本身就是在收敛未定态，此处抛出会让调用方连「未定」都拿不到
+                log.warn(
+                        "grantReward record vanished between query and re-dispatch, opNo={}", opNo);
+                return buildResp(RetStatus.UNKNOWN, List.of());
+            }
         }
 
         // ② 事务外调下游。逐项调用，各项独立记录结果

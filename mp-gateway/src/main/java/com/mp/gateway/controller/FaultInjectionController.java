@@ -7,6 +7,7 @@ import com.mp.mock.fault.FaultInjector;
 import com.mp.mock.fault.ProviderLedger;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -63,11 +64,24 @@ public class FaultInjectionController {
     /**
      * 复位全部模式。
      *
-     * <p><b>不清账本</b>：账本是「下游已发放」的事实记录，演示中途清掉会让「无重复发放」的断言 失去依据。清账本单独走 {@code /ledger}，且只在开始一轮新演示时用。
+     * <p><b>不清账本</b>：账本是「下游已发放」的事实记录，演示中途清掉会让「无重复发放」的断言 失去依据。清账本单独走 {@code DELETE
+     * /api/fault/ledger}，且只在开始一轮新演示时用。
      */
     @PostMapping("/reset")
     public ApiResponse<Map<String, Object>> reset() {
         injector.reset();
+        return ok(snapshot());
+    }
+
+    /**
+     * 清空下游账本，只在开始一轮新演示时用。
+     *
+     * <p>与 {@code /reset} 分开：模式是「接下来怎么表现」，账本是「已经发生过什么」。演示中途把 账本清掉，「无重复发放」的断言就失去了依据 ——
+     * 它恰恰要靠账本里只有一条来证明。
+     */
+    @DeleteMapping("/ledger")
+    public ApiResponse<Map<String, Object>> clearLedger() {
+        ledger.clear();
         return ok(snapshot());
     }
 

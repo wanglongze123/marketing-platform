@@ -221,6 +221,39 @@ class FaultInjectionIT extends AbstractMySqlIT {
         assertThat(ledger.contains(bizNo + "_G_PROVIDER_A")).isFalse();
     }
 
+    /**
+     * 「连续查无满 3 次」必须真的是<b>连续</b>：中间夹杂 {@code PROCESSING} 应当重新计数。
+     *
+     * <p>下游若回过一次 {@code PROCESSING}，就说明它已经受理了这笔请求 —— 此后再查无更可能是
+     * 查询侧的抖动，而非「原调用没到达」。此时重发是对一笔已受理的请求再发一次，正是 {@code PROCESSING} 与 {@code UNKNOWN} 要分开处置的理由。
+     */
+    @Test
+    void processingInTheMiddleResetsTheMissStreak() {
+        injector.setProviderMode(FaultMode.TIMEOUT_BEFORE_COMMIT);
+        String bizNo = payFor("streak");
+        runScheduler();
+
+        // 查无两次
+        for (int i = 0; i < 2; i++) {
+            makeAllDue(bizNo);
+            runScheduler();
+        }
+        assertThat(regrantTaskCount(bizNo)).isZero();
+
+        // 下游转为「已受理、处理中」：连续查无被打断
+        injector.setProviderMode(FaultMode.PROCESSING);
+        injector.setProcessingTurns(99);
+        makeAllDue(bizNo);
+        runScheduler();
+
+        // 再查无一次。若计数正确重置，此时只是「第 1 次查无」，不该重发
+        injector.setProviderMode(FaultMode.TIMEOUT_BEFORE_COMMIT);
+        makeAllDue(bizNo);
+        runScheduler();
+
+        assertThat(regrantTaskCount(bizNo)).as("PROCESSING 打断后应重新计数，不该因累计次数达标就重发一笔已受理的请求").isZero();
+    }
+
     // ---- 辅助 ----
 
     /** 下单 + 支付成功，返回 bizNo。此时 GRANT 任务已落库待执行。 */
