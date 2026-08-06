@@ -1,0 +1,41 @@
+package com.mp.benefit.config;
+
+import com.mp.benefit.repository.PlayBizRecordMapper;
+import com.mp.benefit.service.OrderTxService;
+import com.mp.benefit.task.StockTaskHandler;
+import com.mp.common.enums.TaskType;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+/**
+ * 三类库存任务的处理器装配。
+ *
+ * <p>同一个 {@link StockTaskHandler} 按类型实例化三次，而不是写三个 {@code @Component} 类 —— 三者只差
+ * 一个动作，抄三遍会让「加载订单」「订单不存在怎么办」有三份实现，改一处漏两处。
+ *
+ * <p>动作以方法引用传入，事务边界仍在 {@link OrderTxService}：处理器本身不带 {@code @BenefitTx}， 每次调用穿过 Spring 代理才生效。
+ */
+@Configuration
+public class StockTaskConfig {
+
+    @Bean
+    public StockTaskHandler stockConsumeTaskHandler(
+            PlayBizRecordMapper bizRecordMapper, OrderTxService tx) {
+        return new StockTaskHandler(
+                TaskType.STOCK_CONSUME, bizRecordMapper, tx, OrderTxService::consumeStock);
+    }
+
+    @Bean
+    public StockTaskHandler stockReleaseTaskHandler(
+            PlayBizRecordMapper bizRecordMapper, OrderTxService tx) {
+        return new StockTaskHandler(
+                TaskType.STOCK_RELEASE, bizRecordMapper, tx, OrderTxService::releaseStock);
+    }
+
+    @Bean
+    public StockTaskHandler quotaReleaseTaskHandler(
+            PlayBizRecordMapper bizRecordMapper, OrderTxService tx) {
+        return new StockTaskHandler(
+                TaskType.QUOTA_RELEASE, bizRecordMapper, tx, OrderTxService::releaseQuota);
+    }
+}

@@ -25,7 +25,17 @@ class MultiDataSourceIT extends AbstractMySqlIT {
     void eachSchemaOwnsItsOwnMigrationHistoryAndTables() {
         assertHistoryOwnedBy(activityJdbc, "db_activity", "1001", "1090");
         assertHistoryOwnedBy(
-                benefitJdbc, "db_benefit", "1101", "1102", "1103", "1104", "1105", "1190", "2101");
+                benefitJdbc,
+                "db_benefit",
+                "1101",
+                "1102",
+                "1103",
+                "1104",
+                "1105",
+                "1190",
+                "2101",
+                "2102",
+                "2190");
         assertHistoryOwnedBy(rewardJdbc, "db_reward", "0201", "1201", "1202", "1203");
         // 裂变 V3 才填充，此处只要求历史表已建 —— 迁移目录为空时 Flyway 仍会建它
         assertThat(businessTables(fissionJdbc, "db_fission")).isEmpty();
@@ -40,7 +50,9 @@ class MultiDataSourceIT extends AbstractMySqlIT {
                         "play_biz_record",
                         "benefit_fulfillment_record",
                         "play_op_record",
-                        "benefit_task");
+                        "benefit_task",
+                        "marketing_stock",
+                        "user_purchase_quota");
         // smoke_record 由 V1203 删除，不应残留
         assertThat(businessTables(rewardJdbc, "db_reward"))
                 .containsExactlyInAnyOrder("reward_grant_record", "reward_grant_item");

@@ -6,8 +6,11 @@ import com.mp.benefit.config.BenefitTx;
 import com.mp.benefit.entity.PlayBizRecord;
 import com.mp.benefit.repository.BenefitFulfillmentRecordMapper;
 import com.mp.benefit.repository.BenefitTaskMapper;
+import com.mp.benefit.repository.MarketingStockMapper;
 import com.mp.benefit.repository.PlayBizRecordMapper;
 import com.mp.benefit.repository.PlayOpRecordMapper;
+import com.mp.benefit.repository.UserPurchaseQuotaMapper;
+import com.mp.common.enums.ErrorCode;
 import com.mp.common.enums.GrantStatus;
 import com.mp.common.enums.ItemGrantStatus;
 import com.mp.common.enums.OpStatus;
@@ -16,6 +19,7 @@ import com.mp.common.enums.PayStatus;
 import com.mp.common.enums.RefundStatus;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.enums.TaskType;
+import com.mp.common.exception.BizException;
 import com.mp.common.util.BizNoGenerator;
 import com.mp.common.util.IdempotentKeys;
 import java.time.LocalDateTime;
@@ -48,27 +52,61 @@ public class OrderTxService {
     private final PlayOpRecordMapper opRecordMapper;
     private final BenefitTaskMapper taskMapper;
     private final BenefitFulfillmentRecordMapper fulfillmentMapper;
+    private final MarketingStockMapper stockMapper;
+    private final UserPurchaseQuotaMapper quotaMapper;
 
     public OrderTxService(
             PlayBizRecordMapper bizRecordMapper,
             PlayOpRecordMapper opRecordMapper,
             BenefitTaskMapper taskMapper,
-            BenefitFulfillmentRecordMapper fulfillmentMapper) {
+            BenefitFulfillmentRecordMapper fulfillmentMapper,
+            MarketingStockMapper stockMapper,
+            UserPurchaseQuotaMapper quotaMapper) {
         this.bizRecordMapper = bizRecordMapper;
         this.opRecordMapper = opRecordMapper;
         this.taskMapper = taskMapper;
         this.fulfillmentMapper = fulfillmentMapper;
+        this.stockMapper = stockMapper;
+        this.quotaMapper = quotaMapper;
     }
 
-    /** 建单 + 写操作记录。 */
+    /**
+     * 建单 + 写操作记录 + <b>原子预占库存与限购额度，同一本地事务</b>。
+     *
+     * <p>「500 并发抢 100 库存恰好成 100 单」（PRD AC-03）就实现在这里，靠的是两条带条件的 UPDATE， 不是分布式锁：{@code WHERE total -
+     * locked - consumed >= qty} 由行锁串行化，{@code affected_rows} 即判定成败。锁只是减少走到这一步的冲突（L2），正确性由 DB
+     * 保证（L3）。
+     *
+     * <p><b>预占与建单必须同事务</b>：分开则存在「扣了库存但单没建成」的漏 —— 那部分库存再也没人 释放，可售余量永久少一份。反过来「建了单没扣库存」则直接超卖。
+     *
+     * <p><b>两处扣减的顺序是库存在前、限购在后</b>，理由是失败率：库存是全局竞争、更容易不足，先扣 它可以让多数失败请求少做一次写。顺序不影响正确性 —— 任一失败都整体回滚。
+     *
+     * @throws BizException 库存不足 {@code 1712} / 超出限购 {@code 1713}，两者均使整个事务回滚
+     */
     @BenefitTx
     public PlayBizRecord createOrder(
             CreateTradeReq req,
             String bizNo,
             long salePrice,
             int configVersion,
+            int purchaseLimitQty,
             String priceSnapshot,
             String benefitSnapshot) {
+        int qty = req.getQuantity();
+
+        // ① 预占库存。affected_rows=0 即余量不足
+        if (stockMapper.tryLock(StockKeys.stockKey(req.getSkuId()), qty) == 0) {
+            // 抛异常而非返回 false：本方法要么整体成功，要么什么都没发生。
+            // 返回 false 会让调用方有机会「忽略失败继续建单」，那就是超卖
+            throw new BizException(ErrorCode.STOCK_NOT_ENOUGH, "库存不足: " + req.getSkuId());
+        }
+
+        // ② 扣减限购额度。limitQty=0 表示不限购，跳过 —— 建一行 limit_qty=0 的记录会让
+        // 后续每次扣减都撞 used_qty + qty <= 0 而失败，等于「不限购」被实现成「一件都不能买」
+        if (purchaseLimitQty > 0) {
+            consumeQuota(req, qty, purchaseLimitQty);
+        }
+
         PlayBizRecord record = new PlayBizRecord();
         record.setPlayBizRecordNo(bizNo);
         record.setActivityId(req.getActivityId());
@@ -103,6 +141,25 @@ public class OrderTxService {
                 "",
                 OpStatus.SUCCESS.name());
         return record;
+    }
+
+    /**
+     * 扣减限购额度：先确保行存在，再原子扣减。
+     *
+     * <p>额度行是运行时数据，用户首次下单时才存在，无法预先 seed。建行走幂等 upsert —— 写成 「查不到就 insert」会让两个并发的首单同时查不到、同时
+     * insert，第二个撞 {@code uk_quota}。
+     */
+    private void consumeQuota(CreateTradeReq req, int qty, int limitQty) {
+        String periodKey = StockKeys.periodKey();
+        quotaMapper.ensureRow(
+                req.getUserId(), req.getActivityId(), req.getSkuId(), periodKey, limitQty);
+
+        if (quotaMapper.tryConsume(
+                        req.getUserId(), req.getActivityId(), req.getSkuId(), periodKey, qty)
+                == 0) {
+            throw new BizException(
+                    ErrorCode.QUOTA_EXCEEDED, "超出限购额度: " + req.getSkuId() + " 限 " + limitQty);
+        }
     }
 
     /**
@@ -156,10 +213,39 @@ public class OrderTxService {
                     // 立即可执行
                     0,
                     "{}");
+            // 库存转消耗同样落任务而非在此直接改库存（技术方案 §7.4）：同一 SKU 的库存是单行，
+            // 500 QPS 的支付通知加上下单预占全部争抢它，持锁时间还会把事务内其余三写一起拖长。
+            // 移出后回调事务只写 op_record + pay_status + 两条任务，热点行不在同步路径上
+            enqueueStockTask(bizNo, TaskType.STOCK_CONSUME);
+        } else if (target == PayStatus.PAY_FAILED) {
+            // 支付失败即交易未成立：库存与限购额度都要还回去（技术方案 §3.4 的口径表）。
+            // 与转消耗互斥 —— 两者都以本次条件更新 affected_rows=1 为前提，
+            // 而 WAIT_PAY 只能被推进一次，故两条分支不可能同时落任务
+            enqueueStockTask(bizNo, TaskType.STOCK_RELEASE);
+            enqueueStockTask(bizNo, TaskType.QUOTA_RELEASE);
         }
 
         log.info("payCallback advanced, bizNo={}, WAIT_PAY -> {}", bizNo, target);
         return true;
+    }
+
+    /**
+     * 库存类任务入队。
+     *
+     * <p><b>{@code op_no} 必须取 {@code bizNo + '_' + taskType}，不能留空串</b>（技术方案 §7.4）。每单幂等 完全由 {@code
+     * uk_biz_type_op} 承担 —— 库存 SQL 的下界 {@code WHERE locked >= ?} 提供不了： {@code locked} 是该 {@code
+     * stock_key} 下所有订单共享的计数器，A 单重复释放两次时它因别的订单 占用仍远大于 0，下界根本不会拦，结果是 A 释放了别人的预占，可售余量凭空多一份。
+     *
+     * <p>留空串则同一单可插入无数条释放任务，唯一键形同虚设 —— 这正是 §3.3 警告过的 {@code NOT NULL DEFAULT ''} 陷阱。
+     */
+    private void enqueueStockTask(String bizNo, TaskType taskType) {
+        taskMapper.enqueue(
+                BizNoGenerator.taskNo(),
+                bizNo,
+                taskType.name(),
+                bizNo + "_" + taskType.name(),
+                0,
+                "{}");
     }
 
     /** 履约启动：置 GRANTING + 落操作记录中间态。必须先于 RPC。 */
@@ -278,5 +364,63 @@ public class OrderTxService {
     @BenefitTx
     public void fillTradeNo(String bizNo, String tradeNo) {
         bizRecordMapper.fillTradeNo(bizNo, tradeNo);
+    }
+
+    // ------------------------------------------------------------------
+    // 库存类任务的执行体
+    // ------------------------------------------------------------------
+
+    /**
+     * 预占转消耗。
+     *
+     * <p><b>{@code affected_rows = 0} 返回 {@code SUCCESS} 而非失败</b>：这一步只可能因「已经转过了」 而不满足 {@code locked
+     * >= qty}，而任务重试本就是预期路径（调度器崩溃后重跑）。判失败会让 任务一直重试到死信，而实际上事情早已做完。
+     *
+     * <p>真正的「不该重复执行」由 {@code benefit_task.uk_biz_type_op} 挡在入队处，不由这里的下界挡 —— 见 {@link
+     * #enqueueStockTask}。
+     */
+    @BenefitTx
+    public RetStatus consumeStock(PlayBizRecord order) {
+        int rows =
+                stockMapper.tryConsume(StockKeys.stockKey(order.getSkuId()), order.getQuantity());
+        if (rows == 0) {
+            log.info(
+                    "stock already consumed or locked insufficient, bizNo={}",
+                    order.getPlayBizRecordNo());
+        }
+        return RetStatus.SUCCESS;
+    }
+
+    /** 释放预占。同上，{@code affected_rows = 0} 视为已释放过。 */
+    @BenefitTx
+    public RetStatus releaseStock(PlayBizRecord order) {
+        int rows =
+                stockMapper.tryRelease(StockKeys.stockKey(order.getSkuId()), order.getQuantity());
+        if (rows == 0) {
+            log.info("stock already released, bizNo={}", order.getPlayBizRecordNo());
+        }
+        return RetStatus.SUCCESS;
+    }
+
+    /**
+     * 返还限购额度。
+     *
+     * <p>只在「交易未成立」时调用（支付失败、关单）。<b>退款不返还</b> —— 限购是为了防单用户过度
+     * 占用营销资源，若「买了再退」能刷回额度，限购形同虚设。库存则相反，退款要回补，商品可以 再卖给别人。这个不对称写在技术方案 §3.4 的口径表里，是有意为之。
+     */
+    @BenefitTx
+    public RetStatus releaseQuota(PlayBizRecord order) {
+        int rows =
+                quotaMapper.tryRelease(
+                        order.getUserId(),
+                        order.getActivityId(),
+                        order.getSkuId(),
+                        StockKeys.periodKey(),
+                        order.getQuantity());
+        if (rows == 0) {
+            // 不限购的单没有额度行，命中此分支属正常
+            log.info("quota row absent or already released, bizNo={}", order.getPlayBizRecordNo());
+        }
+        return RetStatus.SUCCESS;
     }
 }

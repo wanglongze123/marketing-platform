@@ -567,6 +567,84 @@ class ShapeFreezeTest {
                 .doesNotContain("mp.consult-token.secret:");
     }
 
+    /**
+     * 库存扣减必须是<b>带条件的单条 UPDATE</b>，不得「先查余量再扣减」。
+     *
+     * <p>两条语句之间存在并发窗口：500 个线程可以同时查到「还剩 100」，然后各自扣一次。行锁只在 单条语句执行期间串行化，跨语句不成立。<b>这是 0 超卖的全部要点</b>。
+     *
+     * <p>行为由 {@code StockAndQuotaIT} 的并发用例验证。此处防的是有人为「加日志」或「先判断再报错」 把它拆成两步 ——
+     * 拆完之后串行用例照常全绿，只有并发用例会红，而并发用例最容易被当成 flaky。
+     */
+    @Test
+    void stockDeductionIsASingleConditionalUpdate() {
+        String mapper =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/repository/"
+                                + "MarketingStockMapper.java");
+
+        // 预占：余量谓词。写成 locked + qty <= total 会漏掉已消耗的部分，把卖掉的再卖一遍
+        assertThat(normalize(sqlOf(mapper, "tryLock")))
+                .as("预占必须带余量谓词，否则直接超卖")
+                .contains(normalize("total - locked - consumed >= #{qty}"));
+
+        // 转消耗：locked 减、consumed 加，缺后者会让可售余量凭空多一份
+        String consume = normalize(sqlOf(mapper, "tryConsume"));
+        assertThat(consume)
+                .as("转消耗须同时改 locked 与 consumed")
+                .contains(normalize("locked = locked - #{qty}, consumed = consumed + #{qty}"));
+        assertThat(consume).as("转消耗须带下界").contains(normalize("locked >= #{qty}"));
+
+        assertThat(normalize(sqlOf(mapper, "tryRelease")))
+                .as("释放须带下界，否则 locked 会被减成负值")
+                .contains(normalize("locked >= #{qty}"));
+
+        // 不得出现读出来再算的形态
+        assertThat(mapper).as("库存不得走 MyBatis-Plus 的无谓词更新").doesNotContain("updateById");
+    }
+
+    /**
+     * 限购扣减的上限谓词必须读<b>行内</b>的 {@code limit_qty}，不读应用传入的值。
+     *
+     * <p>传进来的那份是下单时从 SKU 读的快照，与本行可能不一致（运营刚调过限额）。以行内为准， 「限额是多少」就只有一个来源。写成 {@code <= #{limitQty}}
+     * 则并发下两个线程可以带着不同的 限额值同时扣减。
+     */
+    @Test
+    void quotaDeductionReadsTheLimitFromTheRow() {
+        String mapper =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/repository/"
+                                + "UserPurchaseQuotaMapper.java");
+
+        assertThat(normalize(sqlOf(mapper, "tryConsume")))
+                .as("限购上限谓词须读行内 limit_qty")
+                .contains(normalize("used_qty + #{qty} <= limit_qty"));
+        assertThat(normalize(sqlOf(mapper, "tryRelease")))
+                .as("返还须带下界，否则 used_qty 会被减成负值")
+                .contains(normalize("used_qty >= #{qty}"));
+    }
+
+    /**
+     * 库存类任务的 {@code op_no} 必须是确定性键，不得留空串。
+     *
+     * <p>每单幂等完全由 {@code uk_biz_type_op} 承担 —— 库存 SQL 的下界提供不了：{@code locked} 是该 {@code stock_key}
+     * 下所有订单共享的计数器，A 单重复释放两次时它因别的订单占用仍远大于 0， 下界根本不会拦，结果是 A 释放了别人的预占，可售余量凭空多一份（技术方案 §7.4）。
+     *
+     * <p>留空串则同一单可插入无数条释放任务，唯一键形同虚设 —— 这正是 §3.3 警告过的 {@code NOT NULL DEFAULT ''} 陷阱。
+     */
+    @Test
+    void stockTasksCarryADeterministicOpNo() {
+        String tx =
+                read("mp-benefit-order/src/main/java/com/mp/benefit/service/OrderTxService.java");
+
+        int idx = tx.indexOf("private void enqueueStockTask(");
+        assertThat(idx).as("未找到 enqueueStockTask").isGreaterThan(0);
+        String body = tx.substring(idx, Math.min(tx.length(), idx + 500));
+
+        assertThat(normalize(body))
+                .as("库存任务的 op_no 须取 bizNo + '_' + taskType，留空串则唯一键形同虚设")
+                .contains(normalize("bizNo + \"_\" + taskType.name()"));
+    }
+
     /** V0 脚手架必须已清除 —— 留着会让读者以为它是链路的一部分（标准 32）。 */
     @Test
     void v0ScaffoldingIsRemoved() {
