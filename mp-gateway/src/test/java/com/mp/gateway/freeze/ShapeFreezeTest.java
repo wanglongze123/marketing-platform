@@ -165,10 +165,60 @@ class ShapeFreezeTest {
         String tx =
                 read("mp-benefit-order/src/main/java/com/mp/benefit/service/OrderTxService.java");
 
-        assertThat(tx).contains("@Transactional");
+        assertThat(tx).contains("@BenefitTx");
         for (String forbidden :
                 List.of("rewardService", "mockPayService", "activityService", "Thread.sleep")) {
             assertThat(tx).as("事务类内不得出现 %s", forbidden).doesNotContain(forbidden);
+        }
+    }
+
+    /**
+     * 事务边界必须绑定到具体的库，不得使用裸 {@code @Transactional}（《分阶段方案》§5.6 ②）。
+     *
+     * <p>四套数据源下不存在「默认」事务管理器：不带 {@code transactionManager} 属性的注解按类型 注入取到别库的管理器，本库的写各自自动提交 ——
+     * 不报错、不回滚。这与 V1 缺陷 ①（同类内部 调用注解不生效）同属一族，失效形态都是「没有事务」而非「事务出错」。
+     *
+     * <p>本检查只能证明「写了限定」，证明不了「限定指向正确的库」—— 后者由 {@code TransactionBindingIT} 的回滚用例验证，二者缺一不可。
+     */
+    @Test
+    void txServicesUseSchemaBoundAnnotationsInsteadOfBareTransactional() {
+        try (Stream<Path> files = Files.walk(REPO)) {
+            List<Path> txServices =
+                    files.filter(p -> p.toString().contains("/src/main/java/"))
+                            .filter(p -> !p.toString().contains("/target/"))
+                            .filter(p -> p.getFileName().toString().endsWith("TxService.java"))
+                            .toList();
+            assertThat(txServices).as("至少应存在 OrderTxService").isNotEmpty();
+
+            for (Path p : txServices) {
+                // 只看代码行：类注释里解释「为什么不用裸 @Transactional」是应当鼓励的，不该判红
+                List<String> bare =
+                        Files.readAllLines(p, StandardCharsets.UTF_8).stream()
+                                .map(String::strip)
+                                .filter(line -> !line.startsWith("*") && !line.startsWith("//"))
+                                .filter(line -> line.startsWith("@Transactional"))
+                                .toList();
+                // 组合注解自身携带 transactionManager，业务类里不应再出现原始注解
+                assertThat(bare).as("%s 应使用带库限定的组合注解，不得出现裸 @Transactional", p).isEmpty();
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("扫描源码失败", e);
+        }
+    }
+
+    /** 组合注解自身必须指定管理器，否则上一条检查只是把裸注解换了个名字。 */
+    @Test
+    void eachTxAnnotationDeclaresItsTransactionManager() {
+        for (String file :
+                List.of(
+                        "mp-activity/src/main/java/com/mp/activity/config/ActivityTx.java",
+                        "mp-benefit-order/src/main/java/com/mp/benefit/config/BenefitTx.java",
+                        "mp-reward/src/main/java/com/mp/reward/config/RewardTx.java")) {
+            String src = read(file);
+            assertThat(src)
+                    .as("%s 必须绑定具体的事务管理器并对全部异常回滚", file)
+                    .contains("transactionManager = ")
+                    .contains("rollbackFor = Exception.class");
         }
     }
 

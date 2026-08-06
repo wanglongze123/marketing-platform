@@ -2,6 +2,7 @@ package com.mp.benefit.service;
 
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.PayCallbackReq;
+import com.mp.benefit.config.BenefitTx;
 import com.mp.benefit.entity.PlayBizRecord;
 import com.mp.benefit.repository.PlayBizRecordMapper;
 import com.mp.benefit.repository.PlayOpRecordMapper;
@@ -16,7 +17,6 @@ import java.time.LocalDateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 /**
  * 订单的事务边界，独立成 bean。
@@ -25,6 +25,10 @@ import org.springframework.transaction.annotation.Transactional;
  * 同类内部调用不经过代理，注解静默失效 —— 事务看起来配了、实际没开。这类缺陷不报错， 要到「状态改了但操作记录没落库」时才暴露，而那正是可靠任务表最怕的缺口。
  *
  * <p>本类的每个方法即一个事务单元，严格遵守《开发规范》§7.4：事务内只有 DB 操作， 无 RPC、无发消息、无 sleep。
+ *
+ * <p><b>只用 {@link BenefitTx} 而非裸 {@code @Transactional}</b>：四套数据源下不存在「默认」 事务管理器，不带 {@code
+ * transactionManager} 属性的注解按类型注入会取到别库的管理器，{@code db_benefit} 的写 各自自动提交 ——
+ * 同样不报错。这与上一段的代理失效同属一族：事务问题的失效形态是「没有事务」 而非「事务出错」（《分阶段方案》§5.6 ②）。
  */
 @Service
 public class OrderTxService {
@@ -43,7 +47,7 @@ public class OrderTxService {
     }
 
     /** 建单 + 写操作记录。 */
-    @Transactional(rollbackFor = Exception.class)
+    @BenefitTx
     public PlayBizRecord createOrder(
             CreateTradeReq req,
             String bizNo,
@@ -92,7 +96,7 @@ public class OrderTxService {
      *
      * @return 是否真的推进了状态；false 表示条件不满足（重复或乱序通知）
      */
-    @Transactional(rollbackFor = Exception.class)
+    @BenefitTx
     public boolean applyPayCallback(PayCallbackReq req, PlayBizRecord order, PayStatus target) {
         String bizNo = order.getPlayBizRecordNo();
 
@@ -129,7 +133,7 @@ public class OrderTxService {
     }
 
     /** 履约启动：置 GRANTING + 落操作记录中间态。必须先于 RPC。 */
-    @Transactional(rollbackFor = Exception.class)
+    @BenefitTx
     public void startGrant(PlayBizRecord order) {
         String bizNo = order.getPlayBizRecordNo();
 
@@ -150,7 +154,7 @@ public class OrderTxService {
     }
 
     /** 履约收尾：回写主单与操作记录终态。 */
-    @Transactional(rollbackFor = Exception.class)
+    @BenefitTx
     public void finishGrant(String bizNo, GrantStatus target) {
         bizRecordMapper.advanceGrantStatus(bizNo, GrantStatus.GRANTING.name(), target.name());
 
@@ -164,7 +168,7 @@ public class OrderTxService {
     }
 
     /** 回填支付单号。独立短事务，不改任何状态。 */
-    @Transactional(rollbackFor = Exception.class)
+    @BenefitTx
     public void fillTradeNo(String bizNo, String tradeNo) {
         bizRecordMapper.fillTradeNo(bizNo, tradeNo);
     }
