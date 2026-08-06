@@ -29,11 +29,13 @@ class TokenAndPricingIT extends AbstractMySqlIT {
 
     @Autowired private ConsultTokenSigner signer;
 
-    /** 用例可能改 SKU 价格，跑完恢复，否则后续用例的比价会莫名失配。 */
+    /** 用例可能改 SKU 的价格与权益包版本，跑完恢复，否则后续用例会莫名失配。 */
     @AfterEach
-    void restorePrice() {
+    void restoreSku() {
         benefitJdbc.update(
-                "UPDATE benefit_sku SET sale_price = ? WHERE sku_id = ?", SALE_PRICE, SKU_ID);
+                "UPDATE benefit_sku SET sale_price = ?, package_version = 1 WHERE sku_id = ?",
+                SALE_PRICE,
+                SKU_ID);
     }
 
     // ------------------------------------------------------------------
@@ -159,7 +161,7 @@ class TokenAndPricingIT extends AbstractMySqlIT {
      */
     @Test
     void expiredTokenIsRejected() {
-        String expired = signer.sign("U_expired", ACTIVITY_ID, SKU_ID, SALE_PRICE, 1, -60);
+        String expired = signer.sign("U_expired", ACTIVITY_ID, SKU_ID, SALE_PRICE, 1, 1, -60);
 
         CreateTradeReq req = newTradeReq("expired");
         req.setUserId("U_expired");
@@ -192,6 +194,50 @@ class TokenAndPricingIT extends AbstractMySqlIT {
         req.setConsultToken(quote.getConsultToken());
 
         assertRejectedWithoutOrder(req, ErrorCode.PRICE_MISMATCH);
+    }
+
+    /**
+     * <b>价格没变但权益包换版，旧凭证同样必须拒绝。</b>
+     *
+     * <p>这一条是 PR-4 自查时补的，补之前是<b>真实缺陷</b>：初版只把 {@code activityId} 签进凭证， 而权益内容取决于 {@code
+     * sku.benefitPackageId + sku.packageVersion}，与活动版本无关。于是
+     *
+     * <ol>
+     *   <li>用户按「月卡 + 券」咨询，看到 99 元
+     *   <li>运营把 SKU 改指向新版权益包，只剩券，价格仍是 99 元
+     *   <li>用户下单：验签过（user/activity/sku 全对）、比价过（99 == 99）
+     *   <li>建单时 {@code buildSnapshot} 读的是<b>新</b>版本 —— 用户按月卡+券付了钱，只拿到券
+     * </ol>
+     *
+     * <p>比价拦不住它 —— 价格根本没变。当时的判断「活动改版但价格未变时用户看到的承诺没有变化」
+     * 是错的：<b>价格没变不代表承诺没变</b>。修法是把决定权益内容的那个版本签进凭证并比对。
+     */
+    @Test
+    void packageVersionChangeIsRejectedEvenWhenPriceIsUnchanged() {
+        // 新版权益包：只有券，没有月卡
+        benefitJdbc.update(
+                "INSERT INTO benefit_package (benefit_package_id, package_version, package_name,"
+                        + " grant_policy) VALUES ('PKG_DEMO_001', 2, '缩水权益包', 'COMBINE')");
+        benefitJdbc.update(
+                "INSERT INTO benefit_item (benefit_item_id, benefit_package_id, package_version,"
+                        + " benefit_type, provider_type, provider_product_id, is_core,"
+                        + " grant_order, rollback_supported)"
+                        + " VALUES ('ITEM_DEMO_B', 'PKG_DEMO_001', 2, 'COUPON', 'PROVIDER_B',"
+                        + " 'PROD_B_001', 1, 1, 1)");
+
+        PreConsultResp quote = consult("pkgSwap");
+        assertThat(quote.getDealPrice()).isEqualTo(SALE_PRICE);
+
+        // 运营换版，价格一分不动 —— 比价这一关必然通过
+        benefitJdbc.update("UPDATE benefit_sku SET package_version = 2 WHERE sku_id = ?", SKU_ID);
+        assertThat(num(benefitJdbc, "SELECT sale_price FROM benefit_sku WHERE sku_id = ?", SKU_ID))
+                .as("前置：价格未变，否则拦下它的是比价而不是版本比对")
+                .isEqualTo((int) SALE_PRICE);
+
+        CreateTradeReq req = newTradeReq("pkgSwap");
+        req.setConsultToken(quote.getConsultToken());
+
+        assertRejectedWithoutOrder(req, ErrorCode.INVALID_TOKEN);
     }
 
     /** 降价同样拒绝：比价是等值判定，不是「不超过即可」。 */

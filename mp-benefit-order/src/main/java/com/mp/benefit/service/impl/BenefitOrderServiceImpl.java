@@ -132,12 +132,15 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         // V3 接优惠后此处替换为计价逻辑，凭证的签发位置不变
         long dealPrice = sku.getSalePrice();
 
+        // packageVersion 必须进签名：它决定权益包的内容，而换版时价格可以一分不动 ——
+        // 只签价格挡不住「按月卡+券咨询、按只剩券的新版履约」
         String token =
                 tokenSigner.sign(
                         req.getUserId(),
                         req.getActivityId(),
                         req.getSkuId(),
                         dealPrice,
+                        sku.getPackageVersion(),
                         activity.getCurVersion(),
                         tokenTtlSeconds);
 
@@ -181,6 +184,22 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         }
 
         BenefitSku sku = requireOnSaleSku(req.getSkuId());
+
+        // ①.5 权益包版本比对。<b>比价挡不住这一类</b>：换版时价格可以一分不动 ——
+        // 用户按「月卡 + 券」咨询，运营把 SKU 改指向只剩券的新版，价格仍是 99 元，
+        // 于是验签过、比价也过，而建单时读的是新版快照，用户按月卡+券付钱只拿到券。
+        // 价格没变不代表承诺没变
+        if (token.packageVersion() != sku.getPackageVersion()) {
+            log.warn(
+                    "createTrade package version changed, user={}, sku={}, token={}, current={}",
+                    req.getUserId(),
+                    req.getSkuId(),
+                    token.packageVersion(),
+                    sku.getPackageVersion());
+            // 判 4003 而非 1711：1711 的语义是「价格不一致」（技术方案 §4.1），
+            // 而此处价格可能完全没变。不为此新造码 —— 对端上的处置与 4003 相同：重新咨询
+            throw new BizException(ErrorCode.INVALID_TOKEN, "权益内容已变化，请刷新后重试");
+        }
 
         // ④.5 比价：服务端重算价与凭证成交价比对。不等则 1711，不建单
         long recalcPrice = sku.getSalePrice();
@@ -556,8 +575,11 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
      *   <li>不比 {@code skuId}：可拿低价商品的凭证买高价商品，且比价这一关照样过 —— 凭证价与它自己那件 商品的重算价本来就相等
      * </ul>
      *
-     * <p>{@code configVersion} 不作为拒绝依据：活动改版但价格未变时，用户看到的承诺没有变化，据此 拒绝只会白白打断下单；价格真变了则由 {@code 1711}
-     * 拦下。
+     * <p>{@code packageVersion} 的比对<b>不在本方法内</b>，它需要读 SKU，故与比价一起放在 {@code createTrade} 里 ——
+     * 本方法只做「不查库就能判的」那部分。
+     *
+     * <p>{@code configVersion} 不作为拒绝依据：它是活动级版本，与权益内容无关（后者由 {@code packageVersion}
+     * 决定）。活动改版而价格与权益包都未变时，用户看到的承诺确实没变，据此拒绝 只会白白打断下单。
      */
     private ConsultTokenPayload verifyConsultToken(CreateTradeReq req) {
         // 签名与时效不通过时在此抛 4003

@@ -508,6 +508,12 @@ class ShapeFreezeTest {
                     .contains(normalize(comparison));
         }
         assertThat(body).as("比对不通过应判 4003").contains("ErrorCode.INVALID_TOKEN");
+
+        // packageVersion 的比对需要读 SKU，故不在 verifyConsultToken 内，而与比价一起在
+        // createTrade 里 —— 它决定权益包的内容，而换版时价格可以一分不动，比价挡不住
+        assertThat(normalize(src))
+                .as("必须比对 packageVersion —— 换版时价格可能一分不动，只比价会让用户按旧承诺付钱拿新内容")
+                .contains(normalize("token.packageVersion() != sku.getPackageVersion()"));
     }
 
     /**

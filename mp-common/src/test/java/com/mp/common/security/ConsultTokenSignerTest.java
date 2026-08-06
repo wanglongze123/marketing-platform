@@ -35,13 +35,15 @@ class ConsultTokenSignerTest {
 
     @Test
     void signedTokenRoundTripsWithEveryFieldPreserved() {
-        String token = signer.sign("U1", "ACT1", "SKU1", 9900L, 3, TTL);
+        String token = signer.sign("U1", "ACT1", "SKU1", 9900L, 2, 3, TTL);
 
         ConsultTokenPayload p = signer.verify(token);
         assertThat(p.userId()).isEqualTo("U1");
         assertThat(p.activityId()).isEqualTo("ACT1");
         assertThat(p.skuId()).isEqualTo("SKU1");
         assertThat(p.dealPrice()).isEqualTo(9900L);
+        // 两个版本号刻意取不同值：同值时把它们的顺序写反，没有任何用例会红
+        assertThat(p.packageVersion()).isEqualTo(2);
         assertThat(p.configVersion()).isEqualTo(3);
         assertThat(p.expireAtEpochMilli()).isEqualTo(NOW.plusSeconds(TTL).toEpochMilli());
     }
@@ -53,7 +55,7 @@ class ConsultTokenSignerTest {
      */
     @Test
     void tamperedPriceIsRejected() {
-        String token = signer.sign("U1", "ACT1", "SKU1", 19900L, 1, TTL);
+        String token = signer.sign("U1", "ACT1", "SKU1", 19900L, 1, 1, TTL);
         String forged = replaceInBody(token, "19900", "1");
 
         // 前置：确实改动了，否则下面的断言在「什么都没改」时也成立
@@ -72,10 +74,24 @@ class ConsultTokenSignerTest {
      */
     @Test
     void tamperedExpiryIsRejected() {
-        String token = signer.sign("U1", "ACT1", "SKU1", 9900L, 1, TTL);
+        String token = signer.sign("U1", "ACT1", "SKU1", 9900L, 1, 1, TTL);
         long real = NOW.plusSeconds(TTL).toEpochMilli();
         String forged =
                 replaceInBody(token, String.valueOf(real), String.valueOf(real + 86400_000L));
+
+        assertThat(forged).isNotEqualTo(token);
+        assertThatThrownBy(() -> signer.verify(forged)).isInstanceOf(BizException.class);
+    }
+
+    /**
+     * 改权益包版本同样被发现。
+     *
+     * <p>该字段决定权益包的内容，而换版时价格可以一分不动 —— 只签价格挡不住「按月卡+券咨询、 按只剩券的新版履约」。它必须在签名覆盖范围内。
+     */
+    @Test
+    void tamperedPackageVersionIsRejected() {
+        String token = signer.sign("U1", "ACT1", "SKU1", 9900L, 7, 1, TTL);
+        String forged = replaceInBody(token, "7", "8");
 
         assertThat(forged).isNotEqualTo(token);
         assertThatThrownBy(() -> signer.verify(forged)).isInstanceOf(BizException.class);
@@ -86,7 +102,7 @@ class ConsultTokenSignerTest {
     void tokenSignedWithAnotherKeyIsRejected() {
         String foreign =
                 new ConsultTokenSigner("another-secret", Clock.fixed(NOW, ZoneOffset.UTC))
-                        .sign("U1", "ACT1", "SKU1", 9900L, 1, TTL);
+                        .sign("U1", "ACT1", "SKU1", 9900L, 1, 1, TTL);
 
         assertThatThrownBy(() -> signer.verify(foreign)).isInstanceOf(BizException.class);
     }
@@ -94,7 +110,7 @@ class ConsultTokenSignerTest {
     /** 过期即拒。时钟往后拨一秒越过有效期，不靠等待。 */
     @Test
     void expiredTokenIsRejected() {
-        String token = signer.sign("U1", "ACT1", "SKU1", 9900L, 1, TTL);
+        String token = signer.sign("U1", "ACT1", "SKU1", 9900L, 1, 1, TTL);
 
         ConsultTokenSigner later = signerAt(NOW.plusSeconds(TTL).plusSeconds(1));
         assertThatThrownBy(() -> later.verify(token))
@@ -109,7 +125,7 @@ class ConsultTokenSignerTest {
     /** 负有效期签出一张「出生即过期」的凭证，供集成测试用。此处确认它确实被拒。 */
     @Test
     void negativeTtlProducesAnAlreadyExpiredToken() {
-        String token = signer.sign("U1", "ACT1", "SKU1", 9900L, 1, -1);
+        String token = signer.sign("U1", "ACT1", "SKU1", 9900L, 1, 1, -1);
 
         assertThatThrownBy(() -> signer.verify(token)).isInstanceOf(BizException.class);
     }
@@ -122,13 +138,15 @@ class ConsultTokenSignerTest {
      */
     @Test
     void fieldBoundariesCannotBeShifted() {
-        String a = signer.sign("U", "1_ACT", "SKU1", 9900L, 1, TTL);
-        String b = signer.sign("U1_ACT", "", "SKU1", 9900L, 1, TTL);
+        String a = signer.sign("U", "1_ACT", "SKU1", 9900L, 1, 1, TTL);
+        String b = signer.sign("U1_ACT", "", "SKU1", 9900L, 1, 1, TTL);
         assertThat(a).isNotEqualTo(b);
 
         // 值里混入分隔符时签发即拒，而不是等到验签才发现
         assertThatThrownBy(
-                        () -> signer.sign("U" + (char) 0x1F + "X", "ACT1", "SKU1", 9900L, 1, TTL))
+                        () ->
+                                signer.sign(
+                                        "U" + (char) 0x1F + "X", "ACT1", "SKU1", 9900L, 1, 1, TTL))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -157,9 +175,9 @@ class ConsultTokenSignerTest {
     @Test
     void expiryIsComputedAtSigningTime() {
         long shortLived =
-                signer.verify(signer.sign("U1", "A", "S", 1L, 1, 60)).expireAtEpochMilli();
+                signer.verify(signer.sign("U1", "A", "S", 1L, 1, 1, 60)).expireAtEpochMilli();
         long longLived =
-                signer.verify(signer.sign("U1", "A", "S", 1L, 1, 600)).expireAtEpochMilli();
+                signer.verify(signer.sign("U1", "A", "S", 1L, 1, 1, 600)).expireAtEpochMilli();
 
         assertThat(Duration.ofMillis(longLived - shortLived)).isEqualTo(Duration.ofSeconds(540));
     }

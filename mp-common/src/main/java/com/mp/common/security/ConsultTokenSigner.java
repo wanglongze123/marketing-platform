@@ -50,6 +50,7 @@ public final class ConsultTokenSigner {
             String activityId,
             String skuId,
             long dealPrice,
+            int packageVersion,
             int configVersion,
             long ttlSeconds) {
         ConsultTokenPayload payload =
@@ -58,6 +59,7 @@ public final class ConsultTokenSigner {
                         activityId,
                         skuId,
                         dealPrice,
+                        packageVersion,
                         configVersion,
                         clock.millis() + ttlSeconds * 1000L);
         String body = serialize(payload);
@@ -118,6 +120,7 @@ public final class ConsultTokenSigner {
                 p.activityId(),
                 p.skuId(),
                 String.valueOf(p.dealPrice()),
+                String.valueOf(p.packageVersion()),
                 String.valueOf(p.configVersion()),
                 String.valueOf(p.expireAtEpochMilli()));
     }
@@ -131,7 +134,7 @@ public final class ConsultTokenSigner {
     private static ConsultTokenPayload deserialize(String body) {
         // -1：末尾空字段也要保留，否则被篡改成尾部截断的载荷会解析成字段更少的合法对象
         String[] f = body.split(SEP, -1);
-        if (f.length != 6) {
+        if (f.length != 7) {
             throw new BizException(ErrorCode.INVALID_TOKEN, "咨询凭证载荷非法");
         }
         try {
@@ -141,7 +144,8 @@ public final class ConsultTokenSigner {
                     f[2],
                     Long.parseLong(f[3]),
                     Integer.parseInt(f[4]),
-                    Long.parseLong(f[5]));
+                    Integer.parseInt(f[5]),
+                    Long.parseLong(f[6]));
         } catch (NumberFormatException e) {
             throw new BizException(ErrorCode.INVALID_TOKEN, "咨询凭证载荷非法");
         }
