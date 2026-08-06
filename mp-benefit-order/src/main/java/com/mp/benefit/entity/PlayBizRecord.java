@@ -29,6 +29,9 @@ public class PlayBizRecord {
 
     private Integer quantity;
 
+    /** 本单库存处置态，库存类任务每单幂等的承重点。取值见 {@code StockStatus} */
+    private String stockStatus;
+
     private String payStatus;
     private String grantStatus;
     private String refundStatus;
@@ -113,6 +116,14 @@ public class PlayBizRecord {
 
     public void setQuantity(Integer quantity) {
         this.quantity = quantity;
+    }
+
+    public String getStockStatus() {
+        return stockStatus;
+    }
+
+    public void setStockStatus(String stockStatus) {
+        this.stockStatus = stockStatus;
     }
 
     public String getPayStatus() {

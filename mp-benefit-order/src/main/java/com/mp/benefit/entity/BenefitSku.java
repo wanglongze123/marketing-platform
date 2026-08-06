@@ -26,6 +26,9 @@ public class BenefitSku {
     private String benefitPackageId;
     private Integer packageVersion;
 
+    /** 每人限购数量，0=不限购。V3 建限购规则表后改由规则快照填充 */
+    private Integer purchaseLimitQty;
+
     public Long getId() {
         return id;
     }
@@ -104,5 +107,13 @@ public class BenefitSku {
 
     public void setPackageVersion(Integer packageVersion) {
         this.packageVersion = packageVersion;
+    }
+
+    public Integer getPurchaseLimitQty() {
+        return purchaseLimitQty;
+    }
+
+    public void setPurchaseLimitQty(Integer purchaseLimitQty) {
+        this.purchaseLimitQty = purchaseLimitQty;
     }
 }

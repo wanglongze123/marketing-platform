@@ -175,14 +175,18 @@ class ReliableTaskIT extends AbstractMySqlIT {
         benefitOrderService.payCallback(
                 newPayCallback(bizNo, created.getTradeNo(), "NS_conv_1", "SUCCESS"));
 
-        // 驱动前：GRANT 任务待执行，主单发放态未启动
+        // 驱动前：GRANT 与 STOCK_CONSUME 两条任务待执行，主单发放态未启动。
+        // 支付成功落两条任务而非一条 —— 库存转消耗自 PR-5 起也从回调事务中移出（技术方案 §7.4）
         ConvergenceResp before = benefitOrderService.queryConvergence(bizNo);
         assertThat(before.getGrantStatus()).isEqualTo(GrantStatus.NOT_START.name());
         assertThat(before.getTasks())
+                .extracting(ConvergenceResp.TaskSnapshot::getTaskType)
+                .containsExactlyInAnyOrder(TaskType.GRANT.name(), TaskType.STOCK_CONSUME.name());
+        assertThat(before.getTasks())
+                .filteredOn(t -> TaskType.GRANT.name().equals(t.getTaskType()))
                 .singleElement()
                 .satisfies(
                         t -> {
-                            assertThat(t.getTaskType()).isEqualTo(TaskType.GRANT.name());
                             assertThat(t.getStatus()).isEqualTo(TaskStatus.PENDING.name());
                             assertThat(t.getRetryCount()).isZero();
                             assertThat(t.getNextTime()).isNotBlank();
@@ -198,8 +202,7 @@ class ReliableTaskIT extends AbstractMySqlIT {
         ConvergenceResp after = benefitOrderService.queryConvergence(bizNo);
         assertThat(after.getGrantStatus()).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
         assertThat(after.getTasks())
-                .singleElement()
-                .satisfies(
+                .allSatisfy(
                         t -> {
                             assertThat(t.getStatus()).isEqualTo(TaskStatus.DONE.name());
                             // 完成时清空租约，否则僵尸回收会把已完成的任务当成过期任务捞回来
@@ -234,9 +237,11 @@ class ReliableTaskIT extends AbstractMySqlIT {
     @Test
     void repeatedFailureIncrementsRetryCountAndPushesNextTimeForward() {
         String taskNo = "TK_IT_backoff";
-        // 用确实无处理器的类型：QUERY_GRANT 自 PR-3 起已有处理器，会走查单而非「无处理器」分支
+        // 用确实无处理器的类型。这个选择随实现推进要跟着换：QUERY_GRANT 自 PR-3 起有了处理器、
+        // STOCK_CONSUME 自 PR-5 起也有了 —— 每次都表现为本用例变红，因为任务被真的执行掉了，
+        // 走不到「无处理器」分支。REFUND 属 V3 范围，届时同样要换
         taskMapper.enqueue(
-                taskNo, "BZ_IT_backoff", TaskType.STOCK_CONSUME.name(), "OP_IT_backoff", 0, "{}");
+                taskNo, "BZ_IT_backoff", TaskType.REFUND.name(), "OP_IT_backoff", 0, "{}");
 
         List<Long> pushes = new ArrayList<>();
         for (int round = 1; round <= 3; round++) {

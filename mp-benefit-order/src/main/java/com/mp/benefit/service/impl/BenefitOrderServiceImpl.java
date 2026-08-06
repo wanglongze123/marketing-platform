@@ -227,7 +227,12 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         // 供审计用；主单要冻结的是下单这一刻的版本，履约与退款一律读它
         Insert inserted =
                 insertOrder(
-                        req, recalcPrice, activity.getCurVersion(), priceSnapshot, benefitSnapshot);
+                        req,
+                        recalcPrice,
+                        activity.getCurVersion(),
+                        sku.getPurchaseLimitQty() == null ? 0 : sku.getPurchaseLimitQty(),
+                        priceSnapshot,
+                        benefitSnapshot);
         if (inserted.duplicated()) {
             return toCreateResp(inserted.record());
         }
@@ -267,11 +272,15 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
      * </ul>
      *
      * <p>合并处理的后果：碰撞当幂等命中会返回<b>另一用户的订单</b>；幂等命中当碰撞则为同一请求建出第二笔单。
+     *
+     * <p><b>库存预占也在 {@code createOrder} 事务内，故两条分支都不会留下多占的库存</b>（PRD BR-B-06
+     * 「同一幂等请求不重复预占库存」）：幂等命中时事务已回滚，预占随之撤销；单号碰撞重试时同理， 下一轮重新预占。若把预占提到事务外，幂等重试就会每次多占一份，且没有任何机制会还回去。
      */
     private Insert insertOrder(
             CreateTradeReq req,
             long salePrice,
             int configVersion,
+            int purchaseLimitQty,
             String priceSnapshot,
             String benefitSnapshot) {
         for (int attempt = 1; attempt <= BIZ_NO_RETRY; attempt++) {
@@ -283,6 +292,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
                                 bizNo,
                                 salePrice,
                                 configVersion,
+                                purchaseLimitQty,
                                 priceSnapshot,
                                 benefitSnapshot),
                         false);

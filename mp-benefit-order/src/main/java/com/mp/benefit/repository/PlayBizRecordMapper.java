@@ -52,6 +52,24 @@ public interface PlayBizRecordMapper extends BaseMapper<PlayBizRecord> {
             @Param("fromStatus") String fromStatus,
             @Param("toStatus") String toStatus);
 
+    /**
+     * 库存处置态推进，<b>库存类任务每单幂等的承重点</b>。
+     *
+     * <p>{@code affected_rows = 0} 即本单库存已处置过，调用方据此跳过实际的库存 UPDATE。
+     *
+     * <p>这道谓词不可由别处替代。库存 SQL 的下界 {@code WHERE locked >= ?} 防的是「总数被减成负值」， 而 {@code locked} 是该 {@code
+     * stock_key} 下所有订单<b>共享</b>的计数器 —— A 单重复释放时它因别的 订单占用仍大于 0，下界照常放行，结果 A 释放掉了 B
+     * 的预占，可售余量凭空多一份，直接超卖。 {@code benefit_task.uk_biz_type_op} 也替代不了：它防的是重复<b>入队</b>，而非同一条任务被
+     * 重复<b>执行</b>（租约过期被接管、调度器重跑都会）。
+     */
+    @Update(
+            "UPDATE play_biz_record SET stock_status = #{toStatus}"
+                    + " WHERE play_biz_record_no = #{bizNo} AND stock_status = #{fromStatus}")
+    int advanceStockStatus(
+            @Param("bizNo") String bizNo,
+            @Param("fromStatus") String fromStatus,
+            @Param("toStatus") String toStatus);
+
     /** 回填支付单号。建单后第二个短事务，不改任何状态。 */
     @Update("UPDATE play_biz_record SET trade_no = #{tradeNo} WHERE play_biz_record_no = #{bizNo}")
     int fillTradeNo(@Param("bizNo") String bizNo, @Param("tradeNo") String tradeNo);

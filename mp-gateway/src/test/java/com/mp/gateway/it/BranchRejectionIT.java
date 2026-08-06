@@ -8,6 +8,7 @@ import com.mp.api.benefit.dto.CreateTradeResp;
 import com.mp.common.enums.ErrorCode;
 import com.mp.common.enums.GrantStatus;
 import com.mp.common.enums.PayStatus;
+import com.mp.common.enums.TaskType;
 import com.mp.common.exception.BizException;
 import org.junit.jupiter.api.Test;
 
@@ -37,9 +38,27 @@ class BranchRejectionIT extends AbstractMySqlIT {
         assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.NOT_START.name());
         assertThat(fulfillmentCount(bizNo)).isZero();
         assertThat(grantRecordCount(bizNo)).isZero();
-        // 支付失败不落 GRANT 任务 —— 落了就意味着调度器迟早会给未付款的单发货
-        assertThat(count(benefitJdbc, "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ?", bizNo))
+        // 支付失败不落 GRANT 任务 —— 落了就意味着调度器迟早会给未付款的单发货。
+        //
+        // 断言收窄到 GRANT 一类，不再是「一条任务都没有」：自 PR-5 起支付失败要落
+        // STOCK_RELEASE（交易未成立，库存与限购额度都得还回去，由这一条任务承接）。
+        // 原断言的意图始终是「不会发货」，而不是「什么都不做」
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ?"
+                                        + " AND task_type = ?",
+                                bizNo,
+                                TaskType.GRANT.name()))
+                .as("支付失败不得落履约任务")
                 .isZero();
+        // 而释放任务必须落 —— 少了它，未付款的单会永久占着库存与限购额度
+        assertThat(
+                        benefitJdbc.queryForList(
+                                "SELECT task_type FROM benefit_task WHERE biz_no = ?",
+                                String.class,
+                                bizNo))
+                .containsExactly(TaskType.STOCK_RELEASE.name());
     }
 
     /**
