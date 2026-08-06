@@ -32,6 +32,13 @@ public class PlayBizRecord {
     /** 本单库存处置态，库存类任务每单幂等的承重点。取值见 {@code StockStatus} */
     private String stockStatus;
 
+    /**
+     * 本单限购额度处置态，额度返还的每单幂等承重点。取值见 {@code QuotaStatus}。
+     *
+     * <p>与 {@code stockStatus} 分列：库存对每一单都预占，额度只在 SKU 配了限购时才扣。
+     */
+    private String quotaStatus;
+
     private String payStatus;
     private String grantStatus;
     private String refundStatus;
@@ -124,6 +131,14 @@ public class PlayBizRecord {
 
     public void setStockStatus(String stockStatus) {
         this.stockStatus = stockStatus;
+    }
+
+    public String getQuotaStatus() {
+        return quotaStatus;
+    }
+
+    public void setQuotaStatus(String quotaStatus) {
+        this.quotaStatus = quotaStatus;
     }
 
     public String getPayStatus() {

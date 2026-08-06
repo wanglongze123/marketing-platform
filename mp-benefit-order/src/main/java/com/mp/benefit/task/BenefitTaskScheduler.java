@@ -4,6 +4,7 @@ import com.mp.benefit.entity.BenefitTask;
 import com.mp.benefit.repository.BenefitTaskMapper;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.enums.TaskType;
+import com.mp.common.exception.BizException;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -112,6 +113,29 @@ public class BenefitTaskScheduler {
         long startNanos = System.nanoTime();
         try {
             result = handler.handle(task);
+        } catch (BizException e) {
+            // 业务规则拒绝是**确定的答案**，重试拿到的还是同一个答案（PR-8 补）。
+            //
+            // 不这样分的话，每一笔正常成交的订单都会贡献一条死信：建单时落的 CLOSE_ORDER 任务
+            // 在支付有效期后到期，此时订单早已 PAY_SUCCESS，关单判 1741 —— 按 UNKNOWN 重试
+            // 五轮进 DEAD。死信本是「停止重试并等人工处置」的入口，被正常业务填满就没人看了。
+            //
+            // 只认 1xxx / 4xxx：5xxx 是系统异常，其语义恰恰是「结果未知」，必须继续按 UNKNOWN
+            // 收敛。这与 ErrorCode 的分区口径是同一条 —— 判据取错误码而非异常类型，因为
+            // BizException 同时承载着这三个分区
+            if (isDeterministicRejection(e.getCode())) {
+                log.info(
+                        "task rejected by business rule, no retry, taskNo={}, type={}, code={},"
+                                + " msg={}",
+                        task.getTaskNo(),
+                        type,
+                        e.getCode(),
+                        e.getMessage());
+                result = RetStatus.FAIL;
+            } else {
+                log.error("task threw system-level BizException, taskNo={}", task.getTaskNo(), e);
+                result = RetStatus.UNKNOWN;
+            }
         } catch (Exception e) {
             // 未预期异常映射为 UNKNOWN 而非 FAIL：异常可能发生在 RPC 发出之后，下游未必没执行。
             // 判为 FAIL 等于替下游断言「没做」，而这个断言没有依据
@@ -121,6 +145,22 @@ public class BenefitTaskScheduler {
 
         renewIfSlow(task, startNanos);
         writeBack(task, type, result);
+    }
+
+    /**
+     * 该错误码是否表示「确定的业务拒绝」——重试不会改变答案。
+     *
+     * <p>按 {@code ErrorCode} 的分区判：{@code 1xxx} 业务规则拒绝、{@code 4xxx} 入参非法，两者都是终态； {@code 5xxx}
+     * 是系统异常，语义为「结果未知」，必须继续重试收敛。
+     *
+     * <p>取码的首字符而非枚举整体比对：错误码是《技术方案》§4.1 定义的常量集，分区语义写在 号段上，逐个列举会在加码时漏改。
+     */
+    private static boolean isDeterministicRejection(String code) {
+        if (code == null || code.isEmpty()) {
+            return false;
+        }
+        char zone = code.charAt(0);
+        return zone == '1' || zone == '4';
     }
 
     /**
@@ -155,7 +195,11 @@ public class BenefitTaskScheduler {
                 logWriteBack(task, "DONE", rows);
             }
             case FAIL -> {
-                // 下游明确失败：业务分支已由 handler 处置完毕，任务本身到此为止
+                // 两个来源，处置相同：下游明确失败（业务分支已由 handler 处置完毕），
+                // 或 handler 抛出确定的业务拒绝（1xxx/4xxx）。都是终态答案，重试没有意义。
+                //
+                // 置 DONE 而非 DEAD：DEAD 的语义是「重试到死也没成功，等人工」，而这里
+                // 事情已有确定结论 —— 关不掉是因为已支付，这是正确结果，不需要人来看
                 rows = taskMapper.markDone(id, owner);
                 logWriteBack(task, "DONE(FAIL branch handled)", rows);
             }

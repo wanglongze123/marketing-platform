@@ -9,13 +9,18 @@ import com.mp.common.enums.ErrorCode;
 import com.mp.common.enums.PayStatus;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.enums.StockStatus;
+import com.mp.common.enums.TaskStatus;
 import com.mp.common.enums.TaskType;
 import com.mp.common.exception.BizException;
 import com.mp.mock.fault.FaultInjector;
 import com.mp.mock.fault.PayLedger;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Autowired;
 
 /**
@@ -34,6 +39,7 @@ class CloseOrderIT extends AbstractMySqlIT {
 
     @Autowired private FaultInjector injector;
     @Autowired private PayLedger payLedger;
+    @Autowired private RedissonClient redisson;
 
     private static final int TOTAL_STOCK = 100;
 
@@ -433,6 +439,157 @@ class CloseOrderIT extends AbstractMySqlIT {
                 .as("已支付的单不得被超时任务关闭")
                 .isEqualTo(PayStatus.PAY_SUCCESS.name());
         assertThat(consumedOf()).as("库存应转消耗而非释放").isEqualTo(1);
+
+        // 任务本身应就地了结，而不是重试到死信 —— 见下一个用例
+        assertThat(taskStatusOf(bizNo, TaskType.CLOSE_ORDER))
+                .as("关不掉是确定答案，任务应 DONE")
+                .isEqualTo(TaskStatus.DONE.name());
+    }
+
+    /**
+     * <b>已支付订单的关单任务就地了结，不进死信</b>（PR-8 补，补之前是真实缺陷）。
+     *
+     * <p>上一个用例只断言了「订单没被关掉」和「库存转消耗」—— 两条都对，但没看任务的下场。实测： 反复驱动到期的 {@code CLOSE_ORDER} 任务，它会 {@code
+     * retry_count=5} 后进 {@code DEAD}。
+     *
+     * <p>链路是常规的：建单落 30 分钟后到期的关单任务 → 期间用户付款 → 任务到期执行 → {@code closeOrder} 判 {@code 1741} 抛出 → 调度器按
+     * {@code UNKNOWN} 重试 → 死信。
+     *
+     * <p><b>代价不是资损，是死信池被正常业务填满</b>：每一笔正常成交的订单都会在支付有效期后贡献 一条 DEAD
+     * 任务。而死信的语义是「重试到死也没成功，等人工处置」，是对账与人工修复的入口 （{@code
+     * ReliableTaskIT.taskStopsRetryingOnceItReachesTheDeadLetterThreshold}）—— 入口被噪声
+     * 淹没，真正需要人看的那条就找不出来了。
+     *
+     * <p>修法在调度器：{@code BizException} 携带 {@code 1xxx} / {@code 4xxx} 时判 {@code FAIL} 而非 {@code
+     * UNKNOWN} —— 业务规则拒绝是<b>确定的答案</b>，重试拿到的还是同一个。{@code 5xxx} 不在其列，它的语义恰恰是「结果未知」，必须继续收敛。
+     */
+    @Test
+    void closeTaskOfAPaidOrderSettlesInsteadOfGoingDead() {
+        String bizNo = createOrder("closeTaskPaid");
+        benefitOrderService.payCallback(
+                newPayCallback(bizNo, "PAY1_" + bizNo, "NS_ctp_1", "SUCCESS"));
+
+        // 反复催到期并驱动：若判 UNKNOWN 重试，五轮后就会是 DEAD
+        for (int i = 0; i < 8; i++) {
+            makeAllDue(bizNo);
+            runScheduler();
+        }
+
+        assertThat(taskStatusOf(bizNo, TaskType.CLOSE_ORDER))
+                .as("确定的业务拒绝应就地了结，不该重试到死信")
+                .isEqualTo(TaskStatus.DONE.name());
+        assertThat(
+                        num(
+                                benefitJdbc,
+                                "SELECT retry_count FROM benefit_task WHERE biz_no = ?"
+                                        + " AND task_type = ?",
+                                bizNo,
+                                TaskType.CLOSE_ORDER.name()))
+                .as("不该产生任何重试")
+                .isZero();
+        assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.PAY_SUCCESS.name());
+    }
+
+    /**
+     * <b>系统异常仍按 {@code UNKNOWN} 重试，不被上一条的分流误伤</b>。
+     *
+     * <p>这一条锁死的是分流的<b>边界</b>：判据取错误码号段而非异常类型，因为 {@code BizException} 同时 承载 {@code 1xxx} / {@code
+     * 4xxx} / {@code 5xxx} 三个分区。若实现写成「catch BizException 一律判 FAIL」，上一条照常绿，而 {@code
+     * 5001}（下游未知）会被当成终态失败 —— 那正是「把 UNKNOWN 误判为 FAILED」，四分类要防的头一件事。
+     *
+     * <p><b>构造方式必须让 {@code BizException} 真的从 handler 抛出来</b>，且带 {@code 5xxx}。初稿用的是 注入关单 RPC 超时 ——
+     * 那条路径压根不抛 {@code BizException}（{@code askPayToClose} 把异常兜成 {@code UNKNOWN} 进 {@code
+     * CLOSING}），走不到分流那段代码。<b>实测：把判据改成「1xxx/4xxx/5xxx 一律判 FAIL」后初稿照常全绿</b>，注释里那句「锁死边界」是空的。
+     *
+     * <p>改用 {@link com.mp.benefit.lock.BizLock} 抢不到锁的 {@code 5002}：先占住该单的关单锁，任务执行时 {@code tryLock}
+     * 立即失败并抛出。这是 V2 里唯一能从任务链路自然抛出 {@code 5xxx} 的点，语义也恰当 —— 抢不到锁不代表这笔业务不成立，正是「等会儿再来」。
+     *
+     * <p><b>锁必须由另一个线程持有</b>：Redisson 的 {@code RLock} 可重入，而 {@code runScheduler()} 是同步 执行的 ——
+     * 测试线程自己持锁时，任务在同一线程里重入成功，压根不会抛。初稿正是如此，实测 「Expecting code to raise a throwable」才发现。
+     */
+    @Test
+    void systemLevelUnknownStillRetries() throws Exception {
+        String bizNo = createOrder("closeSysUnk");
+
+        // 键与 BizLock.aroundCloseOrder 一致。写死在此处是有意的：它若与实现漂移，
+        // 本用例会退化成「锁没被占住」而静默失效，故下面同时断言了「确实抛了 5002」
+        String lockKey = "lock:ben:close:" + bizNo;
+        CountDownLatch acquired = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder =
+                new Thread(
+                        () -> {
+                            RLock lock = redisson.getLock(lockKey);
+                            lock.lock(60, TimeUnit.SECONDS);
+                            acquired.countDown();
+                            try {
+                                release.await(60, TimeUnit.SECONDS);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            } finally {
+                                lock.unlock();
+                            }
+                        });
+        holder.start();
+        assertThat(acquired.await(10, TimeUnit.SECONDS)).as("持锁线程应已就绪").isTrue();
+
+        try {
+            // 先确认这条路径确实抛 5002 —— 不确认的话，锁键写错时下面的断言仍会成立
+            assertThatThrownBy(() -> benefitOrderService.closeOrder(bizNo, ""))
+                    .isInstanceOf(BizException.class)
+                    .extracting(e -> ((BizException) e).getCode())
+                    .isEqualTo(ErrorCode.CONCURRENT_CONFLICT);
+
+            makeAllDue(bizNo);
+            runScheduler();
+        } finally {
+            release.countDown();
+            holder.join(10_000);
+        }
+
+        // 5xxx 是「结果未知」：任务应退避重试，而不是被判为终态失败
+        assertThat(taskStatusOf(bizNo, TaskType.CLOSE_ORDER))
+                .as("系统异常应重排重试，不得判 DONE —— 那等于替下游断言「做不到」")
+                .isEqualTo(TaskStatus.PENDING.name());
+        assertThat(
+                        num(
+                                benefitJdbc,
+                                "SELECT retry_count FROM benefit_task WHERE biz_no = ?"
+                                        + " AND task_type = ?",
+                                bizNo,
+                                TaskType.CLOSE_ORDER.name()))
+                .as("应记为一次重试")
+                .isEqualTo(1);
+        assertThat(orderField("pay_status", bizNo))
+                .as("锁冲突时什么都不该发生")
+                .isEqualTo(PayStatus.WAIT_PAY.name());
+        assertThat(lockedOf()).as("未关单则库存不得释放").isEqualTo(1);
+    }
+
+    /**
+     * 关单 RPC 结果未定时进 {@code CLOSING}，任务链路上同样成立。
+     *
+     * <p>与上一条互补：那条验的是「{@code 5xxx} 异常抛出后仍重试」，这条验的是「异常被 {@code askPayToClose} 兜成 {@code UNKNOWN}
+     * 后进中间态」—— 同为未定态，出口不同。
+     */
+    @Test
+    void closeTaskEntersClosingWhenPayProviderTimesOut() {
+        String bizNo = createOrder("closeTmo");
+        injector.setPayMode(FaultMode.TIMEOUT_BEFORE_COMMIT);
+        try {
+            makeAllDue(bizNo);
+            runScheduler();
+        } finally {
+            injector.setPayMode(FaultMode.SUCCESS);
+        }
+
+        assertThat(orderField("pay_status", bizNo))
+                .as("结果未定应进 CLOSING，而非被判失败")
+                .isEqualTo(PayStatus.CLOSING.name());
+        assertThat(taskStatusOf(bizNo, TaskType.QUERY_CLOSE))
+                .as("中间态必须有收敛出口")
+                .isEqualTo(TaskStatus.PENDING.name());
+        assertThat(lockedOf()).as("CLOSING 期间不得释放库存").isEqualTo(1);
     }
 
     // ------------------------------------------------------------------

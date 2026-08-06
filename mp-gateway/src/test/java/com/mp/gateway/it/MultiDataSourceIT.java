@@ -35,6 +35,7 @@ class MultiDataSourceIT extends AbstractMySqlIT {
                 "1190",
                 "2101",
                 "2102",
+                "2103",
                 "2190");
         assertHistoryOwnedBy(rewardJdbc, "db_reward", "0201", "1201", "1202", "1203");
         // 裂变 V3 才填充，此处只要求历史表已建 —— 迁移目录为空时 Flyway 仍会建它
