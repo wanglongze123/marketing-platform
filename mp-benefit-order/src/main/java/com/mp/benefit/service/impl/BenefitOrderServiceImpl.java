@@ -10,6 +10,8 @@ import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.CreateTradeResp;
 import com.mp.api.benefit.dto.FulfillmentItem;
 import com.mp.api.benefit.dto.PayCallbackReq;
+import com.mp.api.benefit.dto.PreConsultReq;
+import com.mp.api.benefit.dto.PreConsultResp;
 import com.mp.api.benefit.dto.QueryOrderResp;
 import com.mp.api.benefit.service.BenefitOrderService;
 import com.mp.api.mock.dto.PayCreateReq;
@@ -40,6 +42,8 @@ import com.mp.common.enums.PayStatus;
 import com.mp.common.enums.RefundStatus;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.exception.BizException;
+import com.mp.common.security.ConsultTokenPayload;
+import com.mp.common.security.ConsultTokenSigner;
 import com.mp.common.util.BizNoGenerator;
 import com.mp.common.util.IdempotentKeys;
 import java.util.ArrayList;
@@ -50,6 +54,7 @@ import org.apache.dubbo.config.annotation.DubboService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
@@ -81,6 +86,8 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private final BenefitFulfillmentRecordMapper fulfillmentMapper;
     private final PlayOpRecordMapper opRecordMapper;
     private final BenefitTaskMapper taskMapper;
+    private final ConsultTokenSigner tokenSigner;
+    private final long tokenTtlSeconds;
 
     public BenefitOrderServiceImpl(
             OrderTxService tx,
@@ -89,7 +96,9 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             PlayBizRecordMapper bizRecordMapper,
             BenefitFulfillmentRecordMapper fulfillmentMapper,
             PlayOpRecordMapper opRecordMapper,
-            BenefitTaskMapper taskMapper) {
+            BenefitTaskMapper taskMapper,
+            ConsultTokenSigner tokenSigner,
+            @Value("${mp.consult-token.ttl-seconds}") long tokenTtlSeconds) {
         this.tx = tx;
         this.skuMapper = skuMapper;
         this.itemMapper = itemMapper;
@@ -97,6 +106,58 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         this.fulfillmentMapper = fulfillmentMapper;
         this.opRecordMapper = opRecordMapper;
         this.taskMapper = taskMapper;
+        this.tokenSigner = tokenSigner;
+        this.tokenTtlSeconds = tokenTtlSeconds;
+    }
+
+    // ------------------------------------------------------------------
+    // ⓪ 预咨询
+    // ------------------------------------------------------------------
+
+    /**
+     * 试算并签发咨询凭证。只读，不占库存、不建单、不落操作记录。
+     *
+     * <p><b>算价与签发在同一次读里完成</b>：先算出价再单独查一次 SKU 去签，两次读之间运营改价就会 签出一张与展示价不符的凭证 —— 用户看到 9.9、凭证里签着
+     * 19.9，比价照常通过而用户被多收钱。
+     */
+    @Override
+    public PreConsultResp preConsult(PreConsultReq req) {
+        ActivityConfResp activity = activityService.queryActivityConf(req.getActivityId());
+        if (activity == null || !activity.isAvailable()) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "活动不可参与: " + req.getActivityId());
+        }
+        BenefitSku sku = requireOnSaleSku(req.getSkuId());
+
+        // 成交价由服务端算定（PRD BR-B-03）。V2 无优惠计算，成交价即售卖价；
+        // V3 接优惠后此处替换为计价逻辑，凭证的签发位置不变
+        long dealPrice = sku.getSalePrice();
+
+        String token =
+                tokenSigner.sign(
+                        req.getUserId(),
+                        req.getActivityId(),
+                        req.getSkuId(),
+                        dealPrice,
+                        activity.getCurVersion(),
+                        tokenTtlSeconds);
+
+        PreConsultResp resp = new PreConsultResp();
+        resp.setActivityId(req.getActivityId());
+        resp.setSkuId(req.getSkuId());
+        resp.setConfigVersion(activity.getCurVersion());
+        resp.setOriginPrice(sku.getListPrice());
+        resp.setDealPrice(dealPrice);
+        resp.setConsultToken(token);
+        // 从凭证自身读回，而不是在此另算一次 —— 另算会与签名里的值漂移，
+        // 端上据此判断「还没过期」而下单被拒
+        resp.setExpireAt(tokenSigner.verify(token).expireAtEpochMilli());
+
+        log.info(
+                "preConsult issued, user={}, sku={}, dealPrice={}",
+                req.getUserId(),
+                req.getSkuId(),
+                dealPrice);
+        return resp;
     }
 
     // ------------------------------------------------------------------
@@ -111,17 +172,28 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
                     ErrorCode.INVALID_PARAM, "V1 仅支持 quantity=1，实际 " + req.getQuantity());
         }
 
+        // ① 验凭证：签名 + 时效 + 逐字段比对。不通过则 4003，不建单
+        ConsultTokenPayload token = verifyConsultToken(req);
+
         ActivityConfResp activity = activityService.queryActivityConf(req.getActivityId());
         if (activity == null || !activity.isAvailable()) {
             throw new BizException(ErrorCode.INVALID_PARAM, "活动不可参与: " + req.getActivityId());
         }
 
-        BenefitSku sku =
-                skuMapper.selectOne(
-                        Wrappers.<BenefitSku>lambdaQuery()
-                                .eq(BenefitSku::getSkuId, req.getSkuId()));
-        if (sku == null || !"ON_SALE".equals(sku.getSaleStatus())) {
-            throw new BizException(ErrorCode.INVALID_PARAM, "商品不可售: " + req.getSkuId());
+        BenefitSku sku = requireOnSaleSku(req.getSkuId());
+
+        // ④.5 比价：服务端重算价与凭证成交价比对。不等则 1711，不建单
+        long recalcPrice = sku.getSalePrice();
+        if (token.dealPrice() != recalcPrice) {
+            // 不取较低价、不静默使用新价（PRD BR-B-08）：取低价平台亏损，取新价用户看到 9.9
+            // 却被扣 19.9 —— 后者是明确的产品事故。一律拒绝，由端上重新咨询
+            log.warn(
+                    "createTrade price mismatch, user={}, sku={}, token={}, recalc={}",
+                    req.getUserId(),
+                    req.getSkuId(),
+                    token.dealPrice(),
+                    recalcPrice);
+            throw new BizException(ErrorCode.PRICE_MISMATCH, "价格已变化，请刷新后重试");
         }
 
         List<SnapshotItem> snapshot = buildSnapshot(sku);
@@ -129,14 +201,14 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
                 toJson(Map.of("listPrice", sku.getListPrice(), "salePrice", sku.getSalePrice()));
         String benefitSnapshot = toJson(snapshot);
 
-        // 读活动当前版本并冻结，而非硬编码 —— 逻辑与终态一致，V1 阶段该值恒为 1
+        // 应付金额取重算价而非凭证价：两者已比对相等，取服务端这一份是为了让「金额来自服务端」
+        // 在代码里也成立 —— 日后比价逻辑若被削弱，这里不会跟着变成「按客户端带来的价格收款」。
+        //
+        // 配置版本取活动当前值而非凭证中的：凭证里那份记录的是「签发时活动是哪个版本」，
+        // 供审计用；主单要冻结的是下单这一刻的版本，履约与退款一律读它
         Insert inserted =
                 insertOrder(
-                        req,
-                        sku.getSalePrice(),
-                        activity.getCurVersion(),
-                        priceSnapshot,
-                        benefitSnapshot);
+                        req, recalcPrice, activity.getCurVersion(), priceSnapshot, benefitSnapshot);
         if (inserted.duplicated()) {
             return toCreateResp(inserted.record());
         }
@@ -471,6 +543,51 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
 
     private static String str(java.time.LocalDateTime t) {
         return t == null ? null : t.toString();
+    }
+
+    /**
+     * 验凭证：签名、时效、逐字段比对。
+     *
+     * <p><b>验签之后必须逐字段比对</b>。验签只证明这张凭证由平台签发且未被篡改，不证明它是发给<b>本次 请求</b>的：用户 A 拿到的合法凭证，放进用户 B
+     * 的请求里同样验签通过。少比一个字段就漏一类越权 ——
+     *
+     * <ul>
+     *   <li>不比 {@code userId}：可拿他人凭证下单
+     *   <li>不比 {@code skuId}：可拿低价商品的凭证买高价商品，且比价这一关照样过 —— 凭证价与它自己那件 商品的重算价本来就相等
+     * </ul>
+     *
+     * <p>{@code configVersion} 不作为拒绝依据：活动改版但价格未变时，用户看到的承诺没有变化，据此 拒绝只会白白打断下单；价格真变了则由 {@code 1711}
+     * 拦下。
+     */
+    private ConsultTokenPayload verifyConsultToken(CreateTradeReq req) {
+        // 签名与时效不通过时在此抛 4003
+        ConsultTokenPayload token = tokenSigner.verify(req.getConsultToken());
+
+        boolean matches =
+                token.userId().equals(req.getUserId())
+                        && token.activityId().equals(req.getActivityId())
+                        && token.skuId().equals(req.getSkuId());
+        if (!matches) {
+            // 不回显凭证内容：那等于告诉调用方「这张凭证本该配哪个用户和商品」
+            log.warn(
+                    "createTrade token mismatch, user={}, activity={}, sku={}",
+                    req.getUserId(),
+                    req.getActivityId(),
+                    req.getSkuId());
+            throw new BizException(ErrorCode.INVALID_TOKEN, "咨询凭证与请求不一致");
+        }
+        return token;
+    }
+
+    /** 查在售 SKU，不可售即拒。咨询与下单共用，两处判据必须一致。 */
+    private BenefitSku requireOnSaleSku(String skuId) {
+        BenefitSku sku =
+                skuMapper.selectOne(
+                        Wrappers.<BenefitSku>lambdaQuery().eq(BenefitSku::getSkuId, skuId));
+        if (sku == null || !"ON_SALE".equals(sku.getSaleStatus())) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "商品不可售: " + skuId);
+        }
+        return sku;
     }
 
     /** 从 sku → package → item 组装快照。履约只读快照，运营改配置不影响存量单。 */

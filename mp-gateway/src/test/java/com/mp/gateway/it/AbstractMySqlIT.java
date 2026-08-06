@@ -2,6 +2,7 @@ package com.mp.gateway.it;
 
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.PayCallbackReq;
+import com.mp.api.benefit.dto.PreConsultReq;
 import com.mp.api.benefit.service.BenefitOrderService;
 import com.mp.benefit.task.BenefitTaskScheduler;
 import javax.sql.DataSource;
@@ -66,6 +67,11 @@ abstract class AbstractMySqlIT {
         // 不压得更狠（如 0.001 → 首档 1ms）：那个量级与调度器每轮自身耗时同级，退避量淹没在
         // 噪声里，「退避取 0」的注入测不出来（已实测确认）
         registry.add("mp.task.backoff-scale", () -> "0.02");
+        // 凭证配置与生产同形状，取值不同：密钥不用生产那份，有效期照生产的 15 分钟。
+        // 有效期不压小 —— 压到毫秒级会让「凭证还没过期」本身变得不稳定，正常用例随机变红。
+        // 「过期凭证被拒」改用负有效期签一张来验（TokenAndPricingIT），既不等待也不改配置
+        registry.add("mp.consult-token.secret", () -> "it-consult-secret");
+        registry.add("mp.consult-token.ttl-seconds", () -> "900");
 
         register(registry, "activity", "db_activity", "mp_activity");
         register(registry, "benefit", "db_benefit", "mp_benefit");
@@ -127,14 +133,31 @@ abstract class AbstractMySqlIT {
         this.fissionJdbc = new JdbcTemplate(fission);
     }
 
+    /**
+     * 建单入参，凭证由真实的 {@code preConsult} 签发。
+     *
+     * <p><b>不在测试里自行拼凭证</b>：那样测的是「测试造出来的凭证能被验过」，而咨询与下单是否对同一 用户、同一商品、同一价格达成一致恰恰验不到 ——
+     * 而这正是签名与比价要挡的东西。走真实签发， 咨询侧一旦少签一个字段，下单侧的比对立刻失配。
+     */
     protected CreateTradeReq newTradeReq(String tag) {
+        String userId = "U_" + tag;
         CreateTradeReq req = new CreateTradeReq();
-        req.setUserId("U_" + tag);
+        req.setUserId(userId);
         req.setActivityId(ACTIVITY_ID);
         req.setSkuId(SKU_ID);
         req.setClientReqNo("REQ_" + tag);
         req.setQuantity(1);
+        req.setConsultToken(consultToken(userId, ACTIVITY_ID, SKU_ID));
         return req;
+    }
+
+    /** 走真实签发链路取一张凭证。 */
+    protected String consultToken(String userId, String activityId, String skuId) {
+        PreConsultReq req = new PreConsultReq();
+        req.setUserId(userId);
+        req.setActivityId(activityId);
+        req.setSkuId(skuId);
+        return benefitOrderService.preConsult(req).getConsultToken();
     }
 
     protected PayCallbackReq newPayCallback(

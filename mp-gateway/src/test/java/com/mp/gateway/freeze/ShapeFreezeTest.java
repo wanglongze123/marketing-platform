@@ -471,6 +471,96 @@ class ShapeFreezeTest {
         }
     }
 
+    /**
+     * L1 验签之后必须<b>逐字段比对</b>，不能只验签。
+     *
+     * <p>验签只证明凭证由平台签发且未被篡改，不证明它是发给<b>本次请求</b>的 —— 用户 A 的合法凭证 放进用户 B 的请求里同样验签通过。少比一个字段就漏一类越权：不比
+     * {@code userId} 可拿他人 凭证下单，不比 {@code skuId} 可拿低价商品的凭证买高价商品（且比价照样过 —— 凭证价与它自己 那件商品的重算价本来就相等）。
+     *
+     * <p>行为由 {@code TokenAndPricingIT} 验证。此处防的是「只留 verify、把比对删掉」—— 那样删完
+     * 所有正向用例照常绿，只有越权用例会红，而越权用例正是最容易被当成 flaky 删掉的那种。
+     *
+     * <p><b>断言的是比对表达式本身，不是字段名出现过。</b> 本检查初稿只查 {@code getUserId()} 在方法体里 出现过，而紧随其后的 {@code log.warn}
+     * 恰好也带这三个 getter —— 把比对整体替换成 {@code true} 之后 检查照常通过（PR-4 自查注入验证）。「提到了某个字段」与「拿它做了判断」是两回事。
+     */
+    @Test
+    void tokenVerificationIsFollowedByFieldLevelComparison() {
+        String src =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/service/impl/"
+                                + "BenefitOrderServiceImpl.java");
+
+        int idx = src.indexOf("private ConsultTokenPayload verifyConsultToken(");
+        assertThat(idx).as("未找到 verifyConsultToken").isGreaterThan(0);
+        String body = src.substring(idx, Math.min(src.length(), idx + 1200));
+
+        assertThat(body).as("必须验签").contains("tokenSigner.verify(");
+        // 断言「凭证字段 equals 请求字段」这一表达式本身，而不是字段名出现过 ——
+        // 紧随其后的 log.warn 也带这三个 getter，只查字段名的话把比对整体换成 true 照样通过
+        String flat = normalize(body);
+        for (String comparison :
+                List.of(
+                        "token.userId().equals(req.getUserId())",
+                        "token.activityId().equals(req.getActivityId())",
+                        "token.skuId().equals(req.getSkuId())")) {
+            assertThat(flat)
+                    .as("验签后必须比对 %s，否则可拿他人/他物的合法凭证下单", comparison)
+                    .contains(normalize(comparison));
+        }
+        assertThat(body).as("比对不通过应判 4003").contains("ErrorCode.INVALID_TOKEN");
+    }
+
+    /**
+     * 比价的基准必须是<b>服务端重算价</b>，且不等一律拒绝。
+     *
+     * <p>PRD BR-B-04：下单时不信任客户端回传金额。故 {@code CreateTradeReq} 不得带价格字段 —— 带了就
+     * 迟早有人拿它当应付金额。价格的唯一可信来源是凭证中被签名覆盖的那一份，且必须与服务端重算价 相等才放行。
+     *
+     * <p>「不等一律拒绝」而非取较低价（BR-B-08）：取新价则用户看到 9.9 却被扣 19.9，取低价则平台 每次调价都被旧凭证薅一轮。
+     */
+    @Test
+    void priceComesFromTheServerAndMismatchIsRejected() {
+        List<String> fields =
+                Arrays.stream(com.mp.api.benefit.dto.CreateTradeReq.class.getDeclaredFields())
+                        .filter(f -> !f.isSynthetic())
+                        .map(Field::getName)
+                        .toList();
+        assertThat(fields)
+                .as("下单入参不得带价格字段 —— 客户端回传金额一律不信任（PRD BR-B-04）")
+                .noneSatisfy(
+                        name ->
+                                assertThat(name.toLowerCase())
+                                        .containsAnyOf("price", "amount", "fee"));
+
+        String src =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/service/impl/"
+                                + "BenefitOrderServiceImpl.java");
+        assertThat(src)
+                .as("比价不通过必须判 1711，且比对的是凭证成交价与服务端重算价")
+                .contains("ErrorCode.PRICE_MISMATCH")
+                .contains("token.dealPrice() != recalcPrice");
+    }
+
+    /**
+     * 签名密钥只从配置读，不得在代码里给默认值。
+     *
+     * <p>给了默认值，缺配置时应用照常启动、签名照常验过 —— 而那把密钥在仓库里人人可见，任何人都能 伪造凭证。<b>失效形态是「一切正常」</b>，与本类其余检查同族。
+     *
+     * <p>{@code @Value("${...:默认值}")} 的冒号形态即为违规。
+     */
+    @Test
+    void consultTokenSecretHasNoInCodeDefault() {
+        String config =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/config/ConsultTokenConfig.java");
+
+        assertThat(config).contains("${mp.consult-token.secret}");
+        assertThat(config)
+                .as("密钥不得有代码内默认值 —— 缺配置应启动失败，而不是用一把公开的密钥跑起来")
+                .doesNotContain("mp.consult-token.secret:");
+    }
+
     /** V0 脚手架必须已清除 —— 留着会让读者以为它是链路的一部分（标准 32）。 */
     @Test
     void v0ScaffoldingIsRemoved() {
@@ -492,6 +582,11 @@ class ShapeFreezeTest {
     }
 
     // ------------------------------------------------------------------
+
+    /** 压掉换行与缩进，让断言不受 spotless 折行位置影响 —— 否则改一次格式就要改一次断言。 */
+    private static String normalize(String source) {
+        return source.replaceAll("\\s+", "");
+    }
 
     private static List<String> names(Class<? extends Enum<?>> type) {
         return Arrays.stream(type.getEnumConstants()).map(Enum::name).toList();
