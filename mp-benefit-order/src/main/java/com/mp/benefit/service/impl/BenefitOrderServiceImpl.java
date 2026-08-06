@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mp.api.activity.dto.ActivityConfResp;
 import com.mp.api.activity.service.ActivityService;
+import com.mp.api.benefit.dto.ConvergenceResp;
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.CreateTradeResp;
 import com.mp.api.benefit.dto.FulfillmentItem;
@@ -21,11 +22,15 @@ import com.mp.api.reward.service.RewardService;
 import com.mp.benefit.entity.BenefitFulfillmentRecord;
 import com.mp.benefit.entity.BenefitItem;
 import com.mp.benefit.entity.BenefitSku;
+import com.mp.benefit.entity.BenefitTask;
 import com.mp.benefit.entity.PlayBizRecord;
+import com.mp.benefit.entity.PlayOpRecord;
 import com.mp.benefit.repository.BenefitFulfillmentRecordMapper;
 import com.mp.benefit.repository.BenefitItemMapper;
 import com.mp.benefit.repository.BenefitSkuMapper;
+import com.mp.benefit.repository.BenefitTaskMapper;
 import com.mp.benefit.repository.PlayBizRecordMapper;
+import com.mp.benefit.repository.PlayOpRecordMapper;
 import com.mp.benefit.service.OrderTxService;
 import com.mp.benefit.service.SnapshotItem;
 import com.mp.common.enums.ErrorCode;
@@ -74,18 +79,24 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private final BenefitItemMapper itemMapper;
     private final PlayBizRecordMapper bizRecordMapper;
     private final BenefitFulfillmentRecordMapper fulfillmentMapper;
+    private final PlayOpRecordMapper opRecordMapper;
+    private final BenefitTaskMapper taskMapper;
 
     public BenefitOrderServiceImpl(
             OrderTxService tx,
             BenefitSkuMapper skuMapper,
             BenefitItemMapper itemMapper,
             PlayBizRecordMapper bizRecordMapper,
-            BenefitFulfillmentRecordMapper fulfillmentMapper) {
+            BenefitFulfillmentRecordMapper fulfillmentMapper,
+            PlayOpRecordMapper opRecordMapper,
+            BenefitTaskMapper taskMapper) {
         this.tx = tx;
         this.skuMapper = skuMapper;
         this.itemMapper = itemMapper;
         this.bizRecordMapper = bizRecordMapper;
         this.fulfillmentMapper = fulfillmentMapper;
+        this.opRecordMapper = opRecordMapper;
+        this.taskMapper = taskMapper;
     }
 
     // ------------------------------------------------------------------
@@ -226,13 +237,11 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         }
 
         PayStatus target = parsePayStatus(req.getPayStatus());
-        boolean advanced = tx.applyPayCallback(req, order, target);
 
-        // 仅推进到 PAY_SUCCESS 时触发履约。事务提交后调用，事务内不发 RPC。
-        // V2 改为事务内落 GRANT 任务由调度器驱动 —— 届时删掉这行同步调用。
-        if (advanced && target == PayStatus.PAY_SUCCESS) {
-            grantBenefit(bizNo);
-        }
+        // 履约不在此处触发：GRANT 任务已在同一事务内落库，由调度器驱动（技术方案 §6.5）。
+        // V1 曾在事务提交后同步调 grantBenefit —— 「改状态」与「触发履约」之间存在崩溃窗口，
+        // 窗口内进程挂掉即已收款未发奖，且不留任何可供恢复的痕迹。
+        tx.applyPayCallback(req, order, target);
         return RetStatus.SUCCESS;
     }
 
@@ -371,9 +380,61 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         return resp;
     }
 
+    @Override
+    public ConvergenceResp queryConvergence(String bizNo) {
+        PlayBizRecord order = findByBizNo(bizNo);
+        if (order == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
+        }
+
+        ConvergenceResp resp = new ConvergenceResp();
+        resp.setBizNo(bizNo);
+        resp.setPayStatus(order.getPayStatus());
+        resp.setGrantStatus(order.getGrantStatus());
+        resp.setRefundStatus(order.getRefundStatus());
+
+        List<PlayOpRecord> ops =
+                opRecordMapper.selectList(
+                        Wrappers.<PlayOpRecord>lambdaQuery()
+                                .eq(PlayOpRecord::getPlayBizRecordNo, bizNo)
+                                .orderByAsc(PlayOpRecord::getId));
+        List<ConvergenceResp.OpRecordSnapshot> opSnaps = new ArrayList<>(ops.size());
+        for (PlayOpRecord o : ops) {
+            ConvergenceResp.OpRecordSnapshot s = new ConvergenceResp.OpRecordSnapshot();
+            s.setOpType(o.getOpType());
+            s.setOpSeq(o.getOpSeq());
+            // status 与 downstreamResult 分列透出，合并即无法区分 PROCESSING 与 UNKNOWN
+            s.setStatus(o.getStatus());
+            s.setDownstreamResult(o.getDownstreamResult());
+            s.setRetryCount(o.getRetryCount());
+            opSnaps.add(s);
+        }
+        resp.setOpRecords(opSnaps);
+
+        List<BenefitTask> tasks = taskMapper.selectByBizNo(bizNo);
+        List<ConvergenceResp.TaskSnapshot> taskSnaps = new ArrayList<>(tasks.size());
+        for (BenefitTask t : tasks) {
+            ConvergenceResp.TaskSnapshot s = new ConvergenceResp.TaskSnapshot();
+            s.setTaskType(t.getTaskType());
+            s.setOpNo(t.getOpNo());
+            s.setStatus(t.getStatus());
+            s.setRetryCount(t.getRetryCount());
+            s.setNextTime(str(t.getNextTime()));
+            s.setLeaseOwner(t.getLeaseOwner());
+            s.setLeaseExpire(str(t.getLeaseExpire()));
+            taskSnaps.add(s);
+        }
+        resp.setTasks(taskSnaps);
+        return resp;
+    }
+
     // ------------------------------------------------------------------
     // 辅助
     // ------------------------------------------------------------------
+
+    private static String str(java.time.LocalDateTime t) {
+        return t == null ? null : t.toString();
+    }
 
     /** 从 sku → package → item 组装快照。履约只读快照，运营改配置不影响存量单。 */
     private List<SnapshotItem> buildSnapshot(BenefitSku sku) {

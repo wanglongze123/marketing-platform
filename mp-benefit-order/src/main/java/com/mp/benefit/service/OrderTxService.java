@@ -4,6 +4,7 @@ import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.benefit.config.BenefitTx;
 import com.mp.benefit.entity.PlayBizRecord;
+import com.mp.benefit.repository.BenefitTaskMapper;
 import com.mp.benefit.repository.PlayBizRecordMapper;
 import com.mp.benefit.repository.PlayOpRecordMapper;
 import com.mp.common.enums.GrantStatus;
@@ -12,6 +13,8 @@ import com.mp.common.enums.OpType;
 import com.mp.common.enums.PayStatus;
 import com.mp.common.enums.RefundStatus;
 import com.mp.common.enums.RetStatus;
+import com.mp.common.enums.TaskType;
+import com.mp.common.util.BizNoGenerator;
 import com.mp.common.util.IdempotentKeys;
 import java.time.LocalDateTime;
 import org.slf4j.Logger;
@@ -40,10 +43,15 @@ public class OrderTxService {
 
     private final PlayBizRecordMapper bizRecordMapper;
     private final PlayOpRecordMapper opRecordMapper;
+    private final BenefitTaskMapper taskMapper;
 
-    public OrderTxService(PlayBizRecordMapper bizRecordMapper, PlayOpRecordMapper opRecordMapper) {
+    public OrderTxService(
+            PlayBizRecordMapper bizRecordMapper,
+            PlayOpRecordMapper opRecordMapper,
+            BenefitTaskMapper taskMapper) {
         this.bizRecordMapper = bizRecordMapper;
         this.opRecordMapper = opRecordMapper;
+        this.taskMapper = taskMapper;
     }
 
     /** 建单 + 写操作记录。 */
@@ -128,6 +136,22 @@ public class OrderTxService {
                     target);
             return false;
         }
+
+        // 本地消息表：收款与「发起履约」绑同一事务。ACK 支付前 GRANT 任务已落库，
+        // 此后任何一点崩溃，调度器重启后续跑 —— 这是「已收款必履约」的根。
+        // 若改为提交后同步调用，「改状态」与「触发履约」之间存在无法消除的崩溃窗口。
+        if (target == PayStatus.PAY_SUCCESS) {
+            taskMapper.enqueue(
+                    BizNoGenerator.taskNo(),
+                    bizNo,
+                    TaskType.GRANT.name(),
+                    // 一单一次履约编排，用确定性本地键而非留空 —— 唯一索引不对 NULL 去重
+                    bizNo + "_GRANT",
+                    // 立即可执行
+                    0,
+                    "{}");
+        }
+
         log.info("payCallback advanced, bizNo={}, WAIT_PAY -> {}", bizNo, target);
         return true;
     }

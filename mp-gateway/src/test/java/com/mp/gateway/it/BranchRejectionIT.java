@@ -28,6 +28,8 @@ class BranchRejectionIT extends AbstractMySqlIT {
 
         benefitOrderService.payCallback(
                 newPayCallback(bizNo, created.getTradeNo(), "NS_1", "FAILED"));
+        // 驱动一轮，证明「没有履约」不是因为没人跑，而是因为压根没有任务
+        runScheduler();
 
         assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.PAY_FAILED.name());
         // 发放态停在初始值，不是 GRANT_FAILED —— 没发起过和发起后失败是两回事，
@@ -35,6 +37,9 @@ class BranchRejectionIT extends AbstractMySqlIT {
         assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.NOT_START.name());
         assertThat(fulfillmentCount(bizNo)).isZero();
         assertThat(grantRecordCount(bizNo)).isZero();
+        // 支付失败不落 GRANT 任务 —— 落了就意味着调度器迟早会给未付款的单发货
+        assertThat(count(benefitJdbc, "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ?", bizNo))
+                .isZero();
     }
 
     /**

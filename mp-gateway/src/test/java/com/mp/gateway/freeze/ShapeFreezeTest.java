@@ -206,6 +206,50 @@ class ShapeFreezeTest {
         }
     }
 
+    /**
+     * 任务领取的锁子句必须直接作用于目标表，不得塞进派生表。
+     *
+     * <p>为绕开 MySQL 错误 1093 很容易写成 {@code UPDATE ... WHERE id IN (SELECT id FROM (SELECT ... FOR
+     * UPDATE SKIP LOCKED) t)}。本地在 MySQL 8.4.11 上实测：该写法不重复领取，而是退化为 <b>互相阻塞</b>（A 持锁时 B 等到 {@code
+     * Lock wait timeout}）—— 与技术方案 §7.3 记录的 「锁失效导致重复领取」不是同一种失效，但同样不可接受。
+     *
+     * <p><b>只能静态检查</b>：阻塞形态在并发用例里表现为变慢而非出错，{@code ReliableTaskIT} 的 「每条任务仅一个 owner」断言照常通过 ——
+     * 已实测确认。运行期测不出来的约束，就得在 源码层面拦住。
+     */
+    @Test
+    void taskClaimLocksTheTargetTableDirectlyNotADerivedTable() {
+        String mapper =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/repository/BenefitTaskMapper.java");
+
+        // 取 SQL 字符串字面量部分，避开注释里对错误写法的引用
+        List<String> sqlLines =
+                mapper.lines()
+                        .map(String::strip)
+                        .filter(line -> line.startsWith("\"") || line.startsWith("+ \""))
+                        .toList();
+        String sql = String.join(" ", sqlLines);
+
+        assertThat(sql).as("领取须使用 FOR UPDATE SKIP LOCKED").contains("FOR UPDATE SKIP LOCKED");
+        assertThat(sql).as("锁子句不得包在派生表里 —— 会退化为互相阻塞，且并发用例测不出来").doesNotContain("FROM (SELECT");
+    }
+
+    /** 任务写回一律带 lease_owner 校验，否则过期持有者能覆盖接管者的结果。 */
+    @Test
+    void everyTaskWriteBackCarriesLeaseOwnerFencing() {
+        String mapper =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/repository/BenefitTaskMapper.java");
+
+        // 完成、失败重排、死信、续租四类，缺任一类即存在被过期持有者覆盖的窗口
+        for (String method : List.of("markDone", "markRetry", "markDead", "renewLease")) {
+            String sql = sqlOf(mapper, method);
+            assertThat(sql)
+                    .as("%s 的写回必须带 lease_owner fencing（《分阶段方案》§5.6 ③）", method)
+                    .contains("lease_owner = #{owner}");
+        }
+    }
+
     /** 组合注解自身必须指定管理器，否则上一条检查只是把裸注解换了个名字。 */
     @Test
     void eachTxAnnotationDeclaresItsTransactionManager() {

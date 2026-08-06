@@ -41,6 +41,20 @@ class ForwardChainIT extends AbstractMySqlIT {
                         newPayCallback(bizNo, created.getTradeNo(), "NS_e2e_1", "SUCCESS"));
         assertThat(ret).isEqualTo(RetStatus.SUCCESS);
 
+        // 履约转异步：回调返回时支付态已到位，发放态仍未启动，GRANT 任务在库里等调度。
+        // 这一段正是「已收款必履约」的可观测形态 —— 任务与收款同事务落库，进程此刻崩溃也能续跑
+        assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.PAY_SUCCESS.name());
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.NOT_START.name());
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ? AND task_type ="
+                                        + " 'GRANT' AND status = 'PENDING'",
+                                bizNo))
+                .isEqualTo(1);
+
+        runScheduler();
+
         // 标准 2：三子状态独立推进，各自到位
         assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.PAY_SUCCESS.name());
         assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
@@ -207,12 +221,13 @@ class ForwardChainIT extends AbstractMySqlIT {
                 .containsExactlyInAnyOrder("PROVIDER_A", "PROVIDER_B");
     }
 
-    /** 下单 + 支付成功，返回 bizNo。履约由 payCallback 同步触发（V1 形态）。 */
+    /** 下单 + 支付成功 + 驱动一轮调度器。履约由 GRANT 任务承接（V2 形态）。 */
     private String payAndGrant(String tag) {
         CreateTradeResp created = benefitOrderService.createTrade(newTradeReq(tag));
         benefitOrderService.payCallback(
                 newPayCallback(
                         created.getBizNo(), created.getTradeNo(), "NS_" + tag + "_1", "SUCCESS"));
+        runScheduler();
         return created.getBizNo();
     }
 }

@@ -26,6 +26,11 @@ public final class BizNoGenerator {
         return gen("FF");
     }
 
+    /** 可靠任务号，落 {@code benefit_task.task_no}。 */
+    public static String taskNo() {
+        return gen("TK");
+    }
+
     /** 裂变关系号（V3）。 */
     public static String fissionRelationNo() {
         return gen("FR");

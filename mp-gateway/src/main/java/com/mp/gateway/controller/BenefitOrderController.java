@@ -1,5 +1,6 @@
 package com.mp.gateway.controller;
 
+import com.mp.api.benefit.dto.ConvergenceResp;
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.CreateTradeResp;
 import com.mp.api.benefit.dto.PayCallbackReq;
@@ -49,6 +50,19 @@ public class BenefitOrderController {
     @GetMapping("/order/{bizNo}")
     public ApiResponse<QueryOrderResp> queryOrder(@PathVariable String bizNo) {
         return ok(benefitOrderService.queryOrder(bizNo));
+    }
+
+    /**
+     * 收敛过程快照：操作记录 + 可靠任务当前值。
+     *
+     * <p>验收对象是状态迁移过程，{@code queryOrder} 的终态无法区分「正确收敛」与「未发生故障」。 同时是演示入口：注入超时 → 观察 {@code
+     * GRANT_UNKNOWN} 停留 → 退避收敛 → 发放记录仍为 1 条。
+     *
+     * <p><b>V2 不加鉴权</b>：单进程、仅本地运行。V3 拆分布式后它会暴露跨服务的内部单据状态， 届时移入独立运维端口（《分阶段方案》§5.6 ⑥）。
+     */
+    @GetMapping("/convergence/{bizNo}")
+    public ApiResponse<ConvergenceResp> queryConvergence(@PathVariable String bizNo) {
+        return ok(benefitOrderService.queryConvergence(bizNo));
     }
 
     private static <T> ApiResponse<T> ok(T data) {

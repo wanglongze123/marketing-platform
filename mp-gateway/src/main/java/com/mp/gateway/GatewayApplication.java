@@ -3,6 +3,7 @@ package com.mp.gateway;
 import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * V0/V1 单进程启动入口（模块化单体）。
@@ -15,6 +16,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  */
 @SpringBootApplication(scanBasePackages = "com.mp")
 @EnableDubbo(scanBasePackages = "com.mp")
+@EnableScheduling
 public class GatewayApplication {
 
     public static void main(String[] args) {

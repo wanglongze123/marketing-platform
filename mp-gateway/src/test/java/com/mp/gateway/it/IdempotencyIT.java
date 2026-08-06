@@ -103,6 +103,7 @@ class IdempotencyIT extends AbstractMySqlIT {
         String tradeNo = created.getTradeNo();
 
         benefitOrderService.payCallback(newPayCallback(bizNo, tradeNo, "NS_1", "SUCCESS"));
+        runScheduler();
         String updateTimeAfterFirst =
                 str(
                         benefitJdbc,
@@ -110,6 +111,7 @@ class IdempotencyIT extends AbstractMySqlIT {
                         bizNo);
 
         benefitOrderService.payCallback(newPayCallback(bizNo, tradeNo, "NS_1", "SUCCESS"));
+        runScheduler();
 
         assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.PAY_SUCCESS.name());
         assertThat(
@@ -148,7 +150,9 @@ class IdempotencyIT extends AbstractMySqlIT {
         String tradeNo = created.getTradeNo();
 
         benefitOrderService.payCallback(newPayCallback(bizNo, tradeNo, "NS_A", "SUCCESS"));
+        runScheduler();
         benefitOrderService.payCallback(newPayCallback(bizNo, tradeNo, "NS_B", "SUCCESS"));
+        runScheduler();
 
         // 两条通知各自留痕
         List<String> seqs =
@@ -173,6 +177,7 @@ class IdempotencyIT extends AbstractMySqlIT {
         String bizNo = created.getBizNo();
         benefitOrderService.payCallback(
                 newPayCallback(bizNo, created.getTradeNo(), "NS_1", "SUCCESS"));
+        runScheduler();
 
         String providerOrderNo =
                 str(
@@ -208,6 +213,7 @@ class IdempotencyIT extends AbstractMySqlIT {
         String bizNo = created.getBizNo();
         benefitOrderService.payCallback(
                 newPayCallback(bizNo, created.getTradeNo(), "NS_1", "SUCCESS"));
+        runScheduler();
 
         benefitJdbc.update(
                 "UPDATE play_biz_record SET grant_status = ? WHERE play_biz_record_no = ?",
