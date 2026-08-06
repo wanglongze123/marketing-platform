@@ -92,12 +92,24 @@ public class BenefitTaskScheduler {
         TaskType type = TaskType.valueOf(task.getTaskType());
         TaskHandler handler = handlers.get(type);
         if (handler == null) {
-            // 无处理器不是任务的错，别让它进死信 —— 补上处理器后应能继续跑
+            // 无处理器不是任务的错，不进死信 —— 补上处理器后它应当能继续跑。
+            // 但必须把租约还回去：直接 return 会让任务留在 DOING 且持有租约，
+            // 要等租约过期再撞上每 N 轮一次的僵尸回收才捞得回来。PR-2 只实现了 GRANT，
+            // 其余类型（如 QUERY_GRANT）在后续 PR 接入前入队即会走到这里
             log.error("no handler for task type {}, taskNo={}", type, task.getTaskNo());
+            int rows =
+                    taskMapper.markRetry(
+                            task.getId(),
+                            owner,
+                            backoff.nextBackoffMicros(
+                                    RetStatus.UNKNOWN,
+                                    task.getRetryCount() == null ? 0 : task.getRetryCount()));
+            logWriteBack(task, "PENDING(no handler)", rows);
             return;
         }
 
         RetStatus result;
+        long startNanos = System.nanoTime();
         try {
             result = handler.handle(task);
         } catch (Exception e) {
@@ -107,7 +119,29 @@ public class BenefitTaskScheduler {
             result = RetStatus.UNKNOWN;
         }
 
+        renewIfSlow(task, startNanos);
         writeBack(task, type, result);
+    }
+
+    /**
+     * 执行耗时超过续租阈值则延长租约（《分阶段方案》§5.6 ④）。
+     *
+     * <p>阈值取租约的三分之二：租约 30 秒时超 20 秒续租。不续租的话，一次异常缓慢的下游调用会让 租约在执行途中到期，另一实例正当接管并重跑同一任务 —— 下游按 {@code
+     * opNo} 幂等挡得住重复发放， 但两个实例同时在途会让状态回写互相覆盖，且 fencing 会把先完成那个的结果判掉。
+     *
+     * <p>放在 handler 返回之后而非另起线程定时续租：V2 的任务是单次 RPC + 两个短事务，正常耗时 百毫秒级，执行中途无并发点可插。真正的长任务出现时再改为执行中定期续租。
+     */
+    private void renewIfSlow(BenefitTask task, long startNanos) {
+        long elapsedSeconds = (System.nanoTime() - startNanos) / 1_000_000_000L;
+        if (elapsedSeconds < leaseSeconds * 2L / 3) {
+            return;
+        }
+        int rows = taskMapper.renewLease(task.getId(), owner, leaseSeconds);
+        log.warn(
+                "task ran {}s, renewed lease, taskNo={}, renewed={}",
+                elapsedSeconds,
+                task.getTaskNo(),
+                rows > 0);
     }
 
     /** 按四分类写回。affected_rows=0 一律视为租约已易主，放弃且不重试本次写回。 */

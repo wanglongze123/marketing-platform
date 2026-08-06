@@ -10,6 +10,7 @@ import com.mp.common.enums.OpType;
 import com.mp.common.enums.PayStatus;
 import com.mp.common.enums.RefundStatus;
 import com.mp.common.enums.RetStatus;
+import com.mp.common.enums.TaskType;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
@@ -232,6 +233,43 @@ class ShapeFreezeTest {
 
         assertThat(sql).as("领取须使用 FOR UPDATE SKIP LOCKED").contains("FOR UPDATE SKIP LOCKED");
         assertThat(sql).as("锁子句不得包在派生表里 —— 会退化为互相阻塞，且并发用例测不出来").doesNotContain("FROM (SELECT");
+    }
+
+    /**
+     * 死信阈值按《分阶段方案》§5.6 ⑤ 分两类：查单 10 次、执行 5 次。
+     *
+     * <p>取值本身是判断，写错不会报错也不会有任何测试变红 —— 阈值调大只表现为坏任务多重试几轮， 调小则表现为偶发故障被过早判死。PR-2 自查时 {@code GRANT} 就被误写成
+     * 10（它是执行类）。
+     */
+    @Test
+    void deadLetterThresholdsMatchTheDocumentedSplit() {
+        for (TaskType type : TaskType.values()) {
+            int expected = type.isQuery() ? 10 : 5;
+            assertThat(type.getMaxRetry())
+                    .as("%s 是%s类，阈值应为 %s", type, type.isQuery() ? "查单" : "执行", expected)
+                    .isEqualTo(expected);
+        }
+
+        // 查单类与执行类都得有，否则上面的循环可能只覆盖了其中一类
+        assertThat(Arrays.stream(TaskType.values()).filter(TaskType::isQuery).toList())
+                .isNotEmpty();
+        assertThat(Arrays.stream(TaskType.values()).filter(t -> !t.isQuery()).toList())
+                .isNotEmpty();
+    }
+
+    /**
+     * 续租必须有生产调用点，不能只有 SQL。
+     *
+     * <p>《分阶段方案》§5.6 ④ 定的「执行超租约三分之二即续租」需要有人调 {@code renewLease}。 PR-2 初稿里它只被 {@code
+     * ShapeFreezeTest} 与 IT 引用 —— fencing 检查照常通过，因为那只 验证 SQL 长什么样，不验证有没有人调用它。
+     */
+    @Test
+    void leaseRenewalIsWiredIntoTheScheduler() {
+        String scheduler =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/task/BenefitTaskScheduler.java");
+
+        assertThat(scheduler).as("调度器必须调用 renewLease，否则长任务的租约会在执行中途到期被接管").contains("renewLease(");
     }
 
     /** 任务写回一律带 lease_owner 校验，否则过期持有者能覆盖接管者的结果。 */

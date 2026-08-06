@@ -217,6 +217,154 @@ class ReliableTaskIT extends AbstractMySqlIT {
                         });
     }
 
+    /**
+     * 退避与死信：任务连续失败时 {@code retry_count} 递增、{@code next_time} 后推，超阈进 {@code DEAD}。
+     *
+     * <p><b>这是 PR-2 里唯一没有真实业务路径能触发的分支</b> —— GRANT 在 mock 下恒成功，故障注入要到 PR-3 才有。用尚无处理器的 {@code
+     * QUERY_GRANT} 驱动：走「无处理器」分支，同样退避重排。
+     *
+     * <p><b>断言的是 {@code next_time} 相对本轮之前严格后移，而不是「它在将来」</b>：IT 里退避基数被压到 毫秒级（首档
+     * 1ms），断言执行时那一毫秒早已过去，「在将来」恒不成立。后移才是退避要保证的性质， 且与基数取值无关。绝对值由 {@code BackoffPolicyTest} 覆盖。
+     *
+     * <p>每轮之间显式把 {@code next_time} 置为当前时刻使其可领 —— 用 sleep 等到期会让测试时长取决于 退避基数，且掩盖「根本没退避」这种情况。
+     */
+    /** 短退避序列按 {@code mp.task.backoff-scale=0.02} 压缩后的理论值：1s/5s/30s → 20/100/600ms。 */
+    private static final long[] EXPECTED_BACKOFF_MILLIS = {20, 100, 600};
+
+    @Test
+    void repeatedFailureIncrementsRetryCountAndPushesNextTimeForward() {
+        String taskNo = "TK_IT_backoff";
+        taskMapper.enqueue(
+                taskNo, "BZ_IT_backoff", TaskType.QUERY_GRANT.name(), "OP_IT_backoff", 0, "{}");
+
+        List<Long> pushes = new ArrayList<>();
+        for (int round = 1; round <= 3; round++) {
+            // 置为当前时刻后立即读，作为本轮退避的计算基准
+            makeDue(taskNo);
+            String before = nextTimeOf(taskNo);
+
+            scheduler.runOnce();
+
+            assertThat(
+                            num(
+                                    benefitJdbc,
+                                    "SELECT retry_count FROM benefit_task WHERE task_no = ?",
+                                    taskNo))
+                    .as("第 %s 轮失败后 retry_count 应为 %s", round, round)
+                    .isEqualTo(round);
+
+            // 退避量随重试次数增长：短退避序列 1ms → 5ms → 30ms（基数已按 scale 压缩）。
+            // 只断言「next_time 后移」是不够的 —— 退避取 0 时它等于 NOW(3)，而每轮之间墙钟本就在
+            // 前进，断言照样通过（已实测确认）。要验的是退避本身，就必须验后推量
+            long pushedMillis = millisBetween(before, nextTimeOf(taskNo));
+            // 断言下界取该轮理论值的一半：实测三轮为 24 / 106 / 604 ms（理论 20 / 100 / 600，
+            // 余量是调度器每轮自身耗时）。取「不小于前一轮」是不够的 —— 退避取 0 时三轮都是几毫秒
+            // 的墙钟噪声，逐轮不减照样成立（已实测确认）
+            long expectedMillis = EXPECTED_BACKOFF_MILLIS[round - 1];
+            assertThat(pushedMillis)
+                    .as("第 %s 轮退避应约 %sms，实际 %sms", round, expectedMillis, pushedMillis)
+                    .isGreaterThan(expectedMillis / 2);
+            pushes.add(pushedMillis);
+
+            // 无处理器不判死信：补上处理器后任务应能继续跑，而不是已经被判死
+            assertThat(
+                            str(
+                                    benefitJdbc,
+                                    "SELECT status FROM benefit_task WHERE task_no = ?",
+                                    taskNo))
+                    .isEqualTo(TaskStatus.PENDING.name());
+            // 租约每轮都还回去，否则要等租约过期撞上僵尸回收才捞得回来
+            assertThat(
+                            str(
+                                    benefitJdbc,
+                                    "SELECT lease_owner FROM benefit_task WHERE task_no = ?",
+                                    taskNo))
+                    .isNull();
+        }
+
+        // 末轮显著大于首轮：验的是序列在增长，而非三轮恰好都落在同一噪声区间
+        assertThat(pushes.get(2)).as("末轮退避量应远大于首轮，实际 %s", pushes).isGreaterThan(pushes.get(0) * 5);
+    }
+
+    /**
+     * 处理器持续返回 {@code UNKNOWN} 时超阈进死信，并停止重试。
+     *
+     * <p>死信是「停止重试并等人工处置」，不是「丢弃」：状态置 {@code DEAD} 留在表里，后续对账与人工 修复以它为入口。若超阈后仍留在 {@code
+     * PENDING}，坏任务会无限重试拖垮调度。
+     */
+    @Test
+    void taskStopsRetryingOnceItReachesTheDeadLetterThreshold() {
+        String taskNo = "TK_IT_deadGrant";
+        String bizNo = "BZ_IT_deadGrant";
+        // GRANT 有处理器，但该订单不存在 —— grantBenefit 抛 BizException，按 UNKNOWN 处置
+        taskMapper.enqueue(taskNo, bizNo, TaskType.GRANT.name(), bizNo + "_GRANT", 0, "{}");
+
+        int maxRetry = TaskType.GRANT.getMaxRetry();
+        List<Long> pushes = new ArrayList<>();
+        for (int round = 0; round < maxRetry; round++) {
+            makeDue(taskNo);
+            String before = nextTimeOf(taskNo);
+
+            scheduler.runOnce();
+
+            // 进死信前每轮都退避。这条路径（writeBack 的 PROCESSING/UNKNOWN 分支）与上一个用例
+            // 走的「无处理器」分支是两处独立的 markRetry 调用，各自都要验 —— 只验其一时，另一处
+            // 改坏了测试不会红
+            if (str(benefitJdbc, "SELECT status FROM benefit_task WHERE task_no = ?", taskNo)
+                    .equals(TaskStatus.PENDING.name())) {
+                pushes.add(millisBetween(before, nextTimeOf(taskNo)));
+            }
+        }
+
+        // 退避随重试增长：末次重试的退避量应远大于首次
+        assertThat(pushes).as("进死信前应有多轮退避").hasSizeGreaterThan(2);
+        assertThat(pushes.get(pushes.size() - 1))
+                .as("退避应随重试次数增长，实际 %s", pushes)
+                .isGreaterThan(pushes.get(0) * 5);
+
+        assertThat(str(benefitJdbc, "SELECT status FROM benefit_task WHERE task_no = ?", taskNo))
+                .as("连续 %s 次未成功应进死信", maxRetry)
+                .isEqualTo(TaskStatus.DEAD.name());
+        // 死信后租约已释放
+        assertThat(
+                        str(
+                                benefitJdbc,
+                                "SELECT lease_owner FROM benefit_task WHERE task_no = ?",
+                                taskNo))
+                .isNull();
+
+        // 死信是终态：主扫描只看 PENDING，不会再领它
+        Integer retryAtDeath =
+                num(benefitJdbc, "SELECT retry_count FROM benefit_task WHERE task_no = ?", taskNo);
+        makeDue(taskNo);
+        scheduler.runOnce();
+        assertThat(
+                        num(
+                                benefitJdbc,
+                                "SELECT retry_count FROM benefit_task WHERE task_no = ?",
+                                taskNo))
+                .as("进死信后不应再被领取重试")
+                .isEqualTo(retryAtDeath);
+    }
+
+    /** 两个 MySQL DATETIME(3) 字面量之间的毫秒差。 */
+    private long millisBetween(String from, String to) {
+        return java.time.Duration.between(parse(from), parse(to)).toMillis();
+    }
+
+    private static java.time.LocalDateTime parse(String ts) {
+        return java.time.LocalDateTime.parse(ts.replace(' ', 'T'));
+    }
+
+    private String nextTimeOf(String taskNo) {
+        return str(benefitJdbc, "SELECT next_time FROM benefit_task WHERE task_no = ?", taskNo);
+    }
+
+    /** 把任务的 next_time 置为当前时刻，使其立即可领 —— 绕开退避等待，不改退避本身。 */
+    private void makeDue(String taskNo) {
+        benefitJdbc.update("UPDATE benefit_task SET next_time = NOW(3) WHERE task_no = ?", taskNo);
+    }
+
     /** 无待执行任务时调度器空转返回 0，不抛异常。 */
     @Test
     void schedulerRunsCleanWhenNothingIsPending() {

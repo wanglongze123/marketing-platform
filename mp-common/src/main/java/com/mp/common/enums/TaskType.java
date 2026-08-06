@@ -11,7 +11,7 @@ package com.mp.common.enums;
 public enum TaskType {
 
     /** 履约发放。支付成功事务内落库，本地消息表的主用例 */
-    GRANT(10, false),
+    GRANT(5, false),
 
     /** 发放结果查单。{@code UNKNOWN} 的收敛通路 */
     QUERY_GRANT(10, true),
