@@ -44,7 +44,7 @@ class ReliableTaskIT extends AbstractMySqlIT {
         int threads = 6;
         String tag = "claim";
         for (int i = 0; i < taskCount; i++) {
-            enqueueBare(tag + "_" + i, TaskType.QUERY_GRANT);
+            enqueueBare(tag + "_" + i, TaskType.STOCK_CONSUME);
         }
 
         // taskNo -> 领到它的 owner 列表。同一个 taskNo 出现两次即重复领取
@@ -110,7 +110,7 @@ class ReliableTaskIT extends AbstractMySqlIT {
      */
     @Test
     void expiredLeaseIsTakenOverAndStaleOwnerCannotWriteBack() {
-        String taskNo = enqueueBare("fencing", TaskType.QUERY_GRANT);
+        String taskNo = enqueueBare("fencing", TaskType.STOCK_CONSUME);
 
         // A 领走
         List<BenefitTask> byA = claimService.claimPending("ownerA", 10, 30);
@@ -221,7 +221,7 @@ class ReliableTaskIT extends AbstractMySqlIT {
      * 退避与死信：任务连续失败时 {@code retry_count} 递增、{@code next_time} 后推，超阈进 {@code DEAD}。
      *
      * <p><b>这是 PR-2 里唯一没有真实业务路径能触发的分支</b> —— GRANT 在 mock 下恒成功，故障注入要到 PR-3 才有。用尚无处理器的 {@code
-     * QUERY_GRANT} 驱动：走「无处理器」分支，同样退避重排。
+     * STOCK_CONSUME}（PR-5 才接入处理器）驱动：走「无处理器」分支，同样退避重排。
      *
      * <p><b>断言的是 {@code next_time} 相对本轮之前严格后移，而不是「它在将来」</b>：IT 里退避基数被压到 毫秒级（首档
      * 1ms），断言执行时那一毫秒早已过去，「在将来」恒不成立。后移才是退避要保证的性质， 且与基数取值无关。绝对值由 {@code BackoffPolicyTest} 覆盖。
@@ -234,8 +234,9 @@ class ReliableTaskIT extends AbstractMySqlIT {
     @Test
     void repeatedFailureIncrementsRetryCountAndPushesNextTimeForward() {
         String taskNo = "TK_IT_backoff";
+        // 用确实无处理器的类型：QUERY_GRANT 自 PR-3 起已有处理器，会走查单而非「无处理器」分支
         taskMapper.enqueue(
-                taskNo, "BZ_IT_backoff", TaskType.QUERY_GRANT.name(), "OP_IT_backoff", 0, "{}");
+                taskNo, "BZ_IT_backoff", TaskType.STOCK_CONSUME.name(), "OP_IT_backoff", 0, "{}");
 
         List<Long> pushes = new ArrayList<>();
         for (int round = 1; round <= 3; round++) {

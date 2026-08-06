@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.mp.benefit.entity.BenefitFulfillmentRecord;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 @Mapper
@@ -31,4 +32,31 @@ public interface BenefitFulfillmentRecordMapper extends BaseMapper<BenefitFulfil
             @Param("providerOrderNo") String providerOrderNo,
             @Param("grantOpNo") String grantOpNo,
             @Param("grantStatus") String grantStatus);
+
+    /**
+     * 查单收敛后按发奖幂等号回写明细态。
+     *
+     * <p>只推进未终结的行：已 SUCCESS 的不被后到的结果改写。
+     */
+    @Update(
+            "UPDATE benefit_fulfillment_record SET grant_status = #{grantStatus},"
+                    + " provider_order_no = COALESCE(#{providerOrderNo}, provider_order_no)"
+                    + " WHERE play_biz_record_no = #{bizNo} AND grant_op_no = #{grantOpNo}"
+                    + " AND grant_status NOT IN ('SUCCESS', 'FAILED')")
+    int settleByGrantOpNo(
+            @Param("bizNo") String bizNo,
+            @Param("grantOpNo") String grantOpNo,
+            @Param("grantStatus") String grantStatus,
+            @Param("providerOrderNo") String providerOrderNo);
+
+    /** 未终结的履约明细数。主单能否置终态以此为判据，不另建计数。 */
+    @Select(
+            "SELECT COUNT(*) FROM benefit_fulfillment_record WHERE play_biz_record_no = #{bizNo}"
+                    + " AND grant_status NOT IN ('SUCCESS', 'FAILED')")
+    int countUnresolved(@Param("bizNo") String bizNo);
+
+    @Select(
+            "SELECT COUNT(*) FROM benefit_fulfillment_record WHERE play_biz_record_no = #{bizNo}"
+                    + " AND grant_status = #{grantStatus}")
+    int countByStatus(@Param("bizNo") String bizNo, @Param("grantStatus") String grantStatus);
 }

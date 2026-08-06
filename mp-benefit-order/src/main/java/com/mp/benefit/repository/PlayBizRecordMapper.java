@@ -29,6 +29,20 @@ public interface PlayBizRecordMapper extends BaseMapper<PlayBizRecord> {
             @Param("payAmount") long payAmount,
             @Param("tradeNo") String tradeNo);
 
+    /**
+     * 从「可重新发起」的状态推进到 {@code GRANTING}。
+     *
+     * <p>入边有两条：{@code NOT_START}（首次履约）与 {@code GRANT_UNKNOWN}（查单判定原调用未到达后 的重发）。只认前者会让重发的 GRANT
+     * 任务推不动状态 —— 条件更新 {@code affected_rows=0}， 主单永远停在 {@code GRANT_UNKNOWN}，且不报错。
+     *
+     * <p>{@code GRANT_SUCCESS} / {@code GRANT_FAILED} 不在入边内：终态不可重新发起。
+     */
+    @Update(
+            "UPDATE play_biz_record SET grant_status = 'GRANTING'"
+                    + " WHERE play_biz_record_no = #{bizNo}"
+                    + " AND grant_status IN ('NOT_START', 'GRANT_UNKNOWN')")
+    int startGranting(@Param("bizNo") String bizNo);
+
     /** 发放态推进。 */
     @Update(
             "UPDATE play_biz_record SET grant_status = #{toStatus}"
