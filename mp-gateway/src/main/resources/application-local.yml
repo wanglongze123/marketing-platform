@@ -1,4 +1,9 @@
 mp:
+  lock:
+    # L2 分布式锁开关。置 false 即去锁对照组（退出标准第 15 条）——
+    # 断言正确性结果与开锁组完全一致，只有 DB 冲突指标不同。
+    # 若关掉后正确性就变了，说明有地方错把锁当成了正确性依据，而非性能优化
+    enabled: true
   pay-notify:
     # 支付通知验签密钥，与支付方共享。与 consult-token.secret 刻意分开 ——
     # 两者是不同的信任边界：凭证密钥平台自签自验，泄露只影响下单校验；支付密钥泄露
@@ -14,6 +19,12 @@ mp:
     ttl-seconds: 900
 
 spring:
+  data:
+    redis:
+      # V2 起启用：docker compose --profile v2 up -d
+      host: localhost
+      port: 6379
+
   datasource:
     # 四库各用仅授权自身 schema 的账号 —— 权限隔离让「禁止跨库 JOIN」在运行期成为约束，
     # 而非仅靠多数据源（同实例下带库名限定的 JOIN 照常执行）。见《分阶段方案》§5.6 ①

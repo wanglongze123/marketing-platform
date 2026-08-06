@@ -13,7 +13,9 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
+import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.utility.MountableFile;
 
 /**
@@ -53,8 +55,21 @@ abstract class AbstractMySqlIT {
                             MountableFile.forHostPath("../docker/mysql-init"),
                             "/docker-entrypoint-initdb.d");
 
+    /**
+     * Redis 供 L2 分布式锁使用。
+     *
+     * <p>用通用 {@code GenericContainer} 而非专用模块 —— Testcontainers 没有 redis 模块，而 Redis 的
+     * 就绪判据简单到一行等待日志即可。
+     *
+     * <p><b>与 MySQL 同为静态单例</b>：按类起停会让每个测试类都等一遍容器启动。
+     */
+    @SuppressWarnings("resource")
+    static final GenericContainer<?> REDIS =
+            new GenericContainer<>(DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
+
     static {
         MYSQL.start();
+        REDIS.start();
     }
 
     @DynamicPropertySource
@@ -75,6 +90,8 @@ abstract class AbstractMySqlIT {
         registry.add("mp.consult-token.ttl-seconds", () -> "900");
         // 支付通知密钥与凭证密钥取不同值 —— 同值时把两者用反不会有任何用例变红
         registry.add("mp.pay-notify.secret", () -> "it-pay-notify-secret");
+        registry.add("spring.data.redis.host", REDIS::getHost);
+        registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
 
         register(registry, "activity", "db_activity", "mp_activity");
         register(registry, "benefit", "db_benefit", "mp_benefit");

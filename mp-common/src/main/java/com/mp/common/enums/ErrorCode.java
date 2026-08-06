@@ -59,4 +59,12 @@ public final class ErrorCode {
 
     /** 下游超时/未知，映射为 {@code RetStatus.UNKNOWN} */
     public static final String DOWNSTREAM_UNKNOWN = "5001";
+
+    /**
+     * 同一业务对象正在被并发处理，请稍后重试。V2 PR-7 引入。
+     *
+     * <p>归 5xxx 而非 1xxx：这<b>不是业务规则拒绝</b>，而是「现在不知道结果，等会儿再来」——
+     * 上游应当按未知态重试，而不是把它当成终态失败展示给用户。抢不到锁不代表这笔业务不成立。
+     */
+    public static final String CONCURRENT_CONFLICT = "5002";
 }
