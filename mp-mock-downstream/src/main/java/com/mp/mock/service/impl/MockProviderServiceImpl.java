@@ -89,7 +89,7 @@ public class MockProviderServiceImpl implements MockProviderService {
         }
 
         if (injector.providerMode() == FaultMode.PROCESSING) {
-            if (injector.processingShouldSucceedNow()) {
+            if (injector.processingShouldSucceedNow(opNo)) {
                 String orderNo = ledger.record(opNo);
                 log.info("mock provider processing completed on query, opNo={}", opNo);
                 return resp(RetStatus.SUCCESS, orderNo, null);

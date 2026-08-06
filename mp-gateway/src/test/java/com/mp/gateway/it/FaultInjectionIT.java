@@ -158,12 +158,11 @@ class FaultInjectionIT extends AbstractMySqlIT {
         String opNo = bizNo + "_G_PROVIDER_A";
         long processingPush = pushOfNextQuery(bizNo, opNo);
 
+        // 长退避首档 30s×0.02=600ms，短退避首档 1s×0.02=20ms —— 两者相差 30 倍。
+        // 下界取 300ms：既排除短退避（20ms 量级），也留出调度写入与本次读之间流逝的时间
         assertThat(processingPush)
-                .as("PROCESSING 应走长退避（首档 30s×scale=600ms），实际 %sms", processingPush)
+                .as("PROCESSING 应走长退避（首档约 600ms），实际 %sms", processingPush)
                 .isGreaterThan(300);
-
-        // 对照：UNKNOWN 的首档是 1s×scale=20ms，两者不在同一量级
-        assertThat(processingPush).as("长退避应显著长于短退避首档 20ms").isGreaterThan(20 * 5);
 
         // 继续查单直至下游完成，最终收敛且不重复发放
         injector.setProcessingTurns(1);
@@ -318,28 +317,31 @@ class FaultInjectionIT extends AbstractMySqlIT {
                 bizNo);
     }
 
-    /** 某条查单任务本轮被推后的毫秒数，用于区分长短退避。 */
+    /**
+     * 某条查单任务本轮的退避量（毫秒）。
+     *
+     * <p><b>取 {@code next_time - NOW(3)}，两端都是数据库时钟</b>，而不是「本轮开始到结束的墙钟差」。 后者把调度器单轮自身的耗时算了进去 —— CI
+     * 机器上那部分是几百毫秒，远超被测的退避量， 断言随机失败（本地 20ms 的退避在 CI 上量到 414ms）。
+     */
     private long pushOfNextQuery(String bizNo, String opNo) {
         benefitJdbc.update(
                 "UPDATE benefit_task SET next_time = NOW(3) WHERE biz_no = ? AND op_no = ?",
                 bizNo,
                 opNo);
-        String before = queryNextTime(bizNo, opNo);
         runScheduler();
-        String after = queryNextTime(bizNo, opNo);
-        return java.time.Duration.between(parse(before), parse(after)).toMillis();
+        return backoffMillis(bizNo, opNo);
     }
 
-    private String queryNextTime(String bizNo, String opNo) {
-        return str(
-                benefitJdbc,
-                "SELECT next_time FROM benefit_task WHERE biz_no = ? AND op_no = ?",
-                bizNo,
-                opNo);
-    }
-
-    private static java.time.LocalDateTime parse(String ts) {
-        return java.time.LocalDateTime.parse(ts.replace(' ', 'T'));
+    /** {@code next_time} 距数据库当前时刻的毫秒数，即调度器刚写入的退避量。 */
+    private long backoffMillis(String bizNo, String opNo) {
+        Integer ms =
+                num(
+                        benefitJdbc,
+                        "SELECT TIMESTAMPDIFF(MICROSECOND, NOW(3), next_time) DIV 1000"
+                                + " FROM benefit_task WHERE biz_no = ? AND op_no = ?",
+                        bizNo,
+                        opNo);
+        return ms == null ? 0 : ms;
     }
 
     /** 重发任务数：op_no 不等于支付回调落的那条，即为查单触发的定向重发。 */

@@ -1,6 +1,8 @@
 package com.mp.mock.fault;
 
 import com.mp.api.mock.dto.FaultMode;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
@@ -27,8 +29,13 @@ public class FaultInjector {
             new AtomicReference<>(FaultMode.SUCCESS);
     private final AtomicReference<FaultMode> payMode = new AtomicReference<>(FaultMode.SUCCESS);
 
-    /** {@code PROCESSING} 模式下已发生的查单次数，达阈值后转成功 */
-    private final AtomicInteger processingQueries = new AtomicInteger();
+    /**
+     * {@code PROCESSING} 模式下每个 {@code opNo} 各自的查单次数，达阈值后转成功。
+     *
+     * <p><b>按 opNo 分别计数，不用全局计数器</b>：一单跨多个供应方时有多条查单任务共享同一个 计数器，「第 N 次查单转成功」就变成「这批任务合计查了 N 次」——
+     * 转换时机取决于有几个 供应方在查，mock 的行为不再可预测。
+     */
+    private final Map<String, AtomicInteger> processingQueries = new ConcurrentHashMap<>();
 
     private final AtomicInteger processingTurns = new AtomicInteger(DEFAULT_PROCESSING_TURNS);
 
@@ -42,7 +49,7 @@ public class FaultInjector {
 
     public void setProviderMode(FaultMode mode) {
         providerMode.set(mode);
-        processingQueries.set(0);
+        processingQueries.clear();
         log.warn("fault injection: provider mode -> {}", mode);
     }
 
@@ -54,23 +61,24 @@ public class FaultInjector {
     /** 供测试收紧 {@code PROCESSING} 的转换轮次，避免等满默认轮数。 */
     public void setProcessingTurns(int turns) {
         processingTurns.set(Math.max(1, turns));
-        processingQueries.set(0);
+        processingQueries.clear();
     }
 
     /**
-     * {@code PROCESSING} 模式下的查单：累计到阈值即转成功。
+     * {@code PROCESSING} 模式下的查单：该 {@code opNo} 累计到阈值即转成功。
      *
      * @return true 表示本次查单应返回成功
      */
-    public boolean processingShouldSucceedNow() {
-        return processingQueries.incrementAndGet() >= processingTurns.get();
+    public boolean processingShouldSucceedNow(String opNo) {
+        return processingQueries.computeIfAbsent(opNo, k -> new AtomicInteger()).incrementAndGet()
+                >= processingTurns.get();
     }
 
     /** 全部复位。测试之间互不影响，靠的是每个用例自己设模式而非依赖顺序。 */
     public void reset() {
         providerMode.set(FaultMode.SUCCESS);
         payMode.set(FaultMode.SUCCESS);
-        processingQueries.set(0);
+        processingQueries.clear();
         processingTurns.set(DEFAULT_PROCESSING_TURNS);
     }
 }
