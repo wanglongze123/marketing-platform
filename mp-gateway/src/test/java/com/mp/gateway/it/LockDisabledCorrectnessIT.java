@@ -3,6 +3,9 @@ package com.mp.gateway.it;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.mp.api.benefit.dto.PayCallbackReq;
+import com.mp.api.reward.dto.GrantRewardReq;
+import com.mp.api.reward.dto.RewardItem;
+import com.mp.api.reward.service.RewardService;
 import com.mp.common.enums.PayStatus;
 import com.mp.common.exception.BizException;
 import java.util.ArrayList;
@@ -15,6 +18,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.context.TestPropertySource;
 
 /**
@@ -42,6 +46,8 @@ import org.springframework.test.context.TestPropertySource;
  */
 @TestPropertySource(properties = "mp.lock.enabled=false")
 class LockDisabledCorrectnessIT extends AbstractMySqlIT {
+
+    @Autowired private RewardService rewardService;
 
     private static final int THREADS = 12;
 
@@ -111,6 +117,67 @@ class LockDisabledCorrectnessIT extends AbstractMySqlIT {
                                 bizNo))
                 .as("无锁时 GRANT 任务仍只落一条")
                 .isEqualTo(1);
+    }
+
+    /**
+     * <b>无锁时并发发奖仍只产生一条记录</b>（PR-8 补齐，与开锁组用例配对）。
+     *
+     * <p>这一条补的是对照组的<b>完整性</b>，不是为了发现新缺陷：发奖侧本来就没有 L2 锁（锁在订单侧）， 两组走的是同一段代码，结果必然相同。但退出标准 21
+     * 说的是「上述正确性结果完全一致」——「上述」 包含幂等三道闸的第三道，缺了它，这句话就只覆盖了三分之二。
+     *
+     * <p>价值在于把「发奖不依赖锁」这件事<b>写成可执行的断言</b>而非注释。日后若有人给 {@code grantReward} 加锁并顺手弱化 {@code uk_op_no}
+     * 的兜底，本类会红，而开锁组不会 —— 那正是对照组存在的意义。
+     */
+    @Test
+    void concurrentGrantRewardStillProducesOneRecordWithoutLock() throws Exception {
+        String opNo = "OP_NOLOCK_" + System.nanoTime();
+        List<String> providerOrderNos = Collections.synchronizedList(new ArrayList<>());
+
+        runConcurrently(
+                THREADS,
+                () -> {
+                    GrantRewardReq req = new GrantRewardReq();
+                    req.setPlayType("BENEFIT_SELL");
+                    req.setActivityId(ACTIVITY_ID);
+                    req.setBizOrderNo("BZ_NOLOCK_GRANT");
+                    req.setOpNo(opNo);
+                    req.setReceiverId("U_noLockGrant");
+                    RewardItem item = new RewardItem();
+                    item.setItemSeq(0);
+                    item.setRewardType("MONTH_CARD");
+                    item.setProviderType("PROVIDER_A");
+                    item.setProviderProductId("PROD_A_001");
+                    item.setQty(1);
+                    item.setCore(true);
+                    req.setRewardItems(List.of(item));
+
+                    var resp = rewardService.grantReward(req);
+                    if (resp.getItems() != null && !resp.getItems().isEmpty()) {
+                        String no = resp.getItems().get(0).getProviderOrderNo();
+                        if (no != null) {
+                            providerOrderNos.add(no);
+                        }
+                    }
+                });
+
+        assertThat(
+                        count(
+                                rewardJdbc,
+                                "SELECT COUNT(*) FROM reward_grant_record WHERE op_no = ?",
+                                opNo))
+                .as("无锁时 uk_op_no 仍保证只有一条发放记录")
+                .isEqualTo(1);
+        assertThat(
+                        count(
+                                rewardJdbc,
+                                "SELECT COUNT(*) FROM reward_grant_item WHERE op_no = ?",
+                                opNo))
+                .as("明细同样只应有一条")
+                .isEqualTo(1);
+        // 记录唯一还不够：下游单号一致才证明供应方那侧也只发了一次
+        assertThat(providerOrderNos.stream().distinct().toList())
+                .as("providerOrderNo 必须全程一致，不一致即意味着下游发生过第二次发放")
+                .hasSizeLessThanOrEqualTo(1);
     }
 
     /**

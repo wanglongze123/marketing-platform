@@ -17,6 +17,7 @@ import com.mp.common.enums.ItemGrantStatus;
 import com.mp.common.enums.OpStatus;
 import com.mp.common.enums.OpType;
 import com.mp.common.enums.PayStatus;
+import com.mp.common.enums.QuotaStatus;
 import com.mp.common.enums.RefundStatus;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.enums.StockStatus;
@@ -109,7 +110,8 @@ public class OrderTxService {
 
         // ② 扣减限购额度。limitQty=0 表示不限购，跳过 —— 建一行 limit_qty=0 的记录会让
         // 后续每次扣减都撞 used_qty + qty <= 0 而失败，等于「不限购」被实现成「一件都不能买」
-        if (purchaseLimitQty > 0) {
+        boolean quotaLocked = purchaseLimitQty > 0;
+        if (quotaLocked) {
             consumeQuota(req, qty, purchaseLimitQty);
         }
 
@@ -125,6 +127,9 @@ public class OrderTxService {
         record.setRefundStatus(RefundStatus.NONE.name());
         // 预占已在本事务开头完成，故建单即 LOCKED。它是后续「只处置一次」的前置状态
         record.setStockStatus(StockStatus.LOCKED.name());
+        // 额度态取决于这一单到底扣没扣，不能跟着库存一律置 LOCKED —— 不限购的单没有额度行，
+        // 置 LOCKED 会让它在释放时把同用户另一笔单的额度还掉（该行是共享计数器，下界拦不住）
+        record.setQuotaStatus(quotaLocked ? QuotaStatus.LOCKED.name() : QuotaStatus.NONE.name());
         record.setOrderAmount(salePrice);
         record.setCurrency("CNY");
         record.setConfigVersion(configVersion);
@@ -522,6 +527,10 @@ public class OrderTxService {
      *
      * <p><b>不能用库存 SQL 的 {@code affected_rows} 代替这道判断</b>：{@code WHERE locked >= qty} 在别的订单占着
      * 库存时照常通过，重复执行会吃掉别人的预占。
+     *
+     * <p><b>{@code quota_status} 停在 {@code LOCKED} 不动，这是有意的</b>：额度买了就算用掉，成交时无事 可做。它与库存的不对称在技术方案
+     * §3.4 的口径表里 —— 退款要回补库存（商品可以再卖给别人）， 但不返还额度（否则「买了再退」能刷回额度，限购形同虚设）。留在 {@code LOCKED} 恰好表达「这一份
+     * 额度已被这一单占用且不会归还」。
      */
     @BenefitTx
     public RetStatus consumeStock(PlayBizRecord order) {
@@ -539,11 +548,15 @@ public class OrderTxService {
     /**
      * 释放预占，<b>并在同一次状态推进里返还限购额度</b>。
      *
-     * <p>两件事合并为一个任务，是因为它们需要<b>同一道闸</b>：额度行按 {@code (user, activity, sku, period)}
-     * 聚合，同一用户的另一笔单占着额度时，重复返还会吃掉那一笔的 —— 与库存的 {@code locked} 完全同构，{@code used_qty >= qty} 这个下界同样拦不住。
+     * <p>两件事由一个任务承接，是因为「交易未成立」本就是一个事件，库存与额度同进同退；拆成两条 任务则同一件事要在两处各判一次状态，且中间崩溃会只还一半。
      *
-     * <p>拆成两个任务则要么各带一道闸（两次状态推进，语义上没有第二个状态可推）、要么共用一道 （谁先跑谁推进，另一个必然跳过而漏掉自己那半件事）。合并后只需一道，且「交易未成立」本就是
-     * 一个事件，库存与额度同进同退。
+     * <p><b>但两者各带一道闸，不共用</b>（PR-8 修正）：额度行按 {@code (user, activity, sku, period)} 聚合， 与库存的 {@code
+     * locked} 完全同构 —— 同一用户的另一笔单占着额度时，重复返还会吃掉那一笔的， 而下界 {@code used_qty >= qty}
+     * 拦不住。这一点与库存一致，故也需要一道每单幂等闸。
+     *
+     * <p>闸必须是两道而非一道，因为<b>「有没有占用过」两者并不同步</b>：库存对每一单都预占，额度 只在 SKU 配了限购时才扣。共用 {@code stock_status}
+     * 一道则不限购的单同样以 {@code LOCKED} 进入释放，把不属于它的额度还掉 —— 这个错误只在<b>限额中途变过</b>时显形：下单时不限购，
+     * 运营随后调高限额，同用户另一单建行并占用，此时前一单释放就会把后一单的额度减掉。
      *
      * <p><b>退款不返还额度</b> —— 限购是为了防单用户过度占用营销资源，若「买了再退」能刷回额度， 限购形同虚设。库存则相反，退款要回补，商品可以再卖给别人。这个不对称写在技术方案
      * §3.4 的 口径表里，是有意为之。退款属 V3，此处只处置「未成立」。
@@ -551,21 +564,30 @@ public class OrderTxService {
     @BenefitTx
     public RetStatus releaseStock(PlayBizRecord order) {
         String bizNo = order.getPlayBizRecordNo();
+
+        // 两道闸各判各的：一单可能占了库存却没占额度（SKU 不限购），此时前者放行、后者跳过。
+        // 任一为 0 都不是错误，只表示那一半已处置过或本就没占用
         if (bizRecordMapper.advanceStockStatus(
                         bizNo, StockStatus.LOCKED.name(), StockStatus.RELEASED.name())
-                == 0) {
+                > 0) {
+            stockMapper.tryRelease(StockKeys.stockKey(order.getSkuId()), order.getQuantity());
+        } else {
             log.info("stock already settled, skip release, bizNo={}", bizNo);
-            return RetStatus.SUCCESS;
         }
 
-        stockMapper.tryRelease(StockKeys.stockKey(order.getSkuId()), order.getQuantity());
-        // 不限购的单没有额度行，affected_rows=0 属正常，不必区分
-        quotaMapper.tryRelease(
-                order.getUserId(),
-                order.getActivityId(),
-                order.getSkuId(),
-                StockKeys.periodKey(),
-                order.getQuantity());
+        if (bizRecordMapper.advanceQuotaStatus(
+                        bizNo, QuotaStatus.LOCKED.name(), QuotaStatus.RELEASED.name())
+                > 0) {
+            quotaMapper.tryRelease(
+                    order.getUserId(),
+                    order.getActivityId(),
+                    order.getSkuId(),
+                    StockKeys.periodKey(),
+                    order.getQuantity());
+        } else {
+            // NONE（不限购，从未占用）与 RELEASED（已还过）都走这里，两者都不该再还
+            log.info("quota not held or already released, skip, bizNo={}", bizNo);
+        }
         return RetStatus.SUCCESS;
     }
 }

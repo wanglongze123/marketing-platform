@@ -113,6 +113,23 @@ public interface PlayBizRecordMapper extends BaseMapper<PlayBizRecord> {
             @Param("fromStatus") String fromStatus,
             @Param("toStatus") String toStatus);
 
+    /**
+     * 限购额度处置态推进，<b>额度返还每单幂等的承重点</b>。
+     *
+     * <p>与 {@link #advanceStockStatus} 分成两个谓词而非共用一个，是因为<b>「有没有占用过」这件事 两者并不同步</b>：库存对每一单都预占，额度只在 SKU
+     * 配了限购时才扣。共用一列则不限购的单会 以 {@code LOCKED} 进入释放分支，把不属于它的额度还掉。
+     *
+     * <p>下界 {@code WHERE used_qty >= qty} 替代不了这道闸，理由与库存的 {@code locked >= ?} 一字不差 —— 额度行按 {@code
+     * (user, activity, sku, period)} 聚合，是该用户所有订单<b>共享</b>的 计数器，另一笔单占着时下界照常放行，结果是这一单还掉了那一单的额度。
+     */
+    @Update(
+            "UPDATE play_biz_record SET quota_status = #{toStatus}"
+                    + " WHERE play_biz_record_no = #{bizNo} AND quota_status = #{fromStatus}")
+    int advanceQuotaStatus(
+            @Param("bizNo") String bizNo,
+            @Param("fromStatus") String fromStatus,
+            @Param("toStatus") String toStatus);
+
     /** 回填支付单号。建单后第二个短事务，不改任何状态。 */
     @Update("UPDATE play_biz_record SET trade_no = #{tradeNo} WHERE play_biz_record_no = #{bizNo}")
     int fillTradeNo(@Param("bizNo") String bizNo, @Param("tradeNo") String tradeNo);

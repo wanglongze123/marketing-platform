@@ -4,12 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.mp.api.benefit.dto.ConvergenceResp;
 import com.mp.api.benefit.dto.CreateTradeResp;
+import com.mp.api.mock.dto.FaultMode;
 import com.mp.benefit.entity.BenefitTask;
 import com.mp.benefit.repository.BenefitTaskMapper;
 import com.mp.benefit.task.TaskClaimService;
 import com.mp.common.enums.GrantStatus;
 import com.mp.common.enums.TaskStatus;
 import com.mp.common.enums.TaskType;
+import com.mp.mock.fault.FaultInjector;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -18,6 +20,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -31,6 +34,12 @@ class ReliableTaskIT extends AbstractMySqlIT {
 
     @Autowired private BenefitTaskMapper taskMapper;
     @Autowired private TaskClaimService claimService;
+    @Autowired private FaultInjector injector;
+
+    @AfterEach
+    void resetInjection() {
+        injector.reset();
+    }
 
     /**
      * 标准 8：并发领取，每条任务只被一个 {@code lease_owner} 领走。
@@ -305,12 +314,21 @@ class ReliableTaskIT extends AbstractMySqlIT {
      *
      * <p>死信是「停止重试并等人工处置」，不是「丢弃」：状态置 {@code DEAD} 留在表里，后续对账与人工 修复以它为入口。若超阈后仍留在 {@code
      * PENDING}，坏任务会无限重试拖垮调度。
+     *
+     * <p><b>构造方式取「下游持续超时」而非「订单不存在」</b>（PR-8 改）。原先借的是后者 —— 主单查不到 抛 {@code 4001}，被调度器按 {@code
+     * UNKNOWN} 重试到死信。但那是个<b>确定的答案</b>：单都没了，重试 多少次也变不出来，{@code StockTaskHandler} 一直就是判 {@code FAIL}
+     * 的。PR-8 让调度器对 {@code 1xxx}/{@code 4xxx} 一律判 {@code FAIL} 后，这个构造器不再成立。
+     *
+     * <p>换成注入超时才是本用例真正要的形态：结果<b>未知</b>，每一轮重试都可能成功，故必须退避重试， 直到阈值才放弃。这也是死信本来的语义
+     * ——「试到最后仍不知道」，而非「已知做不到」。
      */
     @Test
     void taskStopsRetryingOnceItReachesTheDeadLetterThreshold() {
+        // 下游持续超时：结果未知，每轮重试都可能成功，故应退避重试而非一次判死
+        injector.setProviderMode(FaultMode.TIMEOUT_BEFORE_COMMIT);
+
+        String bizNo = benefitOrderService.createTrade(newTradeReq("deadGrant")).getBizNo();
         String taskNo = "TK_IT_deadGrant";
-        String bizNo = "BZ_IT_deadGrant";
-        // GRANT 有处理器，但该订单不存在 —— grantBenefit 抛 BizException，按 UNKNOWN 处置
         taskMapper.enqueue(taskNo, bizNo, TaskType.GRANT.name(), bizNo + "_GRANT", 0, "{}");
 
         int maxRetry = TaskType.GRANT.getMaxRetry();

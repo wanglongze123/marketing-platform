@@ -67,6 +67,11 @@ class StockAndQuotaIT extends AbstractMySqlIT {
                 TOTAL_STOCK,
                 stockKey());
         benefitJdbc.update("DELETE FROM user_purchase_quota");
+        // 限额也要还原：额度用例会临时改它，不还原则后续用例（含别的测试类）读到的是被改过的值
+        benefitJdbc.update(
+                "UPDATE benefit_sku SET purchase_limit_qty = ? WHERE sku_id = ?",
+                LIMIT_QTY,
+                SKU_ID);
     }
 
     // ------------------------------------------------------------------
@@ -372,6 +377,124 @@ class StockAndQuotaIT extends AbstractMySqlIT {
     }
 
     // ------------------------------------------------------------------
+    // 额度的每单幂等（PR-8）
+    // ------------------------------------------------------------------
+
+    /**
+     * <b>从未占用额度的单，释放时不得动到同用户另一笔单的额度</b>（PR-8 补，补之前是真实缺陷）。
+     *
+     * <p>与 {@code repeatedReleaseDoesNotStealAnotherOrdersLock} 是同一类缺陷的另一半：那条验库存的 {@code
+     * locked}，这条验额度的 {@code used_qty}。两个计数器同构 —— 都按聚合维度共享，都有一个 拦不住跨单误还的下界。
+     *
+     * <p><b>触发条件是「限额中途变过」</b>，这也是它此前没被发现的原因：既有用例里限额恒为 2，每一单
+     * 都占额度，于是「无条件返还」与「按本单是否占用返还」表现完全相同。运营调限额是常规动作， 一变就显形 ——
+     *
+     * <ol>
+     *   <li>限额置 0（不限购），A 单下单：库存占了，额度<b>没有</b>行
+     *   <li>运营调限额为 2，B 单下单：建额度行，{@code used_qty = 1}
+     *   <li>A 单支付失败释放：若无条件调 {@code tryRelease}，下界 {@code used_qty >= 1} 因 B 占着而 照常通过 —— B 的额度被 A
+     *       还掉了
+     * </ol>
+     *
+     * <p>修法是给主单加 {@code quota_status}，与 {@code stock_status} 分列。<b>不能共用一列</b>：库存对
+     * 每一单都预占，额度只在配了限购时才扣，共用则不限购的单同样以 {@code LOCKED} 进入释放分支。
+     */
+    @Test
+    void releaseOfAnOrderThatNeverHeldQuotaDoesNotStealAnothers() {
+        String userId = "U_quotaGhost";
+
+        // ① 限额置 0 —— A 单不占额度
+        setPurchaseLimit(0);
+        String bizA = createOrderFor(userId, "quotaGhostA");
+        assertThat(usedQtyOf(userId)).as("不限购时不该建额度行").isZero();
+        assertThat(quotaStatusOf(bizA)).as("没占额度的单，额度态应为 NONE").isEqualTo("NONE");
+
+        // ② 运营调高限额 —— B 单建行并占用
+        setPurchaseLimit(LIMIT_QTY);
+        createOrderFor(userId, "quotaGhostB");
+        assertThat(usedQtyOf(userId)).isEqualTo(1);
+
+        // ③ A 单支付失败并释放
+        benefitOrderService.payCallback(
+                newPayCallback(bizA, "PAY1_" + bizA, "NS_quotaGhost_1", "FAILED"));
+        runScheduler();
+
+        assertThat(usedQtyOf(userId)).as("A 从未占用额度，释放不得动到 B 的那一份").isEqualTo(1);
+        assertThat(quotaStatusOf(bizA)).as("跳过返还后额度态不变").isEqualTo("NONE");
+        // 库存那一半照常释放 —— 两道闸各判各的，A 确实占了库存
+        assertThat(stockStatusOf(bizA)).isEqualTo("RELEASED");
+        assertThat(lockedOf()).as("A 的库存应已释放，只剩 B 的那份").isEqualTo(1);
+    }
+
+    /** 占过额度的单重复释放，同样不得多还 —— 每单幂等对额度侧一并成立。 */
+    @Test
+    void repeatedReleaseReturnsQuotaOnlyOnce() {
+        String userId = "U_quotaTwice";
+        String bizNo = createOrderFor(userId, "quotaTwiceA");
+        // 同用户另一笔单占着额度，使下界 used_qty >= 1 无法充当闸
+        createOrderFor(userId, "quotaTwiceB");
+        assertThat(usedQtyOf(userId)).isEqualTo(2);
+
+        benefitOrderService.payCallback(
+                newPayCallback(bizNo, "PAY1_" + bizNo, "NS_quotaTwice_1", "FAILED"));
+        runScheduler();
+        assertThat(usedQtyOf(userId)).as("A 释放后应只剩 B 占的那份").isEqualTo(1);
+
+        // 把释放任务打回重跑
+        benefitJdbc.update(
+                "UPDATE benefit_task SET status = 'PENDING', lease_owner = NULL,"
+                        + " next_time = NOW(3) WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.STOCK_RELEASE.name());
+        runScheduler();
+
+        assertThat(usedQtyOf(userId)).as("重复释放不得吃掉 B 的额度").isEqualTo(1);
+        assertThat(quotaStatusOf(bizNo)).isEqualTo("RELEASED");
+    }
+
+    /** 支付成功时额度不返还，{@code quota_status} 停在 {@code LOCKED}（技术方案 §3.4 的不对称）。 */
+    @Test
+    void paySuccessDoesNotReturnQuota() {
+        String userId = "U_quotaKeep";
+        String bizNo = createOrderFor(userId, "quotaKeep");
+        assertThat(usedQtyOf(userId)).isEqualTo(1);
+
+        benefitOrderService.payCallback(
+                newPayCallback(bizNo, "PAY1_" + bizNo, "NS_quotaKeep_1", "SUCCESS"));
+        runScheduler();
+
+        assertThat(usedQtyOf(userId)).as("买了就算用掉，成交不返还额度").isEqualTo(1);
+        assertThat(quotaStatusOf(bizNo)).as("成交后额度态停在 LOCKED —— 这一份不会归还").isEqualTo("LOCKED");
+        assertThat(stockStatusOf(bizNo)).isEqualTo("CONSUMED");
+    }
+
+    // ------------------------------------------------------------------
+
+    private String createOrderFor(String userId, String tag) {
+        CreateTradeReq req = newTradeReq(tag);
+        req.setUserId(userId);
+        req.setConsultToken(consultToken(userId, ACTIVITY_ID, SKU_ID));
+        return benefitOrderService.createTrade(req).getBizNo();
+    }
+
+    private void setPurchaseLimit(int qty) {
+        benefitJdbc.update(
+                "UPDATE benefit_sku SET purchase_limit_qty = ? WHERE sku_id = ?", qty, SKU_ID);
+    }
+
+    private String quotaStatusOf(String bizNo) {
+        return str(
+                benefitJdbc,
+                "SELECT quota_status FROM play_biz_record WHERE play_biz_record_no = ?",
+                bizNo);
+    }
+
+    private String stockStatusOf(String bizNo) {
+        return str(
+                benefitJdbc,
+                "SELECT stock_status FROM play_biz_record WHERE play_biz_record_no = ?",
+                bizNo);
+    }
 
     private String payFor(String tag, String payStatus) {
         CreateTradeReq req = newTradeReq(tag);
