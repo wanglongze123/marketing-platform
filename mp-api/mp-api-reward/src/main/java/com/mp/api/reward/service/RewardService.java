@@ -23,4 +23,14 @@ public interface RewardService {
      * <p>V1 提供实现但主链路不调用，V2 由查单任务驱动。
      */
     GrantRewardResp queryGrant(String opNo);
+
+    /**
+     * 向下游查单并收敛：把未定的明细项推进到终态。
+     *
+     * <p>与 {@link #queryGrant} 的区别：后者只读平台侧记录，本方法会真的去问下游。 由 {@code QUERY_GRANT} 任务驱动，<b>复用原 {@code
+     * opNo}</b> —— 下游按同一键返回首次的 结果，重查不产生新发放。
+     *
+     * @return 仍未定则返回 {@code UNKNOWN} 或 {@code PROCESSING}，调用方据此按各自的退避序列继续
+     */
+    GrantRewardResp reconcileGrant(String opNo);
 }

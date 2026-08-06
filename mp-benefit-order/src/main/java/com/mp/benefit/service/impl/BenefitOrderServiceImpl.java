@@ -270,18 +270,38 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         // 组合权益跨多供应方时天然拆成 N 次调用、N 个幂等键
         Map<String, List<SnapshotItem>> groups = groupByProvider(order.getBenefitSnapshot());
 
+        // 逐供应方发放，记下未收敛的那些 —— 它们各自需要一条查单任务
+        List<String> unresolvedOpNos = new ArrayList<>();
         boolean allSuccess = true;
+        boolean anyUnresolved = false;
         for (Map.Entry<String, List<SnapshotItem>> g : groups.entrySet()) {
-            if (grantOneProvider(order, g.getKey(), g.getValue()) != RetStatus.SUCCESS) {
+            RetStatus one = grantOneProvider(order, g.getKey(), g.getValue());
+            if (one != RetStatus.SUCCESS) {
                 allSuccess = false;
+            }
+            if (one == RetStatus.UNKNOWN || one == RetStatus.PROCESSING) {
+                anyUnresolved = true;
+                unresolvedOpNos.add(IdempotentKeys.grantOpNo(bizNo, g.getKey()));
             }
         }
 
-        // 事务 B：回写终态
-        GrantStatus target = allSuccess ? GrantStatus.GRANT_SUCCESS : GrantStatus.GRANT_FAILED;
-        tx.finishGrant(bizNo, target);
+        // 事务 B：回写终态 + 未收敛项落查单任务，同事务
+        //
+        // 有任何一组未收敛就置 GRANT_UNKNOWN，而不是「多数成功即成功」：主单状态要能回答
+        // 「这笔到底发完没有」，部分未知时答案就是不知道。置 GRANT_FAILED 更糟 —— 那会让
+        // 对账把一笔可能已发放的单当作待补偿
+        GrantStatus target =
+                anyUnresolved
+                        ? GrantStatus.GRANT_UNKNOWN
+                        : (allSuccess ? GrantStatus.GRANT_SUCCESS : GrantStatus.GRANT_FAILED);
+        tx.finishGrant(bizNo, target, unresolvedOpNos);
 
         log.info("grantBenefit done, bizNo={}, groups={}, result={}", bizNo, groups.size(), target);
+
+        // 返回值供任务调度器决定退避：UNKNOWN 短退避、PROCESSING 长退避、FAIL 不再重试
+        if (anyUnresolved) {
+            return RetStatus.UNKNOWN;
+        }
         return allSuccess ? RetStatus.SUCCESS : RetStatus.FAIL;
     }
 
@@ -315,8 +335,10 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
 
         GrantRewardResp resp = rewardService.grantReward(req);
 
-        // 履约明细走 upsert：重入时更新为最新结果，不新增行（uk_biz_item）
-        boolean ok = resp.getRetStatus() == RetStatus.SUCCESS;
+        // 履约明细走 upsert：重入时更新为最新结果，不新增行（uk_biz_item）。
+        // 明细态与下游四分类一一对应，不再压成「成功/失败」两值 —— UNKNOWN 压成 FAILED
+        // 会让这一行看起来是「确定没发」，而查单收敛正要从这些行里找出待查的项
+        ItemGrantStatus itemStatus = toItemStatus(resp.getRetStatus());
         for (int i = 0; i < items.size(); i++) {
             SnapshotItem s = items.get(i);
             String providerOrderNo =
@@ -331,9 +353,24 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
                     s.providerProductId(),
                     providerOrderNo,
                     grantOpNo,
-                    (ok ? ItemGrantStatus.SUCCESS : ItemGrantStatus.FAILED).name());
+                    itemStatus.name());
         }
         return resp.getRetStatus();
+    }
+
+    /**
+     * 下游四分类 → 履约明细态。
+     *
+     * <p>两个枚举刻意不同名（{@code RetStatus.FAIL} 对 {@code ItemGrantStatus.FAILED}），此处是唯一 的转换点。{@code
+     * PROCESSING} 与 {@code UNKNOWN} 都落到明细的未定态，由查单收敛。
+     */
+    private static ItemGrantStatus toItemStatus(RetStatus downstream) {
+        return switch (downstream) {
+            case SUCCESS -> ItemGrantStatus.SUCCESS;
+            case FAIL -> ItemGrantStatus.FAILED;
+            case PROCESSING -> ItemGrantStatus.GRANTING;
+            case UNKNOWN -> ItemGrantStatus.UNKNOWN;
+        };
     }
 
     // ------------------------------------------------------------------

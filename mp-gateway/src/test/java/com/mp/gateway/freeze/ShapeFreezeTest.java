@@ -314,6 +314,56 @@ class ShapeFreezeTest {
         }
     }
 
+    /**
+     * 故障注入的两侧都必须真正读取模式，不能只有端点没有接线。
+     *
+     * <p>《分阶段方案》§5.3 要求注入「作用于 mock 供应方与 mock 支付两侧」。PR-3 初稿里 {@code payMode} 有端点、有存储、有日志，唯独 {@code
+     * MockPayServiceImpl} 不读它 —— 切了模式没有 任何效果，且不报错。这与 PR-2 的 {@code renewLease} 同族：写了 SQL 没有调用点。
+     */
+    @Test
+    void bothMockSidesActuallyReadTheInjectedMode() {
+        assertThat(
+                        read(
+                                "mp-mock-downstream/src/main/java/com/mp/mock/service/impl/"
+                                        + "MockProviderServiceImpl.java"))
+                .as("供应方必须读注入模式")
+                .contains("injector.providerMode()");
+
+        assertThat(
+                        read(
+                                "mp-mock-downstream/src/main/java/com/mp/mock/service/impl/"
+                                        + "MockPayServiceImpl.java"))
+                .as("支付侧必须读注入模式，否则 /api/fault/pay 切了没有任何效果")
+                .contains("injector.payMode()");
+    }
+
+    /**
+     * 查无计数不得复用任务的 {@code retry_count}。
+     *
+     * <p>{@code retry_count} 由调度器对所有非终态结果自增，{@code PROCESSING} 也算在内 —— 于是「连续查无 3 次」退化成「查询 3
+     * 次且最后一次查无」。下游回过 {@code PROCESSING} 即表明已受理， 此后重发是对一笔已受理的请求再发一次。
+     *
+     * <p>行为由 {@code FaultInjectionIT.processingInTheMiddleResetsTheMissStreak} 验证，此处防的是 有人图省事改回
+     * {@code retry_count}。
+     */
+    @Test
+    void missStreakIsCountedSeparatelyFromRetryCount() {
+        String handler =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/task/"
+                                + "QueryGrantTaskHandler.java");
+
+        assertThat(handler)
+                .as("查无计数应独立存储，且遇 PROCESSING 归零")
+                .contains("setMissStreak")
+                .contains("currentMissStreak");
+
+        int idx = handler.indexOf("private RetStatus onMiss(");
+        assertThat(idx).as("未找到 onMiss").isGreaterThan(0);
+        String body = handler.substring(idx, Math.min(handler.length(), idx + 400));
+        assertThat(body).as("onMiss 不得用 retry_count 计连续查无").doesNotContain("getRetryCount()");
+    }
+
     /** 组合注解自身必须指定管理器，否则上一条检查只是把裸注解换了个名字。 */
     @Test
     void eachTxAnnotationDeclaresItsTransactionManager() {
@@ -331,22 +381,61 @@ class ShapeFreezeTest {
     }
 
     /**
-     * 标准 21：处理下游返回值的分支，非 SUCCESS 三类必须显式未实现，不得静默当失败。
+     * 标准 21 的 V2 形态：四分类逐类处置，未定态不得被压成失败。
      *
-     * <p>V1 只实现 SUCCESS。留一个 {@code else → FAIL} 看似无害，但 UNKNOWN 落到 FAIL 分支就会 触发补偿，而下游可能已发放成功 ——
-     * 一笔权益发两次、一笔钱赔两次。宁可抛未实现。
+     * <p>V1 只实现 SUCCESS，其余三类显式抛未实现 —— 那是「宁可不做也不做错」的占位。PR-3 补齐 实现后该检查换成：{@code UNKNOWN} 与 {@code
+     * PROCESSING} 必须各有自己的分支，且不得出现 把它们映射到失败的写法。
+     *
+     * <p>UNKNOWN 落到 FAIL 分支会触发补偿，而下游可能已发放成功 —— 一笔权益发两次、一笔钱赔两次。 这是四分类存在的全部理由。
      */
     @Test
-    void nonSuccessDownstreamBranchesAreExplicitlyUnimplemented() {
+    void everyDownstreamClassificationHasItsOwnBranch() {
         for (String file :
                 List.of(
                         "mp-reward/src/main/java/com/mp/reward/service/impl/RewardServiceImpl.java",
                         "mp-benefit-order/src/main/java/com/mp/benefit/service/impl/BenefitOrderServiceImpl.java")) {
             String src = read(file);
             assertThat(src)
-                    .as("%s 判下游结果处应显式抛未实现，而非默认走失败", file)
-                    .contains("RetStatus.SUCCESS", "UnsupportedOperationException");
+                    .as("%s 必须区分 UNKNOWN 与 PROCESSING，不能只判 SUCCESS", file)
+                    .contains("RetStatus.UNKNOWN")
+                    .contains("RetStatus.PROCESSING");
         }
+
+        // 占位已被真实实现取代：留着会让人以为这些分支还没写
+        assertThat(
+                        read(
+                                "mp-reward/src/main/java/com/mp/reward/service/impl/RewardServiceImpl.java"))
+                .as("四分类已实现，不应再有未实现占位")
+                .doesNotContain("UnsupportedOperationException");
+    }
+
+    /**
+     * 下游查单的「查无」必须返回 {@code UNKNOWN}，不得返回 {@code FAIL}。
+     *
+     * <p>查无可能只是提交在途（三段式的中间态落库与调用方读之间存在窗口），判 {@code FAIL} 会让 调用方据此走补偿。V1 的 {@code queryGrant} 在此返回
+     * {@code FAIL}，是 §7.3 记录的缺陷 9。
+     *
+     * <p>静态检查只能证明「没有把查无写成 FAIL」，收敛行为由 {@code FaultInjectionIT} 验证。
+     */
+    @Test
+    void queryWithNoRecordReturnsUnknownNotFail() {
+        String reward =
+                read("mp-reward/src/main/java/com/mp/reward/service/impl/RewardServiceImpl.java");
+        int idx = reward.indexOf("public GrantRewardResp queryGrant(");
+        assertThat(idx).as("未找到 queryGrant").isGreaterThan(0);
+
+        // 截取方法体前段：记录不存在的分支就在开头
+        String body = reward.substring(idx, Math.min(reward.length(), idx + 800));
+        assertThat(body)
+                .as("queryGrant 查无应返回 UNKNOWN")
+                .contains("RetStatus.UNKNOWN")
+                .doesNotContain("RetStatus.FAIL");
+
+        String mock =
+                read(
+                        "mp-mock-downstream/src/main/java/com/mp/mock/service/impl/"
+                                + "MockProviderServiceImpl.java");
+        assertThat(mock).as("mock 查单的查无同样返回 UNKNOWN").contains("RetStatus.UNKNOWN");
     }
 
     /**
