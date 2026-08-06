@@ -4,6 +4,8 @@ import com.mp.api.benefit.dto.ConvergenceResp;
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.CreateTradeResp;
 import com.mp.api.benefit.dto.PayCallbackReq;
+import com.mp.api.benefit.dto.PreConsultReq;
+import com.mp.api.benefit.dto.PreConsultResp;
 import com.mp.api.benefit.dto.QueryOrderResp;
 import com.mp.common.enums.RetStatus;
 
@@ -11,9 +13,20 @@ import com.mp.common.enums.RetStatus;
 public interface BenefitOrderService {
 
     /**
-     * 下单：组装权益快照、建主单、写操作记录，事务外调支付下单并回填 trade_no。
+     * 预咨询试算：服务端算价并签发咨询凭证。
+     *
+     * <p><b>只读，无业务单据副作用</b>（PRD FR-B01）—— 不占库存、不建单、不落操作记录。咨询通过 不代表下单必然通过（BR-B-02），资格与库存在 {@code
+     * createTrade} 里重新校验。
+     */
+    PreConsultResp preConsult(PreConsultReq req);
+
+    /**
+     * 下单：验凭证 + 比价，随后组装权益快照、建主单、写操作记录，事务外调支付下单并回填 trade_no。
      *
      * <p>同 {@code clientReqNo} 重复请求返回原单，由 {@code uk_idempotent} 保证。
+     *
+     * <p>V2 起前置两道校验（技术方案 §5.2 ①、④.5）：验签验时效并逐字段比对（不符 {@code 4003}）、 服务端重算价与凭证成交价比对（不等 {@code
+     * 1711}）。两道都在建单之前，拒绝时不留任何单据。
      */
     CreateTradeResp createTrade(CreateTradeReq req);
 

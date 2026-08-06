@@ -4,6 +4,8 @@ import com.mp.api.benefit.dto.ConvergenceResp;
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.CreateTradeResp;
 import com.mp.api.benefit.dto.PayCallbackReq;
+import com.mp.api.benefit.dto.PreConsultReq;
+import com.mp.api.benefit.dto.PreConsultResp;
 import com.mp.api.benefit.dto.QueryOrderResp;
 import com.mp.api.benefit.service.BenefitOrderService;
 import com.mp.common.enums.RetStatus;
@@ -30,6 +32,16 @@ import org.springframework.web.bind.annotation.RestController;
 public class BenefitOrderController {
 
     @Autowired private BenefitOrderService benefitOrderService;
+
+    /**
+     * 预咨询：试算 + 签发咨询凭证。只读，无业务单据副作用。
+     *
+     * <p>端上必须先调本端点再调 {@code /trade} —— 后者要求携带凭证，无凭证一律 {@code 4003}。
+     */
+    @PostMapping("/consult")
+    public ApiResponse<PreConsultResp> preConsult(@RequestBody PreConsultReq req) {
+        return ok(benefitOrderService.preConsult(req));
+    }
 
     @PostMapping("/trade")
     public ApiResponse<CreateTradeResp> createTrade(@RequestBody CreateTradeReq req) {
