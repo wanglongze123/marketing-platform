@@ -777,6 +777,85 @@ class ShapeFreezeTest {
                 .contains("RetStatus.UNKNOWN");
     }
 
+    /**
+     * <b>支付通知验签必须是 {@code payCallback} 的第一件事</b>（PRD FR-B03 ①、BR-B-12）。
+     *
+     * <p>顺序不是风格问题。金额校验要读主单——那意味着未验签的请求已经能通过响应差异探测「这个 {@code bizNo}
+     * 存不存在」「它的应付金额是多少」。<b>信任边界之外的输入，在通过验签以前不该 触碰任何业务数据。</b>
+     *
+     * <p>此处断言验签出现在「定位主单」之前。行为由 {@code PayNotifySignatureIT} 覆盖。
+     */
+    @Test
+    void payCallbackVerifiesSignatureBeforeTouchingAnyData() {
+        String src =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/service/impl/"
+                                + "BenefitOrderServiceImpl.java");
+
+        int start = src.indexOf("public RetStatus payCallback(");
+        assertThat(start).as("未找到 payCallback").isGreaterThan(0);
+        String body = src.substring(start, Math.min(src.length(), start + 2500));
+
+        int verifyAt = body.indexOf("payNotifySigner.verify(");
+        int findAt = body.indexOf("findByBizNo(");
+        assertThat(verifyAt).as("payCallback 必须验签").isGreaterThan(0);
+        assertThat(findAt).as("未找到主单定位").isGreaterThan(0);
+        assertThat(verifyAt).as("验签必须先于定位主单 —— 否则未验签的请求已能探测单据是否存在").isLessThan(findAt);
+        assertThat(body).as("验签失败须判 4731").contains("ErrorCode.PAY_NOTIFY_SIGN_INVALID");
+    }
+
+    /**
+     * 支付通知的签名必须<b>覆盖全部业务字段</b>，不只是金额。
+     *
+     * <p>只签金额则攻击者可以拿一条真实通知改掉 {@code outTradeNo}，把 A 单的付款算到 B 单头上 —— 金额没变，签名照样对。
+     *
+     * <p>{@code sign} 自身不在其中：它是计算结果，把它签进去无法自洽。
+     */
+    @Test
+    void payNotifySignatureCoversEveryBusinessField() {
+        String dto =
+                read(
+                        "mp-api/mp-api-benefit/src/main/java/com/mp/api/benefit/dto/"
+                                + "PayCallbackReq.java");
+
+        int idx = dto.indexOf("public Map<String, String> signFields()");
+        assertThat(idx).as("未找到 signFields").isGreaterThan(0);
+        String body = dto.substring(idx, Math.min(dto.length(), idx + 900));
+
+        for (String field :
+                List.of(
+                        "outTradeNo",
+                        "tradeNo",
+                        "notifySeq",
+                        "payStatus",
+                        "payAmount",
+                        "currency",
+                        "merchantId")) {
+            assertThat(body).as("签名必须覆盖 %s，只签金额挡不住改订单号", field).contains("\"" + field + "\"");
+        }
+        assertThat(body).as("sign 自身不参与签名 —— 它就是计算结果").doesNotContain("\"sign\"");
+    }
+
+    /**
+     * 支付通知密钥与咨询凭证密钥<b>分开配置</b>，且都不给代码内默认值。
+     *
+     * <p>两者是不同的信任边界：凭证密钥平台自签自验，泄露只影响下单校验；支付密钥与支付方共享， 泄露可伪造收款通知直接资损。共用一把还会让「轮换支付方密钥」被迫连带作废所有在途凭证。
+     */
+    @Test
+    void payNotifySecretIsSeparateFromConsultTokenSecret() {
+        String config =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/config/ConsultTokenConfig.java");
+
+        assertThat(config)
+                .contains("${mp.pay-notify.secret}")
+                .contains("${mp.consult-token.secret}");
+        assertThat(config)
+                .as("两把密钥不得共用同一个配置项")
+                .doesNotContain("${mp.consult-token.secret}\") String secret, @Value");
+        assertThat(config).as("支付通知密钥同样不得有代码内默认值").doesNotContain("mp.pay-notify.secret:");
+    }
+
     /** V0 脚手架必须已清除 —— 留着会让读者以为它是链路的一部分（标准 32）。 */
     @Test
     void v0ScaffoldingIsRemoved() {

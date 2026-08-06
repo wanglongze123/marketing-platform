@@ -46,6 +46,15 @@ public final class ErrorCode {
     /** 凭证签名非法或已过期。V2 引入 */
     public static final String INVALID_TOKEN = "4003";
 
+    /**
+     * 支付通知验签失败（PRD FR-B03、BR-B-12）。V2 PR-6b 引入。
+     *
+     * <p>归 4xxx 而非 5xxx：验签失败是<b>确定的拒绝</b>，重试没有意义 —— 同一条通知重发多少次， 签名还是不对。判 5xxx 会让支付方按「平台系统故障」不断重投。
+     *
+     * <p>BR-B-12：未通过验签的通知<b>不得更新任何业务状态</b>，连操作记录都不留 —— 留痕等于给 攻击者一个无需密钥就能写库的入口。
+     */
+    public static final String PAY_NOTIFY_SIGN_INVALID = "4731";
+
     // ---- 5xxx 系统异常 ----
 
     /** 下游超时/未知，映射为 {@code RetStatus.UNKNOWN} */

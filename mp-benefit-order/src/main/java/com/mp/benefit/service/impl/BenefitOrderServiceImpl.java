@@ -45,6 +45,7 @@ import com.mp.common.enums.RetStatus;
 import com.mp.common.exception.BizException;
 import com.mp.common.security.ConsultTokenPayload;
 import com.mp.common.security.ConsultTokenSigner;
+import com.mp.common.security.PayNotifySigner;
 import com.mp.common.util.BizNoGenerator;
 import com.mp.common.util.IdempotentKeys;
 import java.util.ArrayList;
@@ -88,6 +89,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private final PlayOpRecordMapper opRecordMapper;
     private final BenefitTaskMapper taskMapper;
     private final ConsultTokenSigner tokenSigner;
+    private final PayNotifySigner payNotifySigner;
     private final long tokenTtlSeconds;
 
     public BenefitOrderServiceImpl(
@@ -99,6 +101,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             PlayOpRecordMapper opRecordMapper,
             BenefitTaskMapper taskMapper,
             ConsultTokenSigner tokenSigner,
+            PayNotifySigner payNotifySigner,
             @Value("${mp.consult-token.ttl-seconds}") long tokenTtlSeconds) {
         this.tx = tx;
         this.skuMapper = skuMapper;
@@ -108,6 +111,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         this.opRecordMapper = opRecordMapper;
         this.taskMapper = taskMapper;
         this.tokenSigner = tokenSigner;
+        this.payNotifySigner = payNotifySigner;
         this.tokenTtlSeconds = tokenTtlSeconds;
     }
 
@@ -319,6 +323,18 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
 
     @Override
     public RetStatus payCallback(PayCallbackReq req) {
+        // ① 验签，先于一切（PRD FR-B03 ①、BR-B-12「未通过验签的通知不得更新任何业务状态」）。
+        //
+        // 必须在定位主单之前：放到后面则未验签的请求已经能探测「这个 bizNo 存不存在」，
+        // 且任何一处提前抛出的异常都可能在验签之外留下痕迹。验签是信任边界的第一道，
+        // 边界之外的输入在通过它以前不该触碰任何业务数据
+        if (!payNotifySigner.verify(req.signFields(), req.getSign())) {
+            // 不回显期望签名，也不区分「没带签名」与「签名不对」—— 两者对调用方是同一处置，
+            // 区分开来等于告诉攻击者「格式猜对了，只是算错了」
+            log.error("payCallback signature invalid, outTradeNo={}", req.getOutTradeNo());
+            throw new BizException(ErrorCode.PAY_NOTIFY_SIGN_INVALID, "支付通知验签失败");
+        }
+
         // 按 outTradeNo（= bizNo）定位，不依赖 trade_no 是否已回填
         String bizNo = req.getOutTradeNo();
         PlayBizRecord order = findByBizNo(bizNo);
