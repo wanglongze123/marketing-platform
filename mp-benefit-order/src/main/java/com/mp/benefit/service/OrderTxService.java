@@ -143,6 +143,20 @@ public class OrderTxService {
                 OpType.CREATE_TRADE.name(),
                 "",
                 OpStatus.SUCCESS.name());
+
+        // 超时关单任务与建单同事务，next_time = 支付有效期（技术方案 §5.2）。
+        // 分开落则存在「单建了、关单任务没发出去」的缺口 —— 那笔单永远不会关闭，
+        // 库存与限购额度被永久占着，且没有任何机制会再看它一眼。
+        //
+        // 入参是延迟秒数而非时刻：next_time 由 DATE_ADD(NOW(3), ...) 在库内算出，
+        // 调度判据 next_time <= NOW(3) 两端才出自同一个时钟（§5.6 ⑦）
+        taskMapper.enqueue(
+                BizNoGenerator.taskNo(),
+                bizNo,
+                TaskType.CLOSE_ORDER.name(),
+                bizNo + "_" + TaskType.CLOSE_ORDER.name(),
+                PAY_EXPIRE_MINUTES * 60L,
+                "{}");
         return record;
     }
 
@@ -174,13 +188,24 @@ public class OrderTxService {
     public boolean applyPayCallback(PayCallbackReq req, PlayBizRecord order, PayStatus target) {
         String bizNo = order.getPlayBizRecordNo();
 
+        // 三个目标态各有各的入边（技术方案 §6.4），不是同一个谓词换个参数：
+        //   SUCCESS ← WAIT_PAY / CLOSING   关单受理后付款成功必须放行，否则钱已收而订单被关
+        //   CLOSED  ← WAIT_PAY / CLOSING   关单通知同样能收敛中间态
+        //   FAILED  ← WAIT_PAY             支付失败不该把已受理关单的单打回
         int rows =
-                bizRecordMapper.advancePayStatus(
-                        bizNo,
-                        PayStatus.WAIT_PAY.name(),
-                        target.name(),
-                        req.getPayAmount(),
-                        req.getTradeNo());
+                switch (target) {
+                    case PAY_SUCCESS ->
+                            bizRecordMapper.advanceToPaySuccess(
+                                    bizNo, req.getPayAmount(), req.getTradeNo());
+                    case CLOSED -> bizRecordMapper.advanceToClosed(bizNo);
+                    default ->
+                            bizRecordMapper.advancePayStatus(
+                                    bizNo,
+                                    PayStatus.WAIT_PAY.name(),
+                                    target.name(),
+                                    req.getPayAmount(),
+                                    req.getTradeNo());
+                };
 
         // op_seq 取 notifySeq 而非空串：同一订单会收到多条语义不同的通知，各自都要留痕。
         // 取空串会让第二条在 uk_biz_op 上冲突被拒，执行不到上面的条件更新。
@@ -220,13 +245,14 @@ public class OrderTxService {
             // 500 QPS 的支付通知加上下单预占全部争抢它，持锁时间还会把事务内其余三写一起拖长。
             // 移出后回调事务只写 op_record + pay_status + 两条任务，热点行不在同步路径上
             enqueueStockTask(bizNo, TaskType.STOCK_CONSUME);
-        } else if (target == PayStatus.PAY_FAILED) {
-            // 支付失败即交易未成立：库存与限购额度都要还回去（技术方案 §3.4 的口径表）。
+        } else if (target == PayStatus.PAY_FAILED || target == PayStatus.CLOSED) {
+            // 交易未成立：库存与限购额度都要还回去（技术方案 §3.4 的口径表）。
             // 两者由 STOCK_RELEASE 一条任务承接 —— 它们需要同一道幂等闸（主单库存态的条件更新），
             // 拆成两条任务则那道闸只能被其中一条用掉，另一条必然跳过而漏掉自己那半件事。
             //
-            // 与转消耗互斥：两者都以本次条件更新 affected_rows=1 为前提，
-            // 而 WAIT_PAY 只能被推进一次，故两条分支不可能同时落任务
+            // 与转消耗互斥：两者都以本次条件更新 affected_rows=1 为前提，而支付态只能被推进
+            // 一次，故两条分支不可能同时落任务。CLOSED 与关单链路落的是同一个 op_no，
+            // 重复入队命中 uk_biz_type_op，不产生第二条
             enqueueStockTask(bizNo, TaskType.STOCK_RELEASE);
         }
 
@@ -369,6 +395,112 @@ public class OrderTxService {
     @BenefitTx
     public void fillTradeNo(String bizNo, String tradeNo) {
         bizRecordMapper.fillTradeNo(bizNo, tradeNo);
+    }
+
+    // ------------------------------------------------------------------
+    // 关单
+    // ------------------------------------------------------------------
+
+    /**
+     * 关单确认：置 {@code CLOSED} 并<b>同事务落释放任务</b>。
+     *
+     * <p>入边含 {@code WAIT_PAY}（关单 RPC 直接成功）与 {@code CLOSING}（查单收敛）。 {@code affected_rows = 0}
+     * 即状态已变（已支付、或另一条路径先关了），不落任务也不报错 —— 重复关单幂等（BR-B-18）。
+     *
+     * <p><b>释放任务与状态推进同事务</b>：置了 {@code CLOSED} 却没落任务，这单的库存就永远占着， 且没有任何机制会再看它一眼。这与支付回调落 {@code
+     * GRANT} 任务是同一个理由。
+     *
+     * @return 是否真的推进了状态
+     */
+    @BenefitTx
+    public boolean applyClosed(String bizNo, PlayBizRecord order, String opSeq) {
+        if (bizRecordMapper.advanceToClosed(bizNo) == 0) {
+            log.info("closeOrder rejected by conditional update, bizNo={}", bizNo);
+            return false;
+        }
+        writeCloseOp(bizNo, order, opSeq, OpStatus.SUCCESS, RetStatus.SUCCESS);
+        // 确认关闭才释放。库存与限购额度由 STOCK_RELEASE 一条任务承接
+        enqueueStockTask(bizNo, TaskType.STOCK_RELEASE);
+        log.info("closeOrder done, bizNo={}", bizNo);
+        return true;
+    }
+
+    /**
+     * 关单受理：置 {@code CLOSING} 并同事务落 {@code QUERY_CLOSE} 查单任务。
+     *
+     * <p><b>此处不落任何库存任务</b>（技术方案 §7.4）：关单结果未定，释放等于把额度让给别人，而钱 可能已经收了。待查单收敛到 {@code CLOSED} 或 {@code
+     * PAY_SUCCESS} 后，由确定的那一方落任务。
+     *
+     * <p>查单任务与状态推进同事务，理由同上 —— 进了 {@code CLOSING} 却没落查单任务，这单就永远停在 中间态，库存与额度双双冻结。
+     */
+    @BenefitTx
+    public boolean applyClosing(String bizNo, PlayBizRecord order, String opSeq) {
+        if (bizRecordMapper.advanceToClosing(bizNo) == 0) {
+            log.info("closeOrder cannot enter CLOSING, bizNo={}", bizNo);
+            return false;
+        }
+        // 本地执行态 UNKNOWN、下游四分类 UNKNOWN：两栏分列，合并即无法区分
+        // 「本地已受理但下游未定」与「本地就没执行」
+        writeCloseOp(bizNo, order, opSeq, OpStatus.UNKNOWN, RetStatus.UNKNOWN);
+        taskMapper.enqueue(
+                BizNoGenerator.taskNo(),
+                bizNo,
+                TaskType.QUERY_CLOSE.name(),
+                bizNo + "_" + TaskType.QUERY_CLOSE.name(),
+                0,
+                "{}");
+        log.info("closeOrder accepted, entered CLOSING, bizNo={}", bizNo);
+        return true;
+    }
+
+    /**
+     * 查单收敛到「已支付」：{@code CLOSING → PAY_SUCCESS}，并<b>补建履约任务</b>。
+     *
+     * <p>这条边是「关单受理后用户其实付款成功了」的收敛出口。补建 {@code GRANT} 与 {@code STOCK_CONSUME} ——
+     * 走的是与支付回调完全相同的两条任务，因为发生的是同一件事：这笔钱收到了。
+     *
+     * <p><b>不落释放任务</b>：钱收了，库存该转消耗而非归还。
+     */
+    @BenefitTx
+    public boolean applyPaidAfterClosing(String bizNo, PlayBizRecord order) {
+        if (bizRecordMapper.advanceToPaySuccess(bizNo, order.getOrderAmount(), order.getTradeNo())
+                == 0) {
+            log.info("closing order not advanced to PAY_SUCCESS, bizNo={}", bizNo);
+            return false;
+        }
+        opRecordMapper.finish(
+                bizNo,
+                OpType.CLOSE_ORDER.name(),
+                "",
+                OpStatus.FAILED.name(),
+                RetStatus.FAIL.name());
+        // 与 payCallback 落的是同两条任务：op_no 相同，故若支付通知已到达过，
+        // 这里命中 uk_biz_type_op 不会重复入队
+        taskMapper.enqueue(
+                BizNoGenerator.taskNo(), bizNo, TaskType.GRANT.name(), bizNo + "_GRANT", 0, "{}");
+        enqueueStockTask(bizNo, TaskType.STOCK_CONSUME);
+        log.warn("closing order turned out paid, converged to PAY_SUCCESS, bizNo={}", bizNo);
+        return true;
+    }
+
+    /** 关单操作记录。{@code op_seq} 取空串 —— 一单至多一次关单（{@code OpType.CLOSE_ORDER.atMostOnce}）。 */
+    private void writeCloseOp(
+            String bizNo,
+            PlayBizRecord order,
+            String opSeq,
+            OpStatus status,
+            RetStatus downstream) {
+        opRecordMapper.upsert(
+                bizNo + "_CLOSE",
+                IdempotentKeys.closeOrder(bizNo),
+                bizNo,
+                order.getUserId(),
+                order.getActivityId(),
+                OpType.CLOSE_ORDER.name(),
+                opSeq,
+                status.name());
+        opRecordMapper.finish(
+                bizNo, OpType.CLOSE_ORDER.name(), opSeq, status.name(), downstream.name());
     }
 
     // ------------------------------------------------------------------

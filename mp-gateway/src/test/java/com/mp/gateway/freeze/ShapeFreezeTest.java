@@ -687,6 +687,96 @@ class ShapeFreezeTest {
                 .contains(normalize("bizNo + \"_\" + taskType.name()"));
     }
 
+    /**
+     * <b>{@code PAY_SUCCESS} 的入边必须含 {@code CLOSING}</b>（技术方案 §6.4）。
+     *
+     * <p>这是 V2 新增路径中唯一「拦截了反而资损」的一条。若谓词只认 {@code WAIT_PAY}：订单到期 → 关单 RPC 超时 → 置 {@code CLOSING} →
+     * 用户最后一秒付款成功 → 验签与金额校验都通过 → 条件更新 命中 0 行、被当成乱序通知 ACK 丢弃。结果是<b>已收款、订单永停 {@code CLOSING}、履约任务不建、
+     * 库存不转消耗</b>，且对账前十三项无一覆盖。
+     *
+     * <p>与它相对的是 {@code CLOSING} 的<b>出边</b>：中间态必须同时具备准入谓词的入边与收敛出口， 否则它是个只进不出的黑洞。出口由 {@code
+     * QUERY_CLOSE} 处理器承担，此处一并检查它存在。
+     */
+    @Test
+    void closingIsAcceptedByPaySuccessAndHasAConvergencePath() {
+        String mapper =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/repository/"
+                                + "PlayBizRecordMapper.java");
+
+        assertThat(normalize(sqlOf(mapper, "advanceToPaySuccess")))
+                .as("PAY_SUCCESS 的入边必须含 CLOSING，否则关单受理后的付款成功会被丢弃")
+                .contains(normalize("pay_status IN ('WAIT_PAY', 'CLOSING')"));
+        assertThat(normalize(sqlOf(mapper, "advanceToClosed")))
+                .as("CLOSED 的入边同样含 CLOSING —— 查单收敛走的就是这条边")
+                .contains(normalize("pay_status IN ('WAIT_PAY', 'CLOSING')"));
+        assertThat(normalize(sqlOf(mapper, "advanceToClosing")))
+                .as("进入 CLOSING 只能来自 WAIT_PAY")
+                .contains(normalize("pay_status = 'WAIT_PAY'"));
+
+        // 中间态必须有出口，否则只进不出
+        assertThat(
+                        read(
+                                "mp-benefit-order/src/main/java/com/mp/benefit/task/"
+                                        + "QueryCloseTaskHandler.java"))
+                .as("CLOSING 必须有收敛通路")
+                .contains("TaskType.QUERY_CLOSE");
+    }
+
+    /**
+     * {@code CLOSING} 期间<b>不得释放库存与额度</b>（技术方案 §7.4）。
+     *
+     * <p>结果未定就释放，等于把额度让给别人，而钱可能已经收了。这是 {@code CLOSING} 存在的全部理由 —— 若允许「不确定时先释放」，就根本不需要这个中间态。
+     *
+     * <p>行为由 {@code CloseOrderIT} 验证；此处防的是有人为「早点把库存还回去」在受理分支里加一行 释放任务。
+     */
+    @Test
+    void closingDoesNotEnqueueAnyStockTask() {
+        String tx =
+                read("mp-benefit-order/src/main/java/com/mp/benefit/service/OrderTxService.java");
+
+        int idx = tx.indexOf("public boolean applyClosing(");
+        assertThat(idx).as("未找到 applyClosing").isGreaterThan(0);
+        String body = tx.substring(idx, Math.min(tx.length(), idx + 800));
+
+        assertThat(body)
+                .as("CLOSING 受理时不得落任何库存任务 —— 结果未定就释放，钱可能已经收了")
+                .doesNotContain("enqueueStockTask")
+                .doesNotContain("STOCK_RELEASE");
+        assertThat(body).as("必须落查单任务，否则这单永远停在 CLOSING").contains("QUERY_CLOSE");
+    }
+
+    /**
+     * 关单必须先问支付方，不得只看平台自己的状态。
+     *
+     * <p>BR-B-17「关闭与支付并发时以支付系统结果为准」：平台的 {@code pay_status} 只能证明平台知道 什么，证明不了支付方那边有没有收到钱。直接置 {@code
+     * CLOSED} 会在「用户正在付款」的窗口里把 已收款的单关掉。
+     */
+    @Test
+    void closeOrderAsksThePaymentProviderFirst() {
+        String src =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/service/impl/"
+                                + "BenefitOrderServiceImpl.java");
+
+        int idx = src.indexOf("public RetStatus closeOrder(");
+        assertThat(idx).as("未找到 closeOrder").isGreaterThan(0);
+        String body = src.substring(idx, Math.min(src.length(), idx + 2000));
+
+        assertThat(normalize(body))
+                .as("关单前必须问支付方（BR-B-17）")
+                .contains(normalize("askPayToClose(bizNo)"));
+        assertThat(body).as("已支付须判 1741").contains("ErrorCode.ORDER_ALREADY_PAID");
+
+        // 异常映射 UNKNOWN 而非 FAIL：判 FAIL 等于替支付方断言「已收款」，
+        // 会让一笔本可关闭的单永远停在 WAIT_PAY，库存被永久占着
+        int askIdx = src.indexOf("private RetStatus askPayToClose(");
+        assertThat(askIdx).isGreaterThan(0);
+        assertThat(src.substring(askIdx, Math.min(src.length(), askIdx + 500)))
+                .as("关单异常应映射 UNKNOWN")
+                .contains("RetStatus.UNKNOWN");
+    }
+
     /** V0 脚手架必须已清除 —— 留着会让读者以为它是链路的一部分（标准 32）。 */
     @Test
     void v0ScaffoldingIsRemoved() {

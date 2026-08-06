@@ -31,6 +31,13 @@ public final class ErrorCode {
     /** 支付金额/币种/商户不一致，触发 P0 告警且不改任何状态 */
     public static final String PAY_AMOUNT_MISMATCH = "1731";
 
+    /**
+     * 订单已支付，拒绝关闭（PRD FR-B04、BR-B-16）。V2 PR-6 引入。
+     *
+     * <p>归 1xxx 而非 5xxx：这是<b>确定的业务拒绝</b> —— 支付方明确回报「已收款」，关不掉。判 5xxx 会让调用方按「结果未知」去查单重试，而这件事早已有确定答案。
+     */
+    public static final String ORDER_ALREADY_PAID = "1741";
+
     // ---- 4xxx 入参/凭证非法 ----
 
     /** 必填参数缺失或取值非法 */

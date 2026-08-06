@@ -35,6 +35,15 @@ public final class IdempotentKeys {
         return tradeNo + "_" + notifySeq;
     }
 
-    // V2 补：closeOrder
+    /**
+     * 订单关闭。<b>一单至多一次关单</b>，故键里不含触发来源。
+     *
+     * <p>不把「谁触发的」（超时任务 / 用户取消 / 运营清理）编进键：那会让同一笔单被不同来源各关一次， 而每次关单都尝试释放库存。重复关单必须幂等（BR-B-18），键相同才能命中
+     * {@code uk_idempotent}。
+     */
+    public static String closeOrder(String bizNo) {
+        return bizNo + "_CLOSE";
+    }
+
     // V3 补：refundNo、revokeNo、followerGrantNo、sponsorFlowNo
 }

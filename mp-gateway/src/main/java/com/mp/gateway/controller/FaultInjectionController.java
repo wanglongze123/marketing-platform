@@ -4,6 +4,7 @@ import com.mp.api.mock.dto.FaultMode;
 import com.mp.common.web.ApiResponse;
 import com.mp.common.web.TraceIdHolder;
 import com.mp.mock.fault.FaultInjector;
+import com.mp.mock.fault.PayLedger;
 import com.mp.mock.fault.ProviderLedger;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -32,10 +33,13 @@ public class FaultInjectionController {
 
     private final FaultInjector injector;
     private final ProviderLedger ledger;
+    private final PayLedger payLedger;
 
-    public FaultInjectionController(FaultInjector injector, ProviderLedger ledger) {
+    public FaultInjectionController(
+            FaultInjector injector, ProviderLedger ledger, PayLedger payLedger) {
         this.injector = injector;
         this.ledger = ledger;
+        this.payLedger = payLedger;
     }
 
     @GetMapping("/mode")
@@ -82,7 +86,35 @@ public class FaultInjectionController {
     @DeleteMapping("/ledger")
     public ApiResponse<Map<String, Object>> clearLedger() {
         ledger.clear();
+        payLedger.clear();
         return ok(snapshot());
+    }
+
+    /**
+     * 把支付单标记为「已支付」，构造「关单时对方已收款」的场景。
+     *
+     * <p>真实链路里这一步由用户在收银台完成，mock 没有收银台，故留一个显式入口。演示「已支付的单 拒绝关闭」（BR-B-16）时必须先调它 —— 否则平台问「能关吗」，mock
+     * 答「能」，那条分支根本走不到。
+     *
+     * <p><b>不是「发一条支付成功通知」</b>：它只改支付方自己的账本，平台的 {@code pay_status} 不动。 两者的区别正是这个端点存在的理由 ——
+     * 关单要以支付方的状态为准（BR-B-17）。
+     */
+    @PostMapping("/pay-ledger/{outTradeNo}/paid")
+    public ApiResponse<Map<String, Object>> markPaid(@PathVariable String outTradeNo) {
+        payLedger.markPaid(outTradeNo);
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("outTradeNo", outTradeNo);
+        data.put("payState", String.valueOf(payLedger.find(outTradeNo)));
+        return ok(data);
+    }
+
+    /** 支付方账本快照：关单判据的那一侧。 */
+    @GetMapping("/pay-ledger/{outTradeNo}")
+    public ApiResponse<Map<String, Object>> payLedgerEntry(@PathVariable String outTradeNo) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("outTradeNo", outTradeNo);
+        data.put("payState", String.valueOf(payLedger.find(outTradeNo)));
+        return ok(data);
     }
 
     /** 下游账本快照：跨过服务边界的那一侧，「无重复发放」的最终判据。 */

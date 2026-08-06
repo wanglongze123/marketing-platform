@@ -175,13 +175,17 @@ class ReliableTaskIT extends AbstractMySqlIT {
         benefitOrderService.payCallback(
                 newPayCallback(bizNo, created.getTradeNo(), "NS_conv_1", "SUCCESS"));
 
-        // 驱动前：GRANT 与 STOCK_CONSUME 两条任务待执行，主单发放态未启动。
-        // 支付成功落两条任务而非一条 —— 库存转消耗自 PR-5 起也从回调事务中移出（技术方案 §7.4）
+        // 驱动前：GRANT 与 STOCK_CONSUME 两条待执行，主单发放态未启动。
+        // 支付成功落两条任务而非一条 —— 库存转消耗自 PR-5 起也从回调事务中移出（技术方案 §7.4）。
+        // 另有一条 CLOSE_ORDER 是建单时落的（PR-6），next_time 在支付有效期后，本轮不参与
         ConvergenceResp before = benefitOrderService.queryConvergence(bizNo);
         assertThat(before.getGrantStatus()).isEqualTo(GrantStatus.NOT_START.name());
         assertThat(before.getTasks())
                 .extracting(ConvergenceResp.TaskSnapshot::getTaskType)
-                .containsExactlyInAnyOrder(TaskType.GRANT.name(), TaskType.STOCK_CONSUME.name());
+                .containsExactlyInAnyOrder(
+                        TaskType.GRANT.name(),
+                        TaskType.STOCK_CONSUME.name(),
+                        TaskType.CLOSE_ORDER.name());
         assertThat(before.getTasks())
                 .filteredOn(t -> TaskType.GRANT.name().equals(t.getTaskType()))
                 .singleElement()
@@ -201,7 +205,9 @@ class ReliableTaskIT extends AbstractMySqlIT {
 
         ConvergenceResp after = benefitOrderService.queryConvergence(bizNo);
         assertThat(after.getGrantStatus()).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+        // CLOSE_ORDER 未到期，本轮不该被领取 —— 领了就是把刚支付成功的单关掉
         assertThat(after.getTasks())
+                .filteredOn(t -> !TaskType.CLOSE_ORDER.name().equals(t.getTaskType()))
                 .allSatisfy(
                         t -> {
                             assertThat(t.getStatus()).isEqualTo(TaskStatus.DONE.name());
@@ -209,6 +215,10 @@ class ReliableTaskIT extends AbstractMySqlIT {
                             assertThat(t.getLeaseOwner()).isNull();
                             assertThat(t.getLeaseExpire()).isNull();
                         });
+        assertThat(after.getTasks())
+                .filteredOn(t -> TaskType.CLOSE_ORDER.name().equals(t.getTaskType()))
+                .singleElement()
+                .satisfies(t -> assertThat(t.getStatus()).isEqualTo(TaskStatus.PENDING.name()));
         // GRANT_BENEFIT 的本地执行态与下游四分类分列两栏
         assertThat(after.getOpRecords())
                 .filteredOn(o -> "GRANT_BENEFIT".equals(o.getOpType()))

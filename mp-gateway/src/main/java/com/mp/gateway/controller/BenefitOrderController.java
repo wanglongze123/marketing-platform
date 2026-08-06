@@ -59,6 +59,18 @@ public class BenefitOrderController {
         return ok(Map.of("status", status.name()));
     }
 
+    /**
+     * 关闭订单（用户取消 / 运营清理）。超时关闭由 {@code CLOSE_ORDER} 任务触发，不走本端点。
+     *
+     * <p>已支付的单返回 {@code 1741} 拒绝关闭（BR-B-16）；关单结果未定时进 {@code CLOSING} 并落查单任务， 端上据此提示「处理中」而非「已关闭」——
+     * 后者会让用户以为钱不会被扣。
+     */
+    @PostMapping("/close/{bizNo}")
+    public ApiResponse<Map<String, Object>> closeOrder(@PathVariable String bizNo) {
+        RetStatus status = benefitOrderService.closeOrder(bizNo, "");
+        return ok(Map.of("status", status.name()));
+    }
+
     @GetMapping("/order/{bizNo}")
     public ApiResponse<QueryOrderResp> queryOrder(@PathVariable String bizNo) {
         return ok(benefitOrderService.queryOrder(bizNo));
