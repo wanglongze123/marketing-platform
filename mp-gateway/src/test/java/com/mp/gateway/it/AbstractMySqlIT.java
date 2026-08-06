@@ -3,6 +3,7 @@ package com.mp.gateway.it;
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.api.benefit.service.BenefitOrderService;
+import com.mp.benefit.task.BenefitTaskScheduler;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -56,6 +57,16 @@ abstract class AbstractMySqlIT {
 
     @DynamicPropertySource
     static void datasources(DynamicPropertyRegistry registry) {
+        // 定时器关掉：测试显式驱动 scheduler.runOnce()，定时器在旁边跑会把任务提前领走，
+        // 断言到的序列取决于线程调度，失败时也分不清是被抢了还是逻辑错了
+        registry.add("mp.task.timer.enabled", () -> "false");
+        // 退避压缩 50 倍：生产长退避跑满需 12.5 分钟，压缩后短退避序列为 20ms → 100ms → 600ms。
+        // 缩放的是基数，序列的倍率关系不变 —— 断言的正是这个关系（《分阶段方案》§5.7）。
+        //
+        // 不压得更狠（如 0.001 → 首档 1ms）：那个量级与调度器每轮自身耗时同级，退避量淹没在
+        // 噪声里，「退避取 0」的注入测不出来（已实测确认）
+        registry.add("mp.task.backoff-scale", () -> "0.02");
+
         register(registry, "activity", "db_activity", "mp_activity");
         register(registry, "benefit", "db_benefit", "mp_benefit");
         register(registry, "reward", "db_reward", "mp_reward");
@@ -91,6 +102,8 @@ abstract class AbstractMySqlIT {
     protected static final long SALE_PRICE = 9900L;
 
     @Autowired protected BenefitOrderService benefitOrderService;
+
+    @Autowired protected BenefitTaskScheduler scheduler;
 
     protected JdbcTemplate activityJdbc;
     protected JdbcTemplate benefitJdbc;
@@ -135,6 +148,16 @@ abstract class AbstractMySqlIT {
         req.setCurrency("CNY");
         req.setMerchantId("MCH_DEMO");
         return req;
+    }
+
+    /**
+     * 支付成功后驱动一轮调度器，让 {@code GRANT} 任务执行完毕。
+     *
+     * <p>V2 起履约转异步：{@code payCallback} 返回时 {@code grantStatus} 仍是 {@code NOT_START}， 任务落在 {@code
+     * benefit_task}。测试显式驱动而非等定时器 —— 后者靠 sleep 碰运气。
+     */
+    protected void runScheduler() {
+        scheduler.runOnce();
     }
 
     // ---- 断言辅助 ----
