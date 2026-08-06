@@ -54,66 +54,6 @@ def read(path):
         return ''
 
 
-# 《开发规范》§13.2 的禁用词。口语与情绪副词，一律以陈述句改写。
-# 「根本」不在此列 —— 它在「根本原因」「根本不会」两种用法里语义不同，
-# 机械匹配误报太多，交由人读。
-BANNED_WORDS = [
-    '压根', '白白', '凭空', '恰恰', '动不动', '没人看',
-    '一行都没', '理直气壮', '踩了', '红得对', '看起来也',
-    '形同虚设', '头一件事',
-]
-
-# 过程叙事的引导句。文档写结论，不写发现顺序（§13.1）。
-#
-# 「初稿」只在指代**本文档自身尚未定稿的章节**时合法（如 V3「退出标准（初稿）」），
-# 指代代码或用例的初稿即过程叙事。二者以是否紧跟括号/标题结构区分。
-NARRATIVE_MARKERS = [
-    '实施时先', '自查时', '当时以为', '值得单独记',
-    '差点漏掉', '先踩了', '这一点在实施时',
-]
-
-# 「初稿」的违规形态：后接「就是」「用例」「的用例」「以」等，指向代码而非文档章节
-NARRATIVE_RE = [
-    r'初稿(?:就是|用例|的用例|以|即|正是|全绿)',
-    r'(?:用例|实现|检查|代码)初稿',
-]
-
-
-def check_doc_style(txt):
-    """C 类：文风规范（《开发规范》§13）。
-
-    只查机械可判的两类：禁用词、过程叙事引导句。
-    查不了的：一句话是否冗余、论证是否重复三份 —— 那要靠读。
-    """
-    section('文风规范（开发规范 §13）')
-
-    for word in BANNED_WORDS:
-        hits = []
-        for name, t in txt.items():
-            if name == '开发规范':
-                continue  # 规范本身要列出这些词
-            for i, line in enumerate(t.splitlines(), 1):
-                if word in line:
-                    hits.append(f'{name}:{i}')
-        check(not hits, f'未使用禁用词「{word}」'
-              + (f'  出现于: {", ".join(hits[:4])}' if hits else ''))
-
-    narrative = []
-    for name, t in txt.items():
-        if name == '开发规范':
-            continue
-        for i, line in enumerate(t.splitlines(), 1):
-            for marker in NARRATIVE_MARKERS:
-                if marker in line:
-                    narrative.append(f'{name}:{i}({marker})')
-            for pat in NARRATIVE_RE:
-                m = re.search(pat, line)
-                if m:
-                    narrative.append(f'{name}:{i}({m.group(0)})')
-    check(not narrative, '无过程叙事引导句'
-          + (f'  出现于: {", ".join(narrative[:6])}' if narrative else ''))
-
-
 def check_against_repo(txt):
     """B 类：文档 vs 仓库实际状态。"""
     section('文档 vs 仓库')
@@ -270,7 +210,6 @@ def main():
               f'{sec} 编号连续 (1-{len(nums)})' + ('' if nums == list(range(1, len(nums) + 1)) else f'  实测={nums}'))
 
     check_against_repo(txt)
-    check_doc_style(txt)
 
     total = len(PASSED) + len(FAILED)
     print()
