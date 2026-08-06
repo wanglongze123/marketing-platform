@@ -30,6 +30,49 @@ public interface PlayBizRecordMapper extends BaseMapper<PlayBizRecord> {
             @Param("tradeNo") String tradeNo);
 
     /**
+     * 支付成功推进，<b>入边含 {@code CLOSING}</b>（技术方案 §6.4）。
+     *
+     * <p>这是 V2 新增路径中唯一「拦截了反而资损」的一条：订单到期 → 关单 RPC 超时 → 置 {@code CLOSING} → 用户最后一秒付款成功 → 验签与金额校验都通过 →
+     * 若谓词只认 {@code WAIT_PAY}， 条件更新命中 0 行、被当成乱序通知 ACK 丢弃。结果是<b>已收款、订单永停 {@code CLOSING}、
+     * 履约任务不建、库存不转消耗</b>，且对账前十三项无一覆盖。
+     *
+     * <p>语义上：{@code CLOSING} 表示「关单结果未定」，而<b>支付成功通知是比查单更强的证据</b>，必须放行。 这是「UNKNOWN 不等于失败」在状态机层面的体现 ——
+     * 中间态不能吞掉后到的确定结果。
+     */
+    @Update(
+            "UPDATE play_biz_record SET pay_status = 'PAY_SUCCESS', pay_amount = #{payAmount},"
+                    + " trade_no = COALESCE(trade_no, #{tradeNo})"
+                    + " WHERE play_biz_record_no = #{bizNo}"
+                    + " AND pay_status IN ('WAIT_PAY', 'CLOSING')")
+    int advanceToPaySuccess(
+            @Param("bizNo") String bizNo,
+            @Param("payAmount") long payAmount,
+            @Param("tradeNo") String tradeNo);
+
+    /**
+     * 关单受理：{@code WAIT_PAY → CLOSING}。关单 RPC 结果未定时进此中间态。
+     *
+     * <p><b>此阶段不得释放库存与额度</b>：结果未定就释放，等于把额度让给别人，而钱可能已经收了。 待 {@code QUERY_CLOSE} 收敛到 {@code CLOSED} 或
+     * {@code PAY_SUCCESS} 后，由确定的那一方落任务。
+     */
+    @Update(
+            "UPDATE play_biz_record SET pay_status = 'CLOSING'"
+                    + " WHERE play_biz_record_no = #{bizNo} AND pay_status = 'WAIT_PAY'")
+    int advanceToClosing(@Param("bizNo") String bizNo);
+
+    /**
+     * 关单确认：{@code WAIT_PAY / CLOSING → CLOSED}。
+     *
+     * <p>入边含 {@code WAIT_PAY} 是因为关单 RPC 直接成功时无需经过中间态；含 {@code CLOSING} 是查单
+     * 收敛的那条边。<b>已支付的单不在入边内</b>（BR-B-16）—— 谓词本身就是「已支付不可关」的实现。
+     */
+    @Update(
+            "UPDATE play_biz_record SET pay_status = 'CLOSED'"
+                    + " WHERE play_biz_record_no = #{bizNo}"
+                    + " AND pay_status IN ('WAIT_PAY', 'CLOSING')")
+    int advanceToClosed(@Param("bizNo") String bizNo);
+
+    /**
      * 从「可重新发起」的状态推进到 {@code GRANTING}。
      *
      * <p>入边有两条：{@code NOT_START}（首次履约）与 {@code GRANT_UNKNOWN}（查单判定原调用未到达后 的重发）。只认前者会让重发的 GRANT

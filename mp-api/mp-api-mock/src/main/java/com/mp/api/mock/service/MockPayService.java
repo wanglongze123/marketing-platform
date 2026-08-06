@@ -1,5 +1,6 @@
 package com.mp.api.mock.service;
 
+import com.mp.api.mock.dto.PayCloseResp;
 import com.mp.api.mock.dto.PayCreateReq;
 import com.mp.api.mock.dto.PayCreateResp;
 
@@ -13,4 +14,14 @@ public interface MockPayService {
 
     /** V1 固定成功。 */
     PayCreateResp createPay(PayCreateReq req);
+
+    /**
+     * 关闭支付单，返回四分类。
+     *
+     * <p><b>「关单」与「查单」问的是同一个问题</b>：关单本身就要先确认对方是否已支付 —— 已支付则不能关。故 {@code QUERY_CLOSE}
+     * 收敛时复用本方法，不另开查询接口：分成两个接口则两处的 判定逻辑迟早会漂移，而它们必须给出一致的答案。
+     *
+     * <p>幂等：同一 {@code outTradeNo} 重复调用返回同一结果。关单是对终态的确认，不是一次性动作。
+     */
+    PayCloseResp closePay(String outTradeNo);
 }

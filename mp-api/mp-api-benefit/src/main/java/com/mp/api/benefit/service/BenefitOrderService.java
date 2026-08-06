@@ -39,6 +39,27 @@ public interface BenefitOrderService {
     RetStatus payCallback(PayCallbackReq req);
 
     /**
+     * 关闭订单：先问支付方能否关，按四分类分支处置。
+     *
+     * <p>触发来源有三：超时（{@code CLOSE_ORDER} 任务）、用户取消、运营清理 —— 三者走同一段代码， 幂等只需证明一次（BR-B-18）。
+     *
+     * <p><b>已支付的单拒绝关闭</b>（{@code 1741}，BR-B-16）；关单 RPC 结果未定则进 {@code CLOSING}
+     * 并落查单任务，<b>此阶段不释放库存与额度</b> —— 结果未定就释放，等于把额度让给别人，而钱可能已经收了。
+     *
+     * @param opSeq 操作序号，留痕用。超时任务传空串
+     * @return 关单本身的四分类结果，供调度器决定退避
+     */
+    RetStatus closeOrder(String bizNo, String opSeq);
+
+    /**
+     * 收敛 {@code CLOSING}：再问支付方，推进到 {@code CLOSED} 或 {@code PAY_SUCCESS}。
+     *
+     * <p>由 {@code QUERY_CLOSE} 任务驱动。确认已支付时转入正常履约并补建 {@code GRANT} 任务 ——
+     * 「关单受理后用户其实付款成功了」是必须能收敛的路径，否则钱已收而订单永停中间态。
+     */
+    RetStatus reconcileClose(String bizNo);
+
+    /**
      * 履约编排：读快照按 provider_type 分组，每组派生 grantOpNo 调 reward。
      *
      * <p>V1 由 payCallback 在事务提交后同步调用；V2 起由 {@code GRANT} 任务驱动，V3 还会由对账补偿触发 ——

@@ -206,13 +206,16 @@ class FaultInjectionIT extends AbstractMySqlIT {
                                 TaskType.QUERY_GRANT.name()))
                 .as("确定失败不该再查单")
                 .isZero();
+        // CLOSE_ORDER 排除在外：它是建单时落的超时关单任务（PR-6），next_time 在支付有效期后，
+        // 本用例结束时本就应当仍是 PENDING —— 它「未完成」是正确的，不是残留
         assertThat(
                         count(
                                 benefitJdbc,
                                 "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ? AND status <>"
-                                        + " ?",
+                                        + " ? AND task_type <> ?",
                                 bizNo,
-                                TaskStatus.DONE.name()))
+                                TaskStatus.DONE.name(),
+                                TaskType.CLOSE_ORDER.name()))
                 .as("不应残留未完成任务")
                 .isZero();
 

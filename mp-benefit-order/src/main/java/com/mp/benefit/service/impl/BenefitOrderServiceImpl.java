@@ -14,6 +14,7 @@ import com.mp.api.benefit.dto.PreConsultReq;
 import com.mp.api.benefit.dto.PreConsultResp;
 import com.mp.api.benefit.dto.QueryOrderResp;
 import com.mp.api.benefit.service.BenefitOrderService;
+import com.mp.api.mock.dto.PayCloseResp;
 import com.mp.api.mock.dto.PayCreateReq;
 import com.mp.api.mock.dto.PayCreateResp;
 import com.mp.api.mock.service.MockPayService;
@@ -347,6 +348,124 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     }
 
     // ------------------------------------------------------------------
+    // ②.5 关单
+    // ------------------------------------------------------------------
+
+    /**
+     * 关闭订单，按下游四分类分支处置。
+     *
+     * <p><b>关单前必须先问支付方</b>（PRD FR-B04 ②、BR-B-17「关闭与支付并发时以支付系统结果为准」）： 平台的 {@code pay_status}
+     * 只能证明平台知道什么，证明不了支付方那边有没有收到钱。直接置 {@code CLOSED} 会在「用户正在付款」的窗口里把已收款的单关掉。
+     *
+     * <p>四类各自的处置见技术方案 §4.5，关键在 {@code UNKNOWN}：
+     *
+     * <ul>
+     *   <li>{@code SUCCESS} —— 确认未支付，置 {@code CLOSED}，同事务落释放任务
+     *   <li>{@code FAIL} —— 对方回报已支付，拒绝关闭（{@code 1741}），转由支付通知推进
+     *   <li>{@code UNKNOWN} / {@code PROCESSING} —— 结果未定，置 {@code CLOSING} 并查单，<b>不释放库存</b>
+     * </ul>
+     *
+     * @return 关单本身的四分类结果，供任务调度器决定退避
+     */
+    @Override
+    public RetStatus closeOrder(String bizNo, String opSeq) {
+        PlayBizRecord order = findByBizNo(bizNo);
+        if (order == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
+        }
+
+        // 已是终态：重复关单直接返回，不再打扰支付方（BR-B-18）
+        PayStatus current = PayStatus.valueOf(order.getPayStatus());
+        if (current == PayStatus.CLOSED) {
+            log.info("closeOrder already closed, skip, bizNo={}", bizNo);
+            return RetStatus.SUCCESS;
+        }
+        if (current == PayStatus.PAY_SUCCESS) {
+            // 已支付不可关（BR-B-16）。抛业务码而非静默返回 —— 调用方（用户点取消、
+            // 运营清理）需要知道「没关成，因为已经付过了」
+            throw new BizException(ErrorCode.ORDER_ALREADY_PAID, "订单已支付，拒绝关闭: " + bizNo);
+        }
+        if (current == PayStatus.PAY_FAILED) {
+            log.info("closeOrder on failed payment, nothing to close, bizNo={}", bizNo);
+            return RetStatus.SUCCESS;
+        }
+
+        RetStatus downstream = askPayToClose(bizNo);
+
+        switch (downstream) {
+            case SUCCESS -> {
+                tx.applyClosed(bizNo, order, opSeq);
+                return RetStatus.SUCCESS;
+            }
+            case FAIL -> {
+                // 支付方回报已收款。不置任何终态 —— 推进到 PAY_SUCCESS 是支付通知的职责，
+                // 此处越俎代庖会在「通知尚未到达」时把金额等字段写成猜测值
+                log.warn("closeOrder rejected: already paid downstream, bizNo={}", bizNo);
+                throw new BizException(ErrorCode.ORDER_ALREADY_PAID, "订单已支付，拒绝关闭: " + bizNo);
+            }
+            default -> {
+                // UNKNOWN / PROCESSING：结果未定，进中间态并查单
+                tx.applyClosing(bizNo, order, opSeq);
+                return downstream;
+            }
+        }
+    }
+
+    /**
+     * 问支付方能否关单。异常一律映射 {@code UNKNOWN}。
+     *
+     * <p>判 {@code FAIL} 等于替支付方断言「已收款」，而那个断言没有依据 —— 会让一笔本可关闭的单 永远停在 {@code WAIT_PAY}，库存与额度被永久占着。
+     */
+    private RetStatus askPayToClose(String bizNo) {
+        try {
+            PayCloseResp resp = mockPayService.closePay(bizNo);
+            return resp.getRetStatus();
+        } catch (Exception e) {
+            log.warn("close pay failed, treat as UNKNOWN, bizNo={}", bizNo, e);
+            return RetStatus.UNKNOWN;
+        }
+    }
+
+    /**
+     * 查单收敛 {@code CLOSING}：再问一次支付方，按结果推进到确定态。
+     *
+     * <p>由 {@code QUERY_CLOSE} 任务驱动。复用 {@code closePay} 而非另开查询接口 —— 两者要问的是同一个
+     * 问题（这笔到底支付了没），分开则判定逻辑迟早漂移。
+     *
+     * @return 收敛结果；仍未定则返回 {@code UNKNOWN} / {@code PROCESSING}，调用方据此继续退避
+     */
+    @Override
+    public RetStatus reconcileClose(String bizNo) {
+        PlayBizRecord order = findByBizNo(bizNo);
+        if (order == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
+        }
+
+        PayStatus current = PayStatus.valueOf(order.getPayStatus());
+        if (current != PayStatus.CLOSING) {
+            // 已被别的路径收敛（支付通知先到了）。不是错误
+            log.info("reconcileClose already settled, bizNo={}, payStatus={}", bizNo, current);
+            return RetStatus.SUCCESS;
+        }
+
+        RetStatus downstream = askPayToClose(bizNo);
+        switch (downstream) {
+            case SUCCESS -> {
+                tx.applyClosed(bizNo, order, "");
+                return RetStatus.SUCCESS;
+            }
+            case FAIL -> {
+                // 确认已支付：转入正常履约，补建 GRANT 与 STOCK_CONSUME
+                tx.applyPaidAfterClosing(bizNo, order);
+                return RetStatus.SUCCESS;
+            }
+            default -> {
+                return downstream;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
     // ③ 履约编排
     // ------------------------------------------------------------------
 
@@ -669,15 +788,20 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
                         .eq(PlayBizRecord::getClientReqNo, req.getClientReqNo()));
     }
 
+    /**
+     * 支付通知的 {@code payStatus} → 主单支付态。
+     *
+     * <p>V2 PR-6 放开 {@code CLOSED}：不放开则「先 SUCCESS 后 CLOSED」的乱序通知在参数校验处即被拒， 执行不到条件更新 ——
+     * 而拦截乱序本来就是条件更新的职责，在入口拒掉等于换了个地方失败，且 第二条通知不留痕。
+     */
     private static PayStatus parsePayStatus(String raw) {
-        // V1 只接受 SUCCESS / FAILED。CLOSED 是 V2 关单链路的语义，此处显式拒绝 ——
-        // 提前写的分支没有测试覆盖，且 V2 引入 CLOSING 中间态后逻辑还要重写
         return switch (raw) {
             case "SUCCESS" -> PayStatus.PAY_SUCCESS;
             case "FAILED" -> PayStatus.PAY_FAILED;
+            case "CLOSED" -> PayStatus.CLOSED;
             default ->
                     throw new BizException(
-                            ErrorCode.INVALID_PARAM, "V1 仅接受 SUCCESS / FAILED，实际 " + raw);
+                            ErrorCode.INVALID_PARAM, "仅接受 SUCCESS / FAILED / CLOSED，实际 " + raw);
         };
     }
 
