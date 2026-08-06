@@ -856,6 +856,50 @@ class ShapeFreezeTest {
         assertThat(config).as("支付通知密钥同样不得有代码内默认值").doesNotContain("mp.pay-notify.secret:");
     }
 
+    /**
+     * L2 锁的三条约定必须成立（技术方案 §6.3）。
+     *
+     * <p>每一条对应一种「锁本身把业务搞坏」的方式：
+     *
+     * <ul>
+     *   <li><b>{@code tryLock} 不等待</b>（{@code waitTime=0}）—— 等待会把并发压力转成 RT，锁竞争 一高就雪崩
+     *   <li><b>显式传 {@code leaseTime}</b> —— Redisson 仅在不传时启用看门狗无限续租。发钱场景下 实例假死若锁永不释放，业务将永久阻塞
+     *   <li><b>解锁前判 {@code isHeldByCurrentThread}</b> —— 锁若已因超时被他人获取，直接解锁抛 {@code
+     *       IllegalMonitorStateException}，把业务本已成功的请求变成失败响应
+     * </ul>
+     */
+    @Test
+    void distributedLockFollowsItsThreeConventions() {
+        String src = read("mp-benefit-order/src/main/java/com/mp/benefit/lock/BizLock.java");
+
+        assertThat(normalize(src))
+                .as("tryLock 必须 waitTime=0，等待会把并发压力转成 RT")
+                .contains(normalize("lock.tryLock(0, LEASE_SECONDS, TimeUnit.SECONDS)"));
+        assertThat(src).as("必须显式传 leaseTime —— 不传即启用看门狗无限续租，实例假死时业务永久阻塞").contains("LEASE_SECONDS");
+        assertThat(src).as("解锁前必须判持有者，否则锁过期后解锁会把已成功的请求变成失败").contains("isHeldByCurrentThread()");
+
+        // 抢不到锁归 5xxx：它不是业务拒绝，是「现在不知道，等会儿再来」
+        assertThat(src).contains("ErrorCode.CONCURRENT_CONFLICT");
+    }
+
+    /**
+     * <b>锁必须可整体关闭，且关闭后正确性不变</b>（退出标准第 15 条）。
+     *
+     * <p>开关本身是可测性的一部分：没有它就无法构造去锁对照组，而「L2 是性能优化、L3 才是正确性 兜底」这个论断也就无从验证 —— 只能停留在文档里。
+     *
+     * <p>对照组由 {@code LockDisabledCorrectnessIT} 承载，此处确认开关与那个测试类都还在。
+     */
+    @Test
+    void lockCanBeDisabledForTheControlGroup() {
+        assertThat(read("mp-benefit-order/src/main/java/com/mp/benefit/lock/BizLock.java"))
+                .as("锁必须可由配置整体关闭，否则去锁对照组无从构造")
+                .contains("${mp.lock.enabled:true}");
+
+        String control =
+                read("mp-gateway/src/test/java/com/mp/gateway/it/LockDisabledCorrectnessIT.java");
+        assertThat(control).as("去锁对照组必须显式关掉锁，否则它验的是开锁组").contains("mp.lock.enabled=false");
+    }
+
     /** V0 脚手架必须已清除 —— 留着会让读者以为它是链路的一部分（标准 32）。 */
     @Test
     void v0ScaffoldingIsRemoved() {

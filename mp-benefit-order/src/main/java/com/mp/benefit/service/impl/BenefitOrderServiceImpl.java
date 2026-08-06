@@ -28,6 +28,7 @@ import com.mp.benefit.entity.BenefitSku;
 import com.mp.benefit.entity.BenefitTask;
 import com.mp.benefit.entity.PlayBizRecord;
 import com.mp.benefit.entity.PlayOpRecord;
+import com.mp.benefit.lock.BizLock;
 import com.mp.benefit.repository.BenefitFulfillmentRecordMapper;
 import com.mp.benefit.repository.BenefitItemMapper;
 import com.mp.benefit.repository.BenefitSkuMapper;
@@ -90,6 +91,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private final BenefitTaskMapper taskMapper;
     private final ConsultTokenSigner tokenSigner;
     private final PayNotifySigner payNotifySigner;
+    private final BizLock bizLock;
     private final long tokenTtlSeconds;
 
     public BenefitOrderServiceImpl(
@@ -102,6 +104,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             BenefitTaskMapper taskMapper,
             ConsultTokenSigner tokenSigner,
             PayNotifySigner payNotifySigner,
+            BizLock bizLock,
             @Value("${mp.consult-token.ttl-seconds}") long tokenTtlSeconds) {
         this.tx = tx;
         this.skuMapper = skuMapper;
@@ -112,6 +115,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         this.taskMapper = taskMapper;
         this.tokenSigner = tokenSigner;
         this.payNotifySigner = payNotifySigner;
+        this.bizLock = bizLock;
         this.tokenTtlSeconds = tokenTtlSeconds;
     }
 
@@ -172,8 +176,22 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     // ① 下单
     // ------------------------------------------------------------------
 
+    /**
+     * 下单。<b>锁只是减少走到 L3 的冲突，正确性由 {@code uk_idempotent} 兜底</b>（技术方案 §6.1）。
+     *
+     * <p>锁键取业务幂等键的四元组，与唯一索引同维度 —— 锁挡下的与唯一索引挡下的是同一批请求， 只是前者在进库之前。去掉锁后本方法的正确性不变，只是并发重试会更多地撞到唯一索引上。
+     */
     @Override
     public CreateTradeResp createTrade(CreateTradeReq req) {
+        return bizLock.aroundCreateTrade(
+                req.getUserId(),
+                req.getActivityId(),
+                req.getSkuId(),
+                req.getClientReqNo(),
+                () -> doCreateTrade(req));
+    }
+
+    private CreateTradeResp doCreateTrade(CreateTradeReq req) {
         // V1 冻结 quantity = 1。显式拒绝而非默默忽略 —— 后者会让调用方付一份钱得一份权益且无报错
         if (req.getQuantity() != 1) {
             throw new BizException(
@@ -321,6 +339,15 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     // ② 支付回调
     // ------------------------------------------------------------------
 
+    /**
+     * 支付结果通知。
+     *
+     * <p><b>验签在锁外、锁在验签之后</b>：未通过验签的请求不该占用锁资源 —— 否则伪造通知可以靠 刷同一个 {@code tradeNo}
+     * 把真实通知挡在锁外，形成一种廉价的拒绝服务。
+     *
+     * <p>锁键取 {@code tradeNo}，与幂等键 {@code tradeNo + '_' + notifySeq} 同源但更粗 —— 同一支付单的多条通知（含乱序的
+     * SUCCESS 与 CLOSED）会被串行化，条件更新因此更少走到冲突分支。
+     */
     @Override
     public RetStatus payCallback(PayCallbackReq req) {
         // ① 验签，先于一切（PRD FR-B03 ①、BR-B-12「未通过验签的通知不得更新任何业务状态」）。
@@ -335,6 +362,11 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             throw new BizException(ErrorCode.PAY_NOTIFY_SIGN_INVALID, "支付通知验签失败");
         }
 
+        // ② 验签通过后才加锁：同一支付单的多条通知在此串行化
+        return bizLock.aroundPayCallback(req.getTradeNo(), () -> doPayCallback(req));
+    }
+
+    private RetStatus doPayCallback(PayCallbackReq req) {
         // 按 outTradeNo（= bizNo）定位，不依赖 trade_no 是否已回填
         String bizNo = req.getOutTradeNo();
         PlayBizRecord order = findByBizNo(bizNo);
@@ -385,6 +417,12 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
      */
     @Override
     public RetStatus closeOrder(String bizNo, String opSeq) {
+        // 关单与支付通知会并发（用户点取消的同时付款成功）。锁把两者串行化，
+        // 但真正的互斥仍是主单的条件更新 —— 锁失效时 WAIT_PAY 只能被推进一次
+        return bizLock.aroundCloseOrder(bizNo, () -> doCloseOrder(bizNo, opSeq));
+    }
+
+    private RetStatus doCloseOrder(String bizNo, String opSeq) {
         PlayBizRecord order = findByBizNo(bizNo);
         if (order == null) {
             throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
