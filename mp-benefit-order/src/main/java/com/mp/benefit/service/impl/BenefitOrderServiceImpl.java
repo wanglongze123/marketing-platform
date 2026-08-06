@@ -29,6 +29,7 @@ import com.mp.benefit.entity.BenefitTask;
 import com.mp.benefit.entity.PlayBizRecord;
 import com.mp.benefit.entity.PlayOpRecord;
 import com.mp.benefit.lock.BizLock;
+import com.mp.benefit.lock.ContentionMetrics;
 import com.mp.benefit.repository.BenefitFulfillmentRecordMapper;
 import com.mp.benefit.repository.BenefitItemMapper;
 import com.mp.benefit.repository.BenefitSkuMapper;
@@ -92,6 +93,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private final ConsultTokenSigner tokenSigner;
     private final PayNotifySigner payNotifySigner;
     private final BizLock bizLock;
+    private final ContentionMetrics contention;
     private final long tokenTtlSeconds;
 
     public BenefitOrderServiceImpl(
@@ -105,6 +107,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             ConsultTokenSigner tokenSigner,
             PayNotifySigner payNotifySigner,
             BizLock bizLock,
+            ContentionMetrics contention,
             @Value("${mp.consult-token.ttl-seconds}") long tokenTtlSeconds) {
         this.tx = tx;
         this.skuMapper = skuMapper;
@@ -116,6 +119,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         this.tokenSigner = tokenSigner;
         this.payNotifySigner = payNotifySigner;
         this.bizLock = bizLock;
+        this.contention = contention;
         this.tokenTtlSeconds = tokenTtlSeconds;
     }
 
@@ -322,6 +326,10 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             } catch (DuplicateKeyException e) {
                 PlayBizRecord existing = findByIdempotent(req);
                 if (existing != null) {
+                    // 计数打在这一支，而非 catch 开头：catch 有两个来源，含义完全不同 ——
+                    // 幂等命中是「并发抢同一个键」，正是 L2 锁要减少的；单号碰撞是 UUIDv7
+                    // 撞号，与锁无关，锁再有效也不会变少。计成同一个数会让去锁对照失去意义
+                    contention.onDuplicateKey();
                     log.info(
                             "createTrade duplicated, return existing order, user={}, clientReqNo={}",
                             req.getUserId(),

@@ -4,6 +4,7 @@ import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.benefit.config.BenefitTx;
 import com.mp.benefit.entity.PlayBizRecord;
+import com.mp.benefit.lock.ContentionMetrics;
 import com.mp.benefit.repository.BenefitFulfillmentRecordMapper;
 import com.mp.benefit.repository.BenefitTaskMapper;
 import com.mp.benefit.repository.MarketingStockMapper;
@@ -55,6 +56,7 @@ public class OrderTxService {
     private final BenefitFulfillmentRecordMapper fulfillmentMapper;
     private final MarketingStockMapper stockMapper;
     private final UserPurchaseQuotaMapper quotaMapper;
+    private final ContentionMetrics contention;
 
     public OrderTxService(
             PlayBizRecordMapper bizRecordMapper,
@@ -62,13 +64,15 @@ public class OrderTxService {
             BenefitTaskMapper taskMapper,
             BenefitFulfillmentRecordMapper fulfillmentMapper,
             MarketingStockMapper stockMapper,
-            UserPurchaseQuotaMapper quotaMapper) {
+            UserPurchaseQuotaMapper quotaMapper,
+            ContentionMetrics contention) {
         this.bizRecordMapper = bizRecordMapper;
         this.opRecordMapper = opRecordMapper;
         this.taskMapper = taskMapper;
         this.fulfillmentMapper = fulfillmentMapper;
         this.stockMapper = stockMapper;
         this.quotaMapper = quotaMapper;
+        this.contention = contention;
     }
 
     /**
@@ -97,6 +101,7 @@ public class OrderTxService {
 
         // ① 预占库存。affected_rows=0 即余量不足
         if (stockMapper.tryLock(StockKeys.stockKey(req.getSkuId()), qty) == 0) {
+            contention.onStockInsufficient();
             // 抛异常而非返回 false：本方法要么整体成功，要么什么都没发生。
             // 返回 false 会让调用方有机会「忽略失败继续建单」，那就是超卖
             throw new BizException(ErrorCode.STOCK_NOT_ENOUGH, "库存不足: " + req.getSkuId());
@@ -220,6 +225,7 @@ public class OrderTxService {
                 OpStatus.SUCCESS.name());
 
         if (rows == 0) {
+            contention.onConditionalUpdateMiss();
             // 幂等三道闸的第三道生效，不是错误：不抛异常、不重试、不打 ERROR
             log.info(
                     "payCallback rejected by conditional update, bizNo={}, target={}",
