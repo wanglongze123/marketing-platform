@@ -236,6 +236,32 @@ class ShapeFreezeTest {
     }
 
     /**
+     * 每库的 {@code SqlSessionFactory} 必须自己开驼峰映射，且 yml 里不得再留 {@code mybatis-plus} 配置。
+     *
+     * <p>自建 {@code SqlSessionFactory} 后，Spring Boot 的 mybatis-plus 自动配置不再生效， {@code
+     * application.yml} 里的 {@code map-underscore-to-camel-case} 变成死配置 —— 把它改成 {@code false}
+     * 全部测试照常通过（PR-1 自查时已实测确认）。留着比删掉更危险：下一个人会以为 改那里能生效。
+     *
+     * <p>驼峰映射漏配的失效形态是字段静默为 null，不报错 —— 与本类其余检查同族。
+     */
+    @Test
+    void eachSqlSessionFactoryEnablesCamelCaseMappingItself() {
+        for (String file :
+                List.of(
+                        "mp-activity/src/main/java/com/mp/activity/config/ActivityDataSourceConfig.java",
+                        "mp-benefit-order/src/main/java/com/mp/benefit/config/BenefitDataSourceConfig.java",
+                        "mp-reward/src/main/java/com/mp/reward/config/RewardDataSourceConfig.java")) {
+            assertThat(read(file))
+                    .as("%s 未开启驼峰映射，字段会静默为 null", file)
+                    .contains("setMapUnderscoreToCamelCase(true)");
+        }
+
+        assertThat(read("mp-gateway/src/main/resources/application.yml"))
+                .as("yml 的 mybatis-plus 配置在自建 SqlSessionFactory 后不生效，不得保留")
+                .doesNotContain("mybatis-plus");
+    }
+
+    /**
      * 死信阈值按《分阶段方案》§5.6 ⑤ 分两类：查单 10 次、执行 5 次。
      *
      * <p>取值本身是判断，写错不会报错也不会有任何测试变红 —— 阈值调大只表现为坏任务多重试几轮， 调小则表现为偶发故障被过早判死。PR-2 自查时 {@code GRANT} 就被误写成
