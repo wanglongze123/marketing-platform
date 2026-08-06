@@ -98,7 +98,12 @@ class BranchRejectionIT extends AbstractMySqlIT {
                 .isZero();
     }
 
-    /** 金额不一致的回调被拒，且不推进任何状态 —— 验签只证明消息来源，不证明金额与本单应付一致。 */
+    /**
+     * 金额不一致的回调被拒，且不推进任何状态 —— 验签只证明消息来源，不证明金额与本单应付一致。
+     *
+     * <p><b>改金额后必须重新签名</b>（V2 PR-6b 起）：不重签则签名先失效，本用例会在验签处被拒 （{@code
+     * 4731}），验的就不再是金额校验了。带合法签名的错金额才是这条要覆盖的场景 —— 支付方自己发错，而消息来源无可置疑。
+     */
     @Test
     void amountMismatchIsRejectedAndAdvancesNothing() {
         CreateTradeResp created = benefitOrderService.createTrade(newTradeReq("amtBad"));
@@ -106,6 +111,7 @@ class BranchRejectionIT extends AbstractMySqlIT {
 
         var callback = newPayCallback(bizNo, created.getTradeNo(), "NS_1", "SUCCESS");
         callback.setPayAmount(1L);
+        callback.setSign(payNotifySigner.sign(callback.signFields()));
 
         assertThatThrownBy(() -> benefitOrderService.payCallback(callback))
                 .isInstanceOf(BizException.class)

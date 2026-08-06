@@ -5,6 +5,7 @@ import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.api.benefit.dto.PreConsultReq;
 import com.mp.api.benefit.service.BenefitOrderService;
 import com.mp.benefit.task.BenefitTaskScheduler;
+import com.mp.common.security.PayNotifySigner;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -72,6 +73,8 @@ abstract class AbstractMySqlIT {
         // 「过期凭证被拒」改用负有效期签一张来验（TokenAndPricingIT），既不等待也不改配置
         registry.add("mp.consult-token.secret", () -> "it-consult-secret");
         registry.add("mp.consult-token.ttl-seconds", () -> "900");
+        // 支付通知密钥与凭证密钥取不同值 —— 同值时把两者用反不会有任何用例变红
+        registry.add("mp.pay-notify.secret", () -> "it-pay-notify-secret");
 
         register(registry, "activity", "db_activity", "mp_activity");
         register(registry, "benefit", "db_benefit", "mp_benefit");
@@ -110,6 +113,8 @@ abstract class AbstractMySqlIT {
     @Autowired protected BenefitOrderService benefitOrderService;
 
     @Autowired protected BenefitTaskScheduler scheduler;
+
+    @Autowired protected PayNotifySigner payNotifySigner;
 
     protected JdbcTemplate activityJdbc;
     protected JdbcTemplate benefitJdbc;
@@ -160,6 +165,12 @@ abstract class AbstractMySqlIT {
         return benefitOrderService.preConsult(req).getConsultToken();
     }
 
+    /**
+     * 支付通知，<b>签名由真实的签名器算出</b>。
+     *
+     * <p>不在测试里硬编码签名值：那样测的是「测试造的签名能被验过」，而签发侧与验签侧的字段集合 是否一致恰恰验不到 —— 而那正是验签要挡的东西。走真实签名器，签发侧少签一个字段，全部用例
+     * 立刻变红。
+     */
     protected PayCallbackReq newPayCallback(
             String bizNo, String tradeNo, String notifySeq, String payStatus) {
         PayCallbackReq req = new PayCallbackReq();
@@ -170,6 +181,7 @@ abstract class AbstractMySqlIT {
         req.setPayAmount(SALE_PRICE);
         req.setCurrency("CNY");
         req.setMerchantId("MCH_DEMO");
+        req.setSign(payNotifySigner.sign(req.signFields()));
         return req;
     }
 

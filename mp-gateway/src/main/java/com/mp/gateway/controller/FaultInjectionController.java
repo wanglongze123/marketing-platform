@@ -1,6 +1,8 @@
 package com.mp.gateway.controller;
 
+import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.api.mock.dto.FaultMode;
+import com.mp.common.security.PayNotifySigner;
 import com.mp.common.web.ApiResponse;
 import com.mp.common.web.TraceIdHolder;
 import com.mp.mock.fault.FaultInjector;
@@ -12,6 +14,7 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -34,12 +37,17 @@ public class FaultInjectionController {
     private final FaultInjector injector;
     private final ProviderLedger ledger;
     private final PayLedger payLedger;
+    private final PayNotifySigner payNotifySigner;
 
     public FaultInjectionController(
-            FaultInjector injector, ProviderLedger ledger, PayLedger payLedger) {
+            FaultInjector injector,
+            ProviderLedger ledger,
+            PayLedger payLedger,
+            PayNotifySigner payNotifySigner) {
         this.injector = injector;
         this.ledger = ledger;
         this.payLedger = payLedger;
+        this.payNotifySigner = payNotifySigner;
     }
 
     @GetMapping("/mode")
@@ -105,6 +113,27 @@ public class FaultInjectionController {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("outTradeNo", outTradeNo);
         data.put("payState", String.valueOf(payLedger.find(outTradeNo)));
+        return ok(data);
+    }
+
+    /**
+     * 为一条支付通知计算签名，供手工验证与演示使用。
+     *
+     * <p><b>为什么必须有这个端点</b>：真实链路里签名由支付平台算出，而 mock 支付方不会主动回调 （保持「通知是外部事件」的形状，见 {@code
+     * MockPayService}）。没有它，加上验签之后 {@code /api/benefit/pay-callback} 就<b>谁都调不通</b> ——
+     * 自动化测试有注入的签名器可用，手工 curl 无从下手，「测试里验过的」与「演示时跑的」就此分家。
+     *
+     * <p>它<b>不发送通知</b>，只回签名值 —— 调用方拿去拼进自己的请求体。这样保留了「通知由外部 触发」的形状，也让演示者能看清「哪些字段参与了签名」。
+     *
+     * <p><b>V2 不加鉴权，V3 必须下线</b>：能签发通知等于能伪造收款，与 {@code /api/fault} 下其余 端点同属演示设施（《分阶段方案》§5.6 ⑥）。
+     */
+    @PostMapping("/pay-notify/sign")
+    public ApiResponse<Map<String, Object>> signPayNotify(@RequestBody PayCallbackReq req) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        // 复用请求对象自身的 signFields()，与验签侧走同一段代码 ——
+        // 另写一份字段清单则两处迟早漂移，而漂移的表现是「演示时怎么都验不过」
+        data.put("sign", payNotifySigner.sign(req.signFields()));
+        data.put("signedFields", req.signFields());
         return ok(data);
     }
 
