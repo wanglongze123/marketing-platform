@@ -273,8 +273,8 @@ class StockAndQuotaIT extends AbstractMySqlIT {
         // 交易未成立 → 额度返还（技术方案 §3.4 的口径表）
         assertThat(usedQtyOf(userId)).as("交易未成立应返还限购额度").isZero();
 
+        // 库存与额度由 STOCK_RELEASE 一条任务承接，不拆成两条 —— 二者需要同一道幂等闸
         assertTaskDone(bizNo, TaskType.STOCK_RELEASE);
-        assertTaskDone(bizNo, TaskType.QUOTA_RELEASE);
     }
 
     /**
@@ -302,6 +302,44 @@ class StockAndQuotaIT extends AbstractMySqlIT {
 
         assertThat(lockedOf()).as("重复释放不得把预占减成负数").isZero();
         assertThat(availableOf()).as("可售余量不得超过总量").isEqualTo(TOTAL_STOCK);
+    }
+
+    /**
+     * <b>重复释放不得动到别人的预占</b> —— 下界拦不住这一类。
+     *
+     * <p>与上一个用例的区别只有一处：这里<b>另有一笔单占着库存</b>。上一个用例释放后 {@code locked} 恰好为 0，第二次释放被 {@code WHERE locked
+     * >= qty} 挡下 —— 于是它验的是「下界生效」，而不是 「A 单不会释放掉 B 单的预占」。
+     *
+     * <p>后者才是真正的风险，且<b>下界完全拦不住</b>：{@code locked} 是该 {@code stock_key} 下所有订单共享的 计数器，A 单重复释放时它因 B
+     * 单占用仍大于 0，谓词照常通过，结果是可售余量凭空多一份 —— 直接超卖。
+     *
+     * <p>拦住它的只能是 {@code benefit_task.uk_biz_type_op}：同一单同类任务只入队一条。本用例通过 「人工把已完成的任务打回
+     * PENDING」模拟唯一键被绕过（真实场景是调度器重复领取），断言即便如此 也不会多减 —— 因为任务只有一条，重跑的还是它自己。
+     */
+    @Test
+    void repeatedReleaseDoesNotStealAnotherOrdersLock() {
+        // B 单：占着库存不动，全程不支付
+        CreateTradeReq holder = newTradeReq("holder");
+        benefitOrderService.createTrade(holder);
+        assertThat(lockedOf()).isEqualTo(1);
+
+        // A 单：支付失败并释放
+        String bizNo = payFor("stealer", "FAILED");
+        assertThat(lockedOf()).as("此刻两单各占一份").isEqualTo(2);
+        runScheduler();
+        assertThat(lockedOf()).as("A 释放后应只剩 B 的那份").isEqualTo(1);
+
+        // 把 A 的释放任务打回重跑。此时 locked=1（B 的），下界 locked >= 1 照常通过 ——
+        // 若每单幂等没落实，这一下就会把 B 的预占也释放掉
+        benefitJdbc.update(
+                "UPDATE benefit_task SET status = 'PENDING', lease_owner = NULL,"
+                        + " next_time = NOW(3) WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.STOCK_RELEASE.name());
+        runScheduler();
+
+        assertThat(lockedOf()).as("B 单的预占不得被 A 的重复释放动到").isEqualTo(1);
+        assertThat(availableOf()).as("可售余量不得凭空增加").isEqualTo(TOTAL_STOCK - 1);
     }
 
     /** 同一单同类库存任务只入队一条，由 {@code uk_biz_type_op} 保证。 */

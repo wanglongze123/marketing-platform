@@ -18,6 +18,7 @@ import com.mp.common.enums.OpType;
 import com.mp.common.enums.PayStatus;
 import com.mp.common.enums.RefundStatus;
 import com.mp.common.enums.RetStatus;
+import com.mp.common.enums.StockStatus;
 import com.mp.common.enums.TaskType;
 import com.mp.common.exception.BizException;
 import com.mp.common.util.BizNoGenerator;
@@ -117,6 +118,8 @@ public class OrderTxService {
         record.setPayStatus(PayStatus.WAIT_PAY.name());
         record.setGrantStatus(GrantStatus.NOT_START.name());
         record.setRefundStatus(RefundStatus.NONE.name());
+        // 预占已在本事务开头完成，故建单即 LOCKED。它是后续「只处置一次」的前置状态
+        record.setStockStatus(StockStatus.LOCKED.name());
         record.setOrderAmount(salePrice);
         record.setCurrency("CNY");
         record.setConfigVersion(configVersion);
@@ -219,10 +222,12 @@ public class OrderTxService {
             enqueueStockTask(bizNo, TaskType.STOCK_CONSUME);
         } else if (target == PayStatus.PAY_FAILED) {
             // 支付失败即交易未成立：库存与限购额度都要还回去（技术方案 §3.4 的口径表）。
-            // 与转消耗互斥 —— 两者都以本次条件更新 affected_rows=1 为前提，
+            // 两者由 STOCK_RELEASE 一条任务承接 —— 它们需要同一道幂等闸（主单库存态的条件更新），
+            // 拆成两条任务则那道闸只能被其中一条用掉，另一条必然跳过而漏掉自己那半件事。
+            //
+            // 与转消耗互斥：两者都以本次条件更新 affected_rows=1 为前提，
             // 而 WAIT_PAY 只能被推进一次，故两条分支不可能同时落任务
             enqueueStockTask(bizNo, TaskType.STOCK_RELEASE);
-            enqueueStockTask(bizNo, TaskType.QUOTA_RELEASE);
         }
 
         log.info("payCallback advanced, bizNo={}, WAIT_PAY -> {}", bizNo, target);
@@ -371,56 +376,58 @@ public class OrderTxService {
     // ------------------------------------------------------------------
 
     /**
-     * 预占转消耗。
+     * 预占转消耗。<b>先推进主单库存态，推不动就跳过</b>。
      *
-     * <p><b>{@code affected_rows = 0} 返回 {@code SUCCESS} 而非失败</b>：这一步只可能因「已经转过了」 而不满足 {@code locked
-     * >= qty}，而任务重试本就是预期路径（调度器崩溃后重跑）。判失败会让 任务一直重试到死信，而实际上事情早已做完。
+     * <p>{@code advanceStockStatus} 的 {@code affected_rows = 0} 意味着本单库存已处置过 —— 这是每单幂等的 唯一承重点，见
+     * {@link PlayBizRecordMapper#advanceStockStatus}。跳过后仍返回 {@code SUCCESS}：任务重跑
+     * 本就是预期路径，判失败会让它一直重试到死信，而事情早已做完。
      *
-     * <p>真正的「不该重复执行」由 {@code benefit_task.uk_biz_type_op} 挡在入队处，不由这里的下界挡 —— 见 {@link
-     * #enqueueStockTask}。
+     * <p><b>不能用库存 SQL 的 {@code affected_rows} 代替这道判断</b>：{@code WHERE locked >= qty} 在别的订单占着
+     * 库存时照常通过，重复执行会吃掉别人的预占。
      */
     @BenefitTx
     public RetStatus consumeStock(PlayBizRecord order) {
-        int rows =
-                stockMapper.tryConsume(StockKeys.stockKey(order.getSkuId()), order.getQuantity());
-        if (rows == 0) {
-            log.info(
-                    "stock already consumed or locked insufficient, bizNo={}",
-                    order.getPlayBizRecordNo());
+        String bizNo = order.getPlayBizRecordNo();
+        if (bizRecordMapper.advanceStockStatus(
+                        bizNo, StockStatus.LOCKED.name(), StockStatus.CONSUMED.name())
+                == 0) {
+            log.info("stock already settled, skip consume, bizNo={}", bizNo);
+            return RetStatus.SUCCESS;
         }
-        return RetStatus.SUCCESS;
-    }
-
-    /** 释放预占。同上，{@code affected_rows = 0} 视为已释放过。 */
-    @BenefitTx
-    public RetStatus releaseStock(PlayBizRecord order) {
-        int rows =
-                stockMapper.tryRelease(StockKeys.stockKey(order.getSkuId()), order.getQuantity());
-        if (rows == 0) {
-            log.info("stock already released, bizNo={}", order.getPlayBizRecordNo());
-        }
+        stockMapper.tryConsume(StockKeys.stockKey(order.getSkuId()), order.getQuantity());
         return RetStatus.SUCCESS;
     }
 
     /**
-     * 返还限购额度。
+     * 释放预占，<b>并在同一次状态推进里返还限购额度</b>。
      *
-     * <p>只在「交易未成立」时调用（支付失败、关单）。<b>退款不返还</b> —— 限购是为了防单用户过度
-     * 占用营销资源，若「买了再退」能刷回额度，限购形同虚设。库存则相反，退款要回补，商品可以 再卖给别人。这个不对称写在技术方案 §3.4 的口径表里，是有意为之。
+     * <p>两件事合并为一个任务，是因为它们需要<b>同一道闸</b>：额度行按 {@code (user, activity, sku, period)}
+     * 聚合，同一用户的另一笔单占着额度时，重复返还会吃掉那一笔的 —— 与库存的 {@code locked} 完全同构，{@code used_qty >= qty} 这个下界同样拦不住。
+     *
+     * <p>拆成两个任务则要么各带一道闸（两次状态推进，语义上没有第二个状态可推）、要么共用一道 （谁先跑谁推进，另一个必然跳过而漏掉自己那半件事）。合并后只需一道，且「交易未成立」本就是
+     * 一个事件，库存与额度同进同退。
+     *
+     * <p><b>退款不返还额度</b> —— 限购是为了防单用户过度占用营销资源，若「买了再退」能刷回额度， 限购形同虚设。库存则相反，退款要回补，商品可以再卖给别人。这个不对称写在技术方案
+     * §3.4 的 口径表里，是有意为之。退款属 V3，此处只处置「未成立」。
      */
     @BenefitTx
-    public RetStatus releaseQuota(PlayBizRecord order) {
-        int rows =
-                quotaMapper.tryRelease(
-                        order.getUserId(),
-                        order.getActivityId(),
-                        order.getSkuId(),
-                        StockKeys.periodKey(),
-                        order.getQuantity());
-        if (rows == 0) {
-            // 不限购的单没有额度行，命中此分支属正常
-            log.info("quota row absent or already released, bizNo={}", order.getPlayBizRecordNo());
+    public RetStatus releaseStock(PlayBizRecord order) {
+        String bizNo = order.getPlayBizRecordNo();
+        if (bizRecordMapper.advanceStockStatus(
+                        bizNo, StockStatus.LOCKED.name(), StockStatus.RELEASED.name())
+                == 0) {
+            log.info("stock already settled, skip release, bizNo={}", bizNo);
+            return RetStatus.SUCCESS;
         }
+
+        stockMapper.tryRelease(StockKeys.stockKey(order.getSkuId()), order.getQuantity());
+        // 不限购的单没有额度行，affected_rows=0 属正常，不必区分
+        quotaMapper.tryRelease(
+                order.getUserId(),
+                order.getActivityId(),
+                order.getSkuId(),
+                StockKeys.periodKey(),
+                order.getQuantity());
         return RetStatus.SUCCESS;
     }
 }

@@ -25,17 +25,16 @@ public class StockTaskConfig {
                 TaskType.STOCK_CONSUME, bizRecordMapper, tx, OrderTxService::consumeStock);
     }
 
+    /**
+     * 释放：库存与限购额度一并归还。
+     *
+     * <p>{@code QUOTA_RELEASE} 保留在 {@link TaskType} 里但<b>不注册处理器</b> —— 额度返还与库存释放
+     * 需要同一道幂等闸（主单库存态的条件更新），拆成两个任务则那道闸只能被其中一个用掉。枚举值 留着是因为它在技术方案 §7.4 的任务清单里，V3 若出现「只还额度不还库存」的场景可再启用。
+     */
     @Bean
     public StockTaskHandler stockReleaseTaskHandler(
             PlayBizRecordMapper bizRecordMapper, OrderTxService tx) {
         return new StockTaskHandler(
                 TaskType.STOCK_RELEASE, bizRecordMapper, tx, OrderTxService::releaseStock);
-    }
-
-    @Bean
-    public StockTaskHandler quotaReleaseTaskHandler(
-            PlayBizRecordMapper bizRecordMapper, OrderTxService tx) {
-        return new StockTaskHandler(
-                TaskType.QUOTA_RELEASE, bizRecordMapper, tx, OrderTxService::releaseQuota);
     }
 }

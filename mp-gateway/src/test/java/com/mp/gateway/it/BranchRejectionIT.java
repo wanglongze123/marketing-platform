@@ -41,7 +41,7 @@ class BranchRejectionIT extends AbstractMySqlIT {
         // 支付失败不落 GRANT 任务 —— 落了就意味着调度器迟早会给未付款的单发货。
         //
         // 断言收窄到 GRANT 一类，不再是「一条任务都没有」：自 PR-5 起支付失败要落
-        // STOCK_RELEASE 与 QUOTA_RELEASE（交易未成立，库存与额度都得还回去）。
+        // STOCK_RELEASE（交易未成立，库存与限购额度都得还回去，由这一条任务承接）。
         // 原断言的意图始终是「不会发货」，而不是「什么都不做」
         assertThat(
                         count(
@@ -52,14 +52,13 @@ class BranchRejectionIT extends AbstractMySqlIT {
                                 TaskType.GRANT.name()))
                 .as("支付失败不得落履约任务")
                 .isZero();
-        // 而释放类任务必须落 —— 少了它们，未付款的单会永久占着库存与限购额度
+        // 而释放任务必须落 —— 少了它，未付款的单会永久占着库存与限购额度
         assertThat(
                         benefitJdbc.queryForList(
                                 "SELECT task_type FROM benefit_task WHERE biz_no = ?",
                                 String.class,
                                 bizNo))
-                .containsExactlyInAnyOrder(
-                        TaskType.STOCK_RELEASE.name(), TaskType.QUOTA_RELEASE.name());
+                .containsExactly(TaskType.STOCK_RELEASE.name());
     }
 
     /**

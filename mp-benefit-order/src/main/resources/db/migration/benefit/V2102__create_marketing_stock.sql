@@ -15,6 +15,23 @@ CREATE TABLE marketing_stock (
   UNIQUE KEY uk_stock_key (stock_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='营销库存';
 
+-- 主单记录本单库存处置到哪一步。
+--
+-- 每单幂等由这一列的条件更新提供，不由库存 SQL 的下界提供：locked 是该 stock_key 下所有
+-- 订单共享的计数器，A 单重复释放时它因别的订单占用仍大于 0，WHERE locked >= ? 照常通过，
+-- 结果是 A 释放掉了 B 的预占，可售余量凭空多一份 —— 直接超卖。
+--
+-- 也不能只靠 benefit_task.uk_biz_type_op：那挡的是「重复入队」，挡不住「同一条任务被重复
+-- 执行」（租约过期被接管、调度器重跑都会）。两者防的不是同一件事。
+--
+-- 迁移语义：存量单一律置 LOCKED。V2102 之前无库存表，故存量单从未预占过，理论上该是 NONE；
+-- 但它们的 locked 也不在新表里，置 LOCKED 意味着「若日后关单会尝试释放一次」，而那次释放
+-- 会被 WHERE locked >= ? 挡下（新表里本就没有它们的预占）。反过来置 NONE 则是永久跳过，
+-- 两者结果相同而 LOCKED 与「当前状态」的字面含义更一致
+ALTER TABLE play_biz_record
+  ADD COLUMN stock_status VARCHAR(16) NOT NULL DEFAULT 'LOCKED'
+  COMMENT '本单库存处置态 NONE/LOCKED/CONSUMED/RELEASED，每单幂等的承重点' AFTER quantity;
+
 -- 限购数量直接挂在 SKU 上。
 --
 -- benefit_sku 已有 purchase_limit_rule_id，但 V2 不建限购规则表 —— 规则表要承载周期、

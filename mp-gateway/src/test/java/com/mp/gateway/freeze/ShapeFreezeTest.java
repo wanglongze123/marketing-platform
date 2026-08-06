@@ -624,6 +624,48 @@ class ShapeFreezeTest {
     }
 
     /**
+     * 库存类任务的执行体必须以<b>主单库存态的条件更新</b>为闸。
+     *
+     * <p>这是每单幂等的唯一承重点，另外两样东西常被误当成它：
+     *
+     * <ul>
+     *   <li>库存 SQL 的下界 {@code WHERE locked >= ?} —— 防的是「总数被减成负值」。{@code locked} 是该 {@code
+     *       stock_key} 下所有订单<b>共享</b>的计数器，A 单重复释放时它因别的订单占用仍大于 0， 谓词照常放行，结果 A 释放掉了 B 的预占，可售余量凭空多一份
+     *   <li>{@code uk_biz_type_op} —— 防的是重复<b>入队</b>，防不住同一条任务被重复<b>执行</b>
+     * </ul>
+     *
+     * <p>PR-5 自查时这正是一处真实缺陷：原实现只有前两样，而暴露它的用例必须<b>另有一笔单占着 库存</b> —— 单笔单时释放后 {@code locked} 恰好为
+     * 0，下界把第二次释放挡下了，于是测到的是 「下界生效」而非「不会动别人的预占」。
+     */
+    @Test
+    void stockTaskExecutionIsGuardedByOrderStockStatus() {
+        String tx =
+                read("mp-benefit-order/src/main/java/com/mp/benefit/service/OrderTxService.java");
+
+        for (String method : List.of("consumeStock", "releaseStock")) {
+            int idx = tx.indexOf("public RetStatus " + method + "(");
+            assertThat(idx).as("未找到 %s", method).isGreaterThan(0);
+            String body = tx.substring(idx, Math.min(tx.length(), idx + 700));
+
+            assertThat(normalize(body))
+                    .as("%s 必须以主单库存态的条件更新为幂等闸，下界与唯一键都替代不了它", method)
+                    .contains(normalize("advanceStockStatus("))
+                    .contains(normalize("StockStatus.LOCKED.name()"));
+        }
+
+        // 条件更新自身必须带前置状态，否则它只是个无条件赋值
+        assertThat(
+                        normalize(
+                                sqlOf(
+                                        read(
+                                                "mp-benefit-order/src/main/java/com/mp/benefit/"
+                                                        + "repository/PlayBizRecordMapper.java"),
+                                        "advanceStockStatus")))
+                .as("库存态推进必须带前置状态谓词")
+                .contains(normalize("stock_status = #{fromStatus}"));
+    }
+
+    /**
      * 库存类任务的 {@code op_no} 必须是确定性键，不得留空串。
      *
      * <p>每单幂等完全由 {@code uk_biz_type_op} 承担 —— 库存 SQL 的下界提供不了：{@code locked} 是该 {@code stock_key}
