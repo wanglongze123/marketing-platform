@@ -29,6 +29,7 @@ import com.mp.benefit.entity.BenefitTask;
 import com.mp.benefit.entity.PlayBizRecord;
 import com.mp.benefit.entity.PlayOpRecord;
 import com.mp.benefit.lock.BizLock;
+import com.mp.benefit.lock.ContentionMetrics;
 import com.mp.benefit.repository.BenefitFulfillmentRecordMapper;
 import com.mp.benefit.repository.BenefitItemMapper;
 import com.mp.benefit.repository.BenefitSkuMapper;
@@ -92,6 +93,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private final ConsultTokenSigner tokenSigner;
     private final PayNotifySigner payNotifySigner;
     private final BizLock bizLock;
+    private final ContentionMetrics contention;
     private final long tokenTtlSeconds;
 
     public BenefitOrderServiceImpl(
@@ -105,6 +107,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             ConsultTokenSigner tokenSigner,
             PayNotifySigner payNotifySigner,
             BizLock bizLock,
+            ContentionMetrics contention,
             @Value("${mp.consult-token.ttl-seconds}") long tokenTtlSeconds) {
         this.tx = tx;
         this.skuMapper = skuMapper;
@@ -116,6 +119,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         this.tokenSigner = tokenSigner;
         this.payNotifySigner = payNotifySigner;
         this.bizLock = bizLock;
+        this.contention = contention;
         this.tokenTtlSeconds = tokenTtlSeconds;
     }
 
@@ -320,6 +324,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
                                 benefitSnapshot),
                         false);
             } catch (DuplicateKeyException e) {
+                contention.onDuplicateKey();
                 PlayBizRecord existing = findByIdempotent(req);
                 if (existing != null) {
                     log.info(

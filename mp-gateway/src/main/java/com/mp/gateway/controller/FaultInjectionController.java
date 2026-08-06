@@ -2,6 +2,7 @@ package com.mp.gateway.controller;
 
 import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.api.mock.dto.FaultMode;
+import com.mp.benefit.lock.ContentionMetrics;
 import com.mp.common.security.PayNotifySigner;
 import com.mp.common.web.ApiResponse;
 import com.mp.common.web.TraceIdHolder;
@@ -38,16 +39,19 @@ public class FaultInjectionController {
     private final ProviderLedger ledger;
     private final PayLedger payLedger;
     private final PayNotifySigner payNotifySigner;
+    private final ContentionMetrics contention;
 
     public FaultInjectionController(
             FaultInjector injector,
             ProviderLedger ledger,
             PayLedger payLedger,
-            PayNotifySigner payNotifySigner) {
+            PayNotifySigner payNotifySigner,
+            ContentionMetrics contention) {
         this.injector = injector;
         this.ledger = ledger;
         this.payLedger = payLedger;
         this.payNotifySigner = payNotifySigner;
+        this.contention = contention;
     }
 
     @GetMapping("/mode")
@@ -135,6 +139,29 @@ public class FaultInjectionController {
         data.put("sign", payNotifySigner.sign(req.signFields()));
         data.put("signedFields", req.signFields());
         return ok(data);
+    }
+
+    /**
+     * L3 冲突计数快照，退出标准第 15 条的数据来源。
+     *
+     * <p>两组压测各跑一轮后比对这三个数：开锁组应当<b>明显更低</b> —— 锁把并发串行化在锁上， 走到唯一索引与条件更新的请求因此更少。正确性结果两组则应完全一致。
+     *
+     * <p><b>不看锁自身的竞争计数</b>：移除锁后那个指标必然为 0，只说明锁代码没运行，而非没有冲突。
+     */
+    @GetMapping("/contention")
+    public ApiResponse<Map<String, Object>> contention() {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("duplicateKey", contention.duplicateKeyCount());
+        data.put("conditionalUpdateMiss", contention.conditionalUpdateMissCount());
+        data.put("stockInsufficient", contention.stockInsufficientCount());
+        return ok(data);
+    }
+
+    /** 计数清零。压测开始前调用，使两组的数字可比。 */
+    @DeleteMapping("/contention")
+    public ApiResponse<Map<String, Object>> resetContention() {
+        contention.reset();
+        return contention();
     }
 
     /** 支付方账本快照：关单判据的那一侧。 */
