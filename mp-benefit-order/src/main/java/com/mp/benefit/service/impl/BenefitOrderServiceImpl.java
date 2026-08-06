@@ -324,9 +324,12 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
                                 benefitSnapshot),
                         false);
             } catch (DuplicateKeyException e) {
-                contention.onDuplicateKey();
                 PlayBizRecord existing = findByIdempotent(req);
                 if (existing != null) {
+                    // 计数打在这一支，而非 catch 开头：catch 有两个来源，含义完全不同 ——
+                    // 幂等命中是「并发抢同一个键」，正是 L2 锁要减少的；单号碰撞是 UUIDv7
+                    // 撞号，与锁无关，锁再有效也不会变少。计成同一个数会让去锁对照失去意义
+                    contention.onDuplicateKey();
                     log.info(
                             "createTrade duplicated, return existing order, user={}, clientReqNo={}",
                             req.getUserId(),

@@ -30,7 +30,7 @@ SELECT
 FROM play_biz_record
 WHERE activity_id = 'ACT_DEMO_001'
   AND sku_id = 'SKU_DEMO_001'
-  AND client_req_no LIKE CONCAT('REQ_', @run_id, '_%')
+  AND client_req_no LIKE CONCAT('REQ_', @run_id, '%')
   AND pay_status IN ('WAIT_PAY', 'PAY_SUCCESS');
 
 -- ③ 幂等：同一 client_req_no 不得建出两笔单
@@ -40,7 +40,7 @@ SELECT
 FROM (
   SELECT client_req_no
   FROM play_biz_record
-  WHERE client_req_no LIKE CONCAT('REQ_', @run_id, '_%')
+  WHERE client_req_no LIKE CONCAT('REQ_', @run_id, '%')
   GROUP BY client_req_no
   HAVING COUNT(*) > 1
 ) dup;
@@ -50,7 +50,7 @@ SELECT
   COUNT(*) AS create_op_records
 FROM play_op_record
 WHERE op_type = 'CREATE_TRADE'
-  AND idempotent_key LIKE CONCAT('%_REQ_', @run_id, '_%');
+  AND idempotent_key LIKE CONCAT('%REQ_', @run_id, '%');
 
 -- ⑤ L3 负载侧指标（退出标准第 15 条）不在数据库里，走 HTTP 端点取：
 --      curl -s localhost:8080/api/fault/contention

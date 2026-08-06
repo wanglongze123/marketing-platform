@@ -29,7 +29,12 @@ public class ContentionMetrics {
     private final LongAdder conditionalUpdateMiss = new LongAdder();
     private final LongAdder stockInsufficient = new LongAdder();
 
-    /** 建单撞唯一索引。并发下同一幂等键同时插入，第二个走幂等出口 */
+    /**
+     * 建单撞 {@code uk_idempotent}：并发下同一幂等键同时插入，第二个走幂等出口。
+     *
+     * <p><b>只计幂等命中这一支，不计单号碰撞。</b> {@code DuplicateKeyException} 有两个来源，含义 完全不同：幂等命中是「并发抢同一个键」，正是 L2
+     * 锁要减少的；单号碰撞是 UUIDv7 撞号，与锁 无关，锁再有效也不会变少。计成同一个数会让去锁对照的数据失去意义。
+     */
     public void onDuplicateKey() {
         duplicateKey.increment();
     }

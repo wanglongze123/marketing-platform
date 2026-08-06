@@ -22,21 +22,29 @@ echo "=== 本轮 RUN_ID=${RUN_ID}，库存置为 ${STOCK} ==="
 $MYSQL -e "UPDATE marketing_stock SET total=$STOCK, locked=0, consumed=0
            WHERE stock_key='sku:SKU_DEMO_001';" 2>/dev/null
 
-# 清掉上一轮的单据，否则「售出数」会把历史数据算进去
+# 清掉上一轮的单据，否则「售出数」会把历史数据算进去。
+#
+# 用 REQ_<RUN_ID> 整体做前缀，不在 RUN_ID 后再跟 _ —— LIKE 里的 _ 是 SQL 通配符
+# （匹配任意单字符），转义它要跟 shell 的引号规则纠缠。两组的 RUN_ID 取值互不为
+# 前缀（locked / nolock），直接前缀匹配即可
 $MYSQL -e "DELETE FROM play_op_record WHERE play_biz_record_no IN
              (SELECT play_biz_record_no FROM play_biz_record
-               WHERE client_req_no LIKE 'REQ_${RUN_ID}_%');
+               WHERE client_req_no LIKE 'REQ_${RUN_ID}%');
            DELETE FROM benefit_task WHERE biz_no IN
              (SELECT play_biz_record_no FROM play_biz_record
-               WHERE client_req_no LIKE 'REQ_${RUN_ID}_%');
-           DELETE FROM play_biz_record WHERE client_req_no LIKE 'REQ_${RUN_ID}_%';
-           DELETE FROM user_purchase_quota WHERE user_id LIKE 'U_${RUN_ID}_%';" 2>/dev/null
+               WHERE client_req_no LIKE 'REQ_${RUN_ID}%');
+           DELETE FROM play_biz_record WHERE client_req_no LIKE 'REQ_${RUN_ID}%';
+           DELETE FROM user_purchase_quota WHERE user_id LIKE 'U_${RUN_ID}%';" 2>/dev/null
 
 echo "=== 清零冲突计数（两组数字才可比）==="
 curl -s -X DELETE "$BASE/api/fault/contention" > /dev/null
 
-echo "=== 锁开关状态 ==="
-curl -s "$BASE/api/fault/contention" | python3 -m json.tool 2>/dev/null || true
+# 锁开关状态：本项目不暴露它的读端点，故从应用日志判断 ——
+# 关锁时启动会打 WARN「distributed lock DISABLED」。这一步是为了防止
+# 「以为跑的是对照组、其实是开锁组」，实施时正踩过这个坑
+echo "=== 提示：确认锁开关 ==="
+echo "  开锁组：启动日志中无 'distributed lock DISABLED'"
+echo "  去锁组：启动日志中应有该 WARN，否则跑的仍是开锁组"
 
 echo
 echo "=== 跑 k6 ==="
@@ -58,12 +66,12 @@ SELECT COUNT(*) AS sold_orders,
           'OK', 'x MISMATCH') AS check_orders_match_stock
   FROM play_biz_record
  WHERE activity_id='ACT_DEMO_001' AND sku_id='SKU_DEMO_001'
-   AND client_req_no LIKE CONCAT('REQ_', @run_id, '_%')
+   AND client_req_no LIKE CONCAT('REQ_', @run_id, '%')
    AND pay_status IN ('WAIT_PAY','PAY_SUCCESS');
 SELECT COUNT(*) AS duplicated_req_no,
        IF(COUNT(*) = 0, 'OK', 'x DUP') AS check_idempotent
   FROM (SELECT client_req_no FROM play_biz_record
-         WHERE client_req_no LIKE CONCAT('REQ_', @run_id, '_%')
+         WHERE client_req_no LIKE CONCAT('REQ_', @run_id, '%')
          GROUP BY client_req_no HAVING COUNT(*) > 1) dup;
 SQL
 
