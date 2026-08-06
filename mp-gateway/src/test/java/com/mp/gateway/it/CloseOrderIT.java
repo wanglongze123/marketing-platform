@@ -322,6 +322,59 @@ class CloseOrderIT extends AbstractMySqlIT {
         assertThat(lockedOf()).as("关闭通知同样要释放库存").isZero();
     }
 
+    /**
+     * <b>转消耗与释放同时入队时，库存只被处置一次。</b>
+     *
+     * <p>这个场景在 PR-6 引入 {@code CLOSED} 的释放分支后才成立：{@code STOCK_CONSUME} 与 {@code STOCK_RELEASE} 的
+     * {@code op_no} 不同，{@code uk_biz_type_op} 各挡各的，挡不住「两条都入队」。
+     *
+     * <p>真正拦住它的是 {@code stock_status} 的条件更新（PR-5）：两者都要求前置 {@code LOCKED}， 谁先执行谁推进，另一个 {@code
+     * affected_rows = 0} 跳过。<b>若少了这道闸，同一单会先转消耗 再被释放，可售余量凭空多一份。</b>
+     *
+     * <p>用条件更新直接把主单打成「已支付」来构造：正常链路下支付态只能被推进一次，两条分支不会 同时落任务 —— 但那是<b>当前</b>状态机的性质，不是库存层的保证。这里验的是库存层。
+     */
+    @Test
+    void consumeAndReleaseTasksTogetherSettleStockOnce() {
+        String bizNo = createOrder("bothTasks");
+        assertThat(lockedOf()).isEqualTo(1);
+
+        // 两条任务同时入队：绕开状态机直接落，模拟「状态机日后放宽了入边」
+        benefitJdbc.update(
+                "INSERT INTO benefit_task (task_no, biz_no, task_type, op_no, status, next_time,"
+                        + " retry_count, payload) VALUES (?, ?, ?, ?, 'PENDING', NOW(3), 0, '{}')",
+                "TK_both_consume",
+                bizNo,
+                TaskType.STOCK_CONSUME.name(),
+                bizNo + "_" + TaskType.STOCK_CONSUME.name());
+        benefitJdbc.update(
+                "INSERT INTO benefit_task (task_no, biz_no, task_type, op_no, status, next_time,"
+                        + " retry_count, payload) VALUES (?, ?, ?, ?, 'PENDING', NOW(3), 0, '{}')",
+                "TK_both_release",
+                bizNo,
+                TaskType.STOCK_RELEASE.name(),
+                bizNo + "_" + TaskType.STOCK_RELEASE.name());
+
+        runScheduler();
+        runScheduler();
+
+        // 预占一定被解掉了（两条任务都会解），关键是「解到哪去」只能有一个去向
+        assertThat(lockedOf()).isZero();
+        assertThat(orderField("stock_status", bizNo))
+                .as("库存态是终态之一，且只推进过一次")
+                .isIn(StockStatus.CONSUMED.name(), StockStatus.RELEASED.name());
+
+        // 转消耗则 consumed=1、余量少一件；释放则 consumed=0、余量满。
+        // 两者必居其一 —— 若两条任务都执行了实际的库存 UPDATE，会是 consumed=1 且余量也满，
+        // 那一件库存凭空多出来了
+        if (StockStatus.CONSUMED.name().equals(orderField("stock_status", bizNo))) {
+            assertThat(consumedOf()).isEqualTo(1);
+            assertThat(availableOf()).as("已卖掉的那件不得回到可售").isEqualTo(TOTAL_STOCK - 1);
+        } else {
+            assertThat(consumedOf()).isZero();
+            assertThat(availableOf()).isEqualTo(TOTAL_STOCK);
+        }
+    }
+
     // ------------------------------------------------------------------
     // CLOSE_ORDER 任务
     // ------------------------------------------------------------------
@@ -412,6 +465,13 @@ class CloseOrderIT extends AbstractMySqlIT {
         return num(
                 benefitJdbc,
                 "SELECT locked FROM marketing_stock WHERE stock_key = ?",
+                "sku:" + SKU_ID);
+    }
+
+    private int availableOf() {
+        return num(
+                benefitJdbc,
+                "SELECT total - locked - consumed FROM marketing_stock WHERE stock_key = ?",
                 "sku:" + SKU_ID);
     }
 
