@@ -257,6 +257,42 @@ class FaultInjectionIT extends AbstractMySqlIT {
     }
 
     /**
+     * 查单收敛后，履约明细必须回填供应方单号。
+     *
+     * <p>{@code TIMEOUT_AFTER_COMMIT} 下首次调用抛超时，明细以 {@code provider_order_no = NULL} 落库；
+     * 查单是「下游已发放但平台不知道单号」这一状态的唯一出口，收敛时不填则该列永远为空。
+     *
+     * <p>后果落在对账上：{@code idx_provider_order} 支撑 BR-C-26「按供应方单号反查业务」，而<b>发生过
+     * 超时的单恰恰是最需要反查的那批</b>，它们却查不到。既有用例只断言 {@code reward_grant_item}（发奖侧） 的单号，权益侧的 {@code
+     * benefit_fulfillment_record} 无人检查，故此缺陷此前不显形。
+     */
+    @Test
+    void queryConvergenceBackfillsProviderOrderNoOnFulfillment() {
+        injector.setProviderMode(FaultMode.TIMEOUT_AFTER_COMMIT);
+
+        String bizNo = payFor("backfill");
+        runScheduler(); // 下游已记账但抛超时，明细的 provider_order_no 为空
+
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_UNKNOWN.name());
+        assertThat(fulfillmentOrderNos(bizNo)).as("首次调用超时，此时尚无单号").containsOnlyNulls();
+
+        // 查单收敛
+        makeAllDue(bizNo);
+        runScheduler();
+
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+        assertThat(fulfillmentOrderNos(bizNo))
+                .as("查单是唯一的回填时机，收敛后明细不得仍为空 —— 否则超时过的单永远无法按下游单号反查")
+                .doesNotContainNull()
+                .hasSize(2);
+
+        // 回填的值与下游账本一致，不是随便填了个非空值
+        for (String opNo : List.of(bizNo + "_G_PROVIDER_A", bizNo + "_G_PROVIDER_B")) {
+            assertThat(fulfillmentOrderNos(bizNo)).contains(ledger.find(opNo));
+        }
+    }
+
+    /**
      * 重发后仍未收敛时，查单任务必须能重建 —— 收敛链路不得断在第二轮。
      *
      * <p>{@code benefit_task} 的 {@code uk_biz_type_op} 是 {@code (biz_no, task_type, op_no)}，而重发 复用原
@@ -327,6 +363,15 @@ class FaultInjectionIT extends AbstractMySqlIT {
     }
 
     // ---- 辅助 ----
+
+    /** 本单各履约明细的供应方单号，按权益项排序。 */
+    private List<String> fulfillmentOrderNos(String bizNo) {
+        return benefitJdbc.queryForList(
+                "SELECT provider_order_no FROM benefit_fulfillment_record"
+                        + " WHERE play_biz_record_no = ? ORDER BY benefit_item_id",
+                String.class,
+                bizNo);
+    }
 
     /** 某条任务的状态，不存在则返回 null。 */
     private String taskStatus(String bizNo, TaskType type, String opNo) {
