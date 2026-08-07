@@ -423,23 +423,36 @@ class ReliableTaskIT extends AbstractMySqlIT {
     void schedulerAssignsDistinctTraceIdPerTaskAndClearsAfterwards() {
         // GRANT 无对应主单会抛 4001，被调度器判为确定拒绝 —— 与本用例无关，
         // 此处只关心 handler 被调用时 MDC 的内容
-        enqueueBare("traceA", TaskType.GRANT);
-        enqueueBare("traceB", TaskType.GRANT);
+        String taskA = enqueueBare("traceA", TaskType.GRANT);
+        String taskB = enqueueBare("traceB", TaskType.GRANT);
 
-        List<String> seen = new ArrayList<>();
+        // 按 taskNo 记录，只取本用例入队的两条。
+        //
+        // 不能断言「本轮恰好执行 2 条」：调度器领的是全库所有到期的 PENDING 任务，同一个
+        // Spring 上下文里其他用例残留的任务会一并被领走。本地按某个执行顺序恰好没有残留，
+        // CI 上顺序不同即多出一条，断言 hasSize(2) 随之失败（实测 CI 上为 3）。
+        // 用例之间不共享状态是理想情况，但调度器的语义本就是「领走所有到期的」，
+        // 断言应当收窄到自己关心的那部分，而不是要求全局清净
+        Map<String, String> seen = new ConcurrentHashMap<>();
         TraceCapturingHandler probe = new TraceCapturingHandler(seen);
         BenefitTaskScheduler probed =
                 new BenefitTaskScheduler(taskMapper, claimService, List.of(probe), 30, 0.02);
 
         probed.runOnce();
 
-        assertThat(seen).as("每条任务执行期间都应有 traceId").hasSize(2).doesNotContainNull();
-        assertThat(seen.get(0)).as("两条任务的 traceId 不应相同").isNotEqualTo(seen.get(1));
+        assertThat(seen).as("本用例的两条任务都应被执行").containsKeys(taskA, taskB);
+        // 断言非空串而非非 null：handler 把缺失的 traceId 存成空串（Map 不接受 null 值），
+        // 用 isNotNull 会让「执行了但没有 traceId」这一失败形态照常通过
+        assertThat(seen.get(taskA)).as("任务 A 执行期间应有 traceId").isNotEmpty();
+        assertThat(seen.get(taskB)).as("任务 B 执行期间应有 traceId").isNotEmpty();
+        assertThat(seen.get(taskA))
+                .as("两条任务的 traceId 不应相同 —— 按轮设置会把多笔无关业务串成一条链")
+                .isNotEqualTo(seen.get(taskB));
         assertThat(MDC.get(TraceIdHolder.KEY)).as("执行完毕后必须清理，否则线程复用时会串链路").isNull();
     }
 
-    /** 记录 handler 被调用时 MDC 中的 traceId。 */
-    private record TraceCapturingHandler(List<String> seen) implements TaskHandler {
+    /** 记录各任务执行时 MDC 中的 traceId，键为 taskNo。 */
+    private record TraceCapturingHandler(Map<String, String> seen) implements TaskHandler {
 
         @Override
         public TaskType taskType() {
@@ -448,7 +461,10 @@ class ReliableTaskIT extends AbstractMySqlIT {
 
         @Override
         public RetStatus handle(BenefitTask task) {
-            seen.add(MDC.get(TraceIdHolder.KEY));
+            String traceId = MDC.get(TraceIdHolder.KEY);
+            // traceId 为空时用占位串：ConcurrentHashMap 不接受 null 值，而「执行了但没有
+            // traceId」正是本用例要抓的失败形态，不能因存不进去而丢失
+            seen.put(task.getTaskNo(), traceId == null ? "" : traceId);
             return RetStatus.SUCCESS;
         }
     }
