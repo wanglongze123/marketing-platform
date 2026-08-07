@@ -29,10 +29,15 @@ public final class IdempotentKeys {
     /**
      * 支付回调。<b>payStatus 不入键</b> —— 入了键，「先到 SUCCESS、后到 CLOSED」的乱序通知两条都能插入， 第二条会把已支付订单关闭。乱序由主单条件更新拦截。
      *
+     * <p>第一维取 {@code bizNo}（通知里的 {@code outTradeNo}）而非 {@code tradeNo}：后者在「支付下单成功 但回填前进程崩溃」的窗口内为
+     * {@code NULL}，此时两笔订单只要 {@code notifySeq} 相同即派生出同一个 键，撞上 {@code play_op_record.uk_idempotent}
+     * —— 第二笔的操作记录被 upsert 当成重复通知吞掉。 定位主单用的既然是 {@code outTradeNo}，幂等键取同一个值，两者的口径才一致。
+     *
+     * @param bizNo 主单号，即通知中的 {@code outTradeNo}
      * @param notifySeq 回调携带，重传时保持不变
      */
-    public static String payCallback(String tradeNo, String notifySeq) {
-        return tradeNo + "_" + notifySeq;
+    public static String payCallback(String bizNo, String notifySeq) {
+        return bizNo + "_" + notifySeq;
     }
 
     /**

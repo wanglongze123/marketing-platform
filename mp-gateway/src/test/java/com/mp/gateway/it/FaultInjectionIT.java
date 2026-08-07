@@ -256,7 +256,90 @@ class FaultInjectionIT extends AbstractMySqlIT {
         assertThat(regrantTaskCount(bizNo)).as("PROCESSING 打断后应重新计数，不该因累计次数达标就重发一笔已受理的请求").isZero();
     }
 
+    /**
+     * 重发后仍未收敛时，查单任务必须能重建 —— 收敛链路不得断在第二轮。
+     *
+     * <p>{@code benefit_task} 的 {@code uk_biz_type_op} 是 {@code (biz_no, task_type, op_no)}，而重发 复用原
+     * {@code op_no}。第二轮 {@code finishGrant} 要落的 {@code QUERY_GRANT} 与第一轮那条键完全相同， 若 {@code enqueue}
+     * 对终态行不复活，该 insert 被静默丢弃：主单停在 {@code GRANT_UNKNOWN}，没有任何 查单任务存活，重发的 {@code GRANT} 自己重试到 {@code
+     * DEAD}。
+     *
+     * <p>既有的重发用例覆盖不到：它在跑重发任务前已把注入恢复为 {@code SUCCESS}，一轮即收敛，
+     * 走不到「重发后仍未收敛」这一步。此处全程保持故障，直到确认第二轮查单任务已重建。
+     */
+    @Test
+    void queryTaskIsRebuiltWhenReDispatchAlsoFailsToConverge() {
+        injector.setProviderMode(FaultMode.TIMEOUT_BEFORE_COMMIT);
+
+        String bizNo = payFor("reconverge");
+        runScheduler();
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_UNKNOWN.name());
+
+        String opNoA = bizNo + "_G_PROVIDER_A";
+
+        // 连续查无三次达阈值，落重发任务并把查单任务置 DONE
+        for (int round = 1; round <= 3; round++) {
+            makeAllDue(bizNo);
+            runScheduler();
+        }
+        assertThat(taskStatus(bizNo, TaskType.QUERY_GRANT, opNoA))
+                .as("达阈值后查单任务应已终结，由重发的 GRANT 接手")
+                .isEqualTo(TaskStatus.DONE.name());
+        assertThat(taskStatus(bizNo, TaskType.GRANT, opNoA)).as("重发任务应已落库").isNotNull();
+
+        // 执行重发。注入仍未恢复，故它同样收不到结果 —— finishGrant 需再落一条 QUERY_GRANT，
+        // op_no 与上一轮那条 DONE 行完全相同
+        makeAllDue(bizNo);
+        runScheduler();
+
+        assertThat(taskStatus(bizNo, TaskType.QUERY_GRANT, opNoA))
+                .as("重发后仍未收敛，查单任务必须复活为 PENDING —— 否则主单永停 GRANT_UNKNOWN 且无人再看它")
+                .isEqualTo(TaskStatus.PENDING.name());
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ? AND task_type ="
+                                        + " ? AND op_no = ?",
+                                bizNo,
+                                TaskType.QUERY_GRANT.name(),
+                                opNoA))
+                .as("复活而非新增：唯一键仍应只有一行")
+                .isEqualTo(1);
+        assertThat(
+                        num(
+                                benefitJdbc,
+                                "SELECT retry_count FROM benefit_task WHERE biz_no = ? AND"
+                                        + " task_type = ? AND op_no = ?",
+                                bizNo,
+                                TaskType.QUERY_GRANT.name(),
+                                opNoA))
+                .as("复活是新一轮发起，不继承上一轮的重试进度")
+                .isZero();
+
+        // 恢复后经由复活的查单任务收敛，且全程只发放一次
+        injector.setProviderMode(FaultMode.SUCCESS);
+        for (int round = 1; round <= 3; round++) {
+            makeAllDue(bizNo);
+            runScheduler();
+        }
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+        assertNoDuplicateGrant(bizNo, List.of(opNoA, bizNo + "_G_PROVIDER_B"));
+    }
+
     // ---- 辅助 ----
+
+    /** 某条任务的状态，不存在则返回 null。 */
+    private String taskStatus(String bizNo, TaskType type, String opNo) {
+        List<String> rows =
+                benefitJdbc.queryForList(
+                        "SELECT status FROM benefit_task WHERE biz_no = ? AND task_type = ?"
+                                + " AND op_no = ?",
+                        String.class,
+                        bizNo,
+                        type.name(),
+                        opNo);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
 
     /** 下单 + 支付成功，返回 bizNo。此时 GRANT 任务已落库待执行。 */
     private String payFor(String tag) {

@@ -239,22 +239,23 @@ class ReliableTaskIT extends AbstractMySqlIT {
                         });
     }
 
-    /**
-     * 退避与死信：任务连续失败时 {@code retry_count} 递增、{@code next_time} 后推，超阈进 {@code DEAD}。
-     *
-     * <p><b>这是 PR-2 里唯一没有真实业务路径能触发的分支</b> —— GRANT 在 mock 下恒成功，故障注入要到 PR-3 才有。用尚无处理器的 {@code
-     * STOCK_CONSUME}（PR-5 才接入处理器）驱动：走「无处理器」分支，同样退避重排。
-     *
-     * <p><b>断言的是 {@code next_time} 相对本轮之前严格后移，而不是「它在将来」</b>：IT 里退避基数被压到 毫秒级（首档
-     * 1ms），断言执行时那一毫秒早已过去，「在将来」恒不成立。后移才是退避要保证的性质， 且与基数取值无关。绝对值由 {@code BackoffPolicyTest} 覆盖。
-     *
-     * <p>每轮之间显式把 {@code next_time} 置为当前时刻使其可领 —— 用 sleep 等到期会让测试时长取决于 退避基数，且掩盖「根本没退避」这种情况。
-     */
     /** 短退避序列按 {@code mp.task.backoff-scale=0.02} 压缩后的理论值：1s/5s/30s → 20/100/600ms。 */
     private static final long[] EXPECTED_BACKOFF_MILLIS = {20, 100, 600};
 
+    /**
+     * 任务类型尚无处理器时：归还租约、退避重排、<b>不计重试次数</b>、不判死信。
+     *
+     * <p>不计重试是关键。该情形不是执行失败，而是本实例没有能力处理它 —— 计入则 {@code retry_count}
+     * 在等待处理器接入期间无上限累积，待处理器真正注册后，首次返回非终态即达阈值直接进死信。
+     *
+     * <p>退避取固定末档而非按次数递增：计数既然不增长，按它索引序列会恒取首档，任务将以最短间隔 被反复领取。递增序列由 {@link
+     * #taskStopsRetryingOnceItReachesTheDeadLetterThreshold} 经真实 GRANT 链路覆盖，绝对值由 {@code
+     * BackoffPolicyTest} 覆盖。
+     *
+     * <p>每轮之间显式把 {@code next_time} 置为当前时刻使其可领 —— 用 sleep 等到期会让测试时长取决于 退避基数，且掩盖「根本没退避」这种情况。
+     */
     @Test
-    void repeatedFailureIncrementsRetryCountAndPushesNextTimeForward() {
+    void taskWithoutHandlerIsRescheduledWithoutCountingAsRetry() {
         String taskNo = "TK_IT_backoff";
         // 用确实无处理器的类型。这个选择随实现推进要跟着换：QUERY_GRANT 自 PR-3 起有了处理器、
         // STOCK_CONSUME 自 PR-5 起也有了 —— 每次都表现为本用例变红，因为任务被真的执行掉了，
@@ -262,7 +263,9 @@ class ReliableTaskIT extends AbstractMySqlIT {
         taskMapper.enqueue(
                 taskNo, "BZ_IT_backoff", TaskType.REFUND.name(), "OP_IT_backoff", 0, "{}");
 
-        List<Long> pushes = new ArrayList<>();
+        // 末档理论值 600ms（短退避 30s × scale=0.02）
+        long expectedMillis = EXPECTED_BACKOFF_MILLIS[EXPECTED_BACKOFF_MILLIS.length - 1];
+
         for (int round = 1; round <= 3; round++) {
             makeDue(taskNo);
 
@@ -273,21 +276,15 @@ class ReliableTaskIT extends AbstractMySqlIT {
                                     benefitJdbc,
                                     "SELECT retry_count FROM benefit_task WHERE task_no = ?",
                                     taskNo))
-                    .as("第 %s 轮失败后 retry_count 应为 %s", round, round)
-                    .isEqualTo(round);
+                    .as("第 %s 轮：无处理器不计重试，retry_count 应恒为 0", round)
+                    .isZero();
 
-            // 退避量随重试次数增长：短退避序列按 scale=0.02 压缩后为 20 / 100 / 600ms。
-            // 只断言「next_time 后移」是不够的 —— 退避取 0 时它等于 NOW(3)，而每轮之间墙钟本就在
-            // 前进，断言照样通过（已实测确认）。要验的是退避本身，就必须验后推量
+            // 断言下界取理论值的一半，余量是调度器每轮自身耗时。只断言「next_time 后移」不够 ——
+            // 退避取 0 时它等于 NOW(3)，而每轮之间墙钟本就在前进，断言照样通过（已实测确认）
             long pushedMillis = backoffMillis(taskNo);
-            // 断言下界取该轮理论值的一半：实测三轮为 24 / 106 / 604 ms（理论 20 / 100 / 600，
-            // 余量是调度器每轮自身耗时）。取「不小于前一轮」是不够的 —— 退避取 0 时三轮都是几毫秒
-            // 的墙钟噪声，逐轮不减照样成立（已实测确认）
-            long expectedMillis = EXPECTED_BACKOFF_MILLIS[round - 1];
             assertThat(pushedMillis)
-                    .as("第 %s 轮退避应约 %sms，实际 %sms", round, expectedMillis, pushedMillis)
+                    .as("第 %s 轮退避应取末档约 %sms，实际 %sms", round, expectedMillis, pushedMillis)
                     .isGreaterThan(expectedMillis / 2);
-            pushes.add(pushedMillis);
 
             // 无处理器不判死信：补上处理器后任务应能继续跑，而不是已经被判死
             assertThat(
@@ -304,9 +301,6 @@ class ReliableTaskIT extends AbstractMySqlIT {
                                     taskNo))
                     .isNull();
         }
-
-        // 末轮显著大于首轮：验的是序列在增长，而非三轮恰好都落在同一噪声区间
-        assertThat(pushes.get(2)).as("末轮退避量应远大于首轮，实际 %s", pushes).isGreaterThan(pushes.get(0) * 5);
     }
 
     /**

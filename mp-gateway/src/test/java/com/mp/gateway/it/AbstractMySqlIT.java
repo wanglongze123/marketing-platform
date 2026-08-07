@@ -195,7 +195,10 @@ abstract class AbstractMySqlIT {
         req.setTradeNo(tradeNo);
         req.setNotifySeq(notifySeq);
         req.setPayStatus(payStatus);
-        req.setPayAmount(SALE_PRICE);
+        // 只有收款通知带金额。FAILED / CLOSED 说的是「这笔没收成」，真实支付平台在这两类
+        // 通知里不带金额或带 0 —— 一律填全额会掩盖「平台对未收款通知也做金额校验」这类缺陷，
+        // 线上关闭通知因此全被判 1731，而测试全绿
+        req.setPayAmount("SUCCESS".equals(payStatus) ? SALE_PRICE : 0L);
         req.setCurrency("CNY");
         req.setMerchantId("MCH_DEMO");
         req.setSign(payNotifySigner.sign(req.signFields()));

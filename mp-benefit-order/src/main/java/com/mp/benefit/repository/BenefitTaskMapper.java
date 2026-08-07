@@ -25,20 +25,36 @@ import org.apache.ibatis.annotations.Update;
 public interface BenefitTaskMapper extends BaseMapper<BenefitTask> {
 
     /**
-     * 幂等入队：命中 {@code uk_biz_type_op} 时什么都不做。
+     * 幂等入队。命中 {@code uk_biz_type_op} 时按当前状态分流：在途（{@code PENDING} / {@code DOING}）保持不变， 终态（{@code
+     * DONE} / {@code DEAD}）复活为 {@code PENDING}。
      *
-     * <p>重复入队是预期路径（重复回调、对账补建），不是错误。{@code ON DUPLICATE KEY UPDATE id = id} 是 MySQL 里表达「忽略冲突」的惯用写法
-     * —— 用 {@code INSERT IGNORE} 会连带吞掉 主键冲突以外的错误（如字段截断），范围过宽。
+     * <p>在途不覆盖：该任务正在等待执行或已被实例持有，重置 {@code next_time} 会使其提前到期，租约 与退避随之失真。
      *
-     * <p><b>{@code next_time} 由 {@code NOW(3)} 加偏移算出，不由应用传入绝对时间</b>：调度判据是 {@code next_time <=
-     * NOW(3)}，两端必须出自同一个时钟。应用侧传 {@code LocalDateTime.now()} 则是拿 JVM 时钟写入、拿 DB 时钟比较 ——
-     * 单机上时区配错即整体偏移（任务永不到期或立刻全到期）， 多实例下则是实例间时钟漂移，表现为调度时快时慢且无法复现。入参因此是<b>延迟秒数</b>而非时刻。
+     * <p>终态须复活，因为 {@code op_no} 标识的操作可被重新发起。查单重发链路依赖此行为：{@code QUERY_GRANT} 连续查无达阈值后落一条复用原 {@code
+     * op_no} 的 {@code GRANT} 并将自身置 {@code DONE}；若重发仍未收敛，{@code finishGrant} 需再落 {@code
+     * QUERY_GRANT}，此时命中的正是上一轮那条 {@code DONE} 行。不复活则该 insert 被静默丢弃，主单停在 {@code GRANT_UNKNOWN}
+     * 且无查单任务存活。
+     *
+     * <p>复活时 {@code retry_count} 归零、租约清空：新一轮发起不继承上一轮的重试进度，否则首次执行 即可能因累计次数达标而直接进死信。
+     *
+     * <p>{@code next_time} 由 {@code NOW(3)} 加偏移在库内算出，入参为延迟秒数而非时刻。调度判据是 {@code next_time <=
+     * NOW(3)}，两端须出自同一时钟；由应用传绝对时间则单机时区错配会导致整体偏移， 多实例下表现为实例间时钟漂移。
+     *
+     * <p>{@code status} 的赋值排在末位：MySQL 的 {@code ON DUPLICATE KEY UPDATE} 按书写顺序求值，后续
+     * 表达式会读到已更新的值，故其余列必须先于它读取原 {@code status}。
      */
     @Update(
             "INSERT INTO benefit_task (task_no, biz_no, task_type, op_no, status, next_time,"
                     + " retry_count, payload) VALUES (#{taskNo}, #{bizNo}, #{taskType}, #{opNo},"
                     + " 'PENDING', DATE_ADD(NOW(3), INTERVAL #{delaySeconds} SECOND), 0,"
-                    + " #{payload}) ON DUPLICATE KEY UPDATE id = id")
+                    + " #{payload}) ON DUPLICATE KEY UPDATE"
+                    + " next_time = IF(status IN ('DONE', 'DEAD'),"
+                    + " DATE_ADD(NOW(3), INTERVAL #{delaySeconds} SECOND), next_time),"
+                    + " retry_count = IF(status IN ('DONE', 'DEAD'), 0, retry_count),"
+                    + " payload = IF(status IN ('DONE', 'DEAD'), #{payload}, payload),"
+                    + " lease_owner = IF(status IN ('DONE', 'DEAD'), NULL, lease_owner),"
+                    + " lease_expire = IF(status IN ('DONE', 'DEAD'), NULL, lease_expire),"
+                    + " status = IF(status IN ('DONE', 'DEAD'), 'PENDING', status)")
     int enqueue(
             @Param("taskNo") String taskNo,
             @Param("bizNo") String bizNo,
@@ -84,8 +100,19 @@ public interface BenefitTaskMapper extends BaseMapper<BenefitTask> {
             @Param("owner") String owner,
             @Param("leaseSeconds") int leaseSeconds);
 
-    @Select("SELECT * FROM benefit_task WHERE id = #{id}")
-    BenefitTask selectByIdPlain(@Param("id") Long id);
+    /**
+     * 按 id 批量读回。领取后取任务全量字段用，一批一条 SQL。
+     *
+     * <p>顺序由 {@code id} 保证而非依赖 {@code IN} 列表的书写次序：后者在 MySQL 中不构成排序约束。
+     */
+    @Select({
+        "<script>",
+        "SELECT * FROM benefit_task",
+        " WHERE id IN <foreach item='id' collection='ids' open='(' separator=',' close=')'>#{id}</foreach>",
+        " ORDER BY id",
+        "</script>"
+    })
+    List<BenefitTask> selectByIds(@Param("ids") List<Long> ids);
 
     /** 完成。fencing：租约已易主则 {@code affected_rows = 0}，放弃写回。 */
     @Update(
@@ -104,6 +131,24 @@ public interface BenefitTaskMapper extends BaseMapper<BenefitTask> {
                     + " lease_owner = NULL, lease_expire = NULL"
                     + " WHERE id = #{id} AND status = 'DOING' AND lease_owner = #{owner}")
     int markRetry(
+            @Param("id") Long id,
+            @Param("owner") String owner,
+            @Param("backoffMicros") long backoffMicros);
+
+    /**
+     * 归还租约但不计重试：回 {@code PENDING} 并按退避后推，{@code retry_count} 保持不变。
+     *
+     * <p>用于「任务类型尚无处理器」这一分支。该情形不是任务执行失败，而是本实例没有能力处理它 —— 计入重试会使 {@code retry_count}
+     * 在等待处理器接入期间无上限累积，待处理器真正注册后， 首次返回非终态即达阈值直接进死信。
+     *
+     * <p>仍带 fencing 与退避：租约必须还回去，否则任务留在 {@code DOING} 直到僵尸回收才被捞回； 退避则避免无处理器的任务在每一轮调度中被反复领取。
+     */
+    @Update(
+            "UPDATE benefit_task SET status = 'PENDING',"
+                    + " next_time = DATE_ADD(NOW(3), INTERVAL #{backoffMicros} MICROSECOND),"
+                    + " lease_owner = NULL, lease_expire = NULL"
+                    + " WHERE id = #{id} AND status = 'DOING' AND lease_owner = #{owner}")
+    int releaseWithoutRetry(
             @Param("id") Long id,
             @Param("owner") String owner,
             @Param("backoffMicros") long backoffMicros);
