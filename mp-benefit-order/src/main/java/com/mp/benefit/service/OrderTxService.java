@@ -355,12 +355,19 @@ public class OrderTxService {
      *
      * <p><b>组合权益跨多供应方时，一条查单任务只能收敛自己那一组</b>：主单要等所有组都收敛后 才能置终态。此处的处理是「本组成功且主单再无未收敛的明细」才推进主单 ——
      * 判据取自明细表， 不另建计数。
+     *
+     * <p><b>{@code providerOrderNo} 必须回填</b>：查单是「下游已发放但平台不知道单号」这一状态的 唯一出口，首次调用超时未拿到单号，收敛时不填则明细的
+     * {@code provider_order_no} 永远为空。 该列上的 {@code idx_provider_order} 支撑 BR-C-26「按供应方单号反查业务」——
+     * 恰恰是发生过 超时的那些单最需要对账时能反查，而它们正是空的。
+     *
+     * <p>传 {@code null} 时由 {@code settleByGrantOpNo} 的 {@code COALESCE} 保留原值，不会把首次调用 已拿到的单号抹掉。
      */
     @BenefitTx
-    public void settleGrant(String bizNo, String grantOpNo, RetStatus downstream) {
+    public void settleGrant(
+            String bizNo, String grantOpNo, RetStatus downstream, String providerOrderNo) {
         ItemGrantStatus itemStatus =
                 downstream == RetStatus.SUCCESS ? ItemGrantStatus.SUCCESS : ItemGrantStatus.FAILED;
-        fulfillmentMapper.settleByGrantOpNo(bizNo, grantOpNo, itemStatus.name(), null);
+        fulfillmentMapper.settleByGrantOpNo(bizNo, grantOpNo, itemStatus.name(), providerOrderNo);
 
         // 仍有未终结的明细则主单继续停在 GRANT_UNKNOWN，等其余查单任务
         int unresolved = fulfillmentMapper.countUnresolved(bizNo);

@@ -1,5 +1,6 @@
 package com.mp.benefit.task;
 
+import com.mp.api.reward.dto.GrantItemResult;
 import com.mp.api.reward.dto.GrantRewardResp;
 import com.mp.api.reward.service.RewardService;
 import com.mp.benefit.entity.BenefitTask;
@@ -44,6 +45,23 @@ public class QueryGrantTaskHandler implements TaskHandler {
         this.taskMapper = taskMapper;
     }
 
+    /**
+     * 从查单结果取供应方单号。
+     *
+     * <p>一个 {@code opNo} 对应一次供应方调用，其下各明细项共享同一张下游单据，故取首个非空即可。 全空返回 {@code null}，由 {@code
+     * settleByGrantOpNo} 的 {@code COALESCE} 保留库中原值。
+     */
+    private static String providerOrderNo(GrantRewardResp resp) {
+        if (resp.getItems() == null) {
+            return null;
+        }
+        return resp.getItems().stream()
+                .map(GrantItemResult::getProviderOrderNo)
+                .filter(no -> no != null && !no.isBlank())
+                .findFirst()
+                .orElse(null);
+    }
+
     /** 从 payload 读连续查无次数，缺失即 0。 */
     private static int currentMissStreak(BenefitTask task) {
         String payload = task.getPayload();
@@ -69,13 +87,15 @@ public class QueryGrantTaskHandler implements TaskHandler {
 
         switch (downstream) {
             case SUCCESS -> {
-                // 收敛成功：推进主单与履约明细，任务完成
-                tx.settleGrant(bizNo, opNo, RetStatus.SUCCESS);
+                // 收敛成功：推进主单与履约明细，任务完成。
+                // 带上查得的供应方单号 —— 首次调用超时未拿到它，此处是唯一的回填时机
+                tx.settleGrant(bizNo, opNo, RetStatus.SUCCESS, providerOrderNo(resp));
                 log.info("queryGrant converged to SUCCESS, bizNo={}, opNo={}", bizNo, opNo);
                 return RetStatus.SUCCESS;
             }
             case FAIL -> {
-                tx.settleGrant(bizNo, opNo, RetStatus.FAIL);
+                // 确定失败无单号可填，传 null 由 COALESCE 保留原值
+                tx.settleGrant(bizNo, opNo, RetStatus.FAIL, null);
                 log.info("queryGrant converged to FAIL, bizNo={}, opNo={}", bizNo, opNo);
                 return RetStatus.SUCCESS;
             }
