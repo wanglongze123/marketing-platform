@@ -54,12 +54,25 @@ public class BizLock {
         }
     }
 
-    /** 支付回调锁。键取 {@code tradeNo} —— 入参就有，不必先查库（技术方案 §6.3）。 */
-    public <T> T aroundPayCallback(String tradeNo, Supplier<T> action) {
-        return around("lock:ben:trade:" + tradeNo, action);
+    /**
+     * 支付回调锁。<b>键取主单号，与关单锁同键</b>。
+     *
+     * <p>原先取 {@code tradeNo}，与关单的 {@code bizNo} 是两个不同的键，两者之间不构成互斥；而「关单与
+     * 支付通知并发」（用户点取消的同时付款成功）正是它们需要串行化的场景。正确性仍由主单条件更新 保证，但注释所声称的互斥并不存在 —— 后续若有人据此简化条件更新即会失去保护。
+     *
+     * <p>取 {@code bizNo} 还避开了 {@code tradeNo} 可空的问题：「支付下单成功但回填前崩溃」的窗口内 它仍是 {@code
+     * NULL}，此时所有此类回调会落到同一个键上互相阻塞。
+     */
+    public <T> T aroundPayCallback(String bizNo, Supplier<T> action) {
+        return around(orderKey(bizNo), action);
     }
 
-    /** 建单锁。键取业务幂等键的四元组，与 {@code uk_idempotent} 同维度。 */
+    /**
+     * 建单锁。键取业务幂等键的四元组，与 {@code uk_idempotent} 同维度。
+     *
+     * <p>命名空间与订单锁分开（{@code new} 而非 {@code order}）：建单时主单号尚未生成，这把锁保护的
+     * 是「同一幂等键只建一单」，与后续针对已存在订单的互斥不是一回事。
+     */
     public <T> T aroundCreateTrade(
             String userId,
             String activityId,
@@ -67,13 +80,22 @@ public class BizLock {
             String clientReqNo,
             Supplier<T> action) {
         return around(
-                "lock:ben:trade:" + userId + ":" + activityId + ":" + skuId + ":" + clientReqNo,
+                "lock:ben:new:" + userId + ":" + activityId + ":" + skuId + ":" + clientReqNo,
                 action);
     }
 
-    /** 关单锁。键取主单号。 */
+    /** 关单锁。键取主单号，与支付回调锁同键 —— 两者必须互斥，见 {@link #aroundPayCallback}。 */
     public <T> T aroundCloseOrder(String bizNo, Supplier<T> action) {
-        return around("lock:ben:close:" + bizNo, action);
+        return around(orderKey(bizNo), action);
+    }
+
+    /**
+     * 针对某一笔已存在订单的锁键。
+     *
+     * <p>支付回调与关单共用，<b>这是它们能互斥的唯一原因</b>：键不同的两把锁只是各自串行化， 彼此之间毫无约束。派生集中在一处，避免两边各拼一次而悄悄拼成不同的串。
+     */
+    private static String orderKey(String bizNo) {
+        return "lock:ben:order:" + bizNo;
     }
 
     /**

@@ -50,6 +50,7 @@ import com.mp.common.security.ConsultTokenSigner;
 import com.mp.common.security.PayNotifySigner;
 import com.mp.common.util.BizNoGenerator;
 import com.mp.common.util.IdempotentKeys;
+import com.mp.common.util.ReqFields;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -135,6 +136,11 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
      */
     @Override
     public PreConsultResp preConsult(PreConsultReq req) {
+        // 三者都进凭证签名。为空则签出一张字段缺失的凭证，下单时逐字段比对反而通过
+        ReqFields.required(req.getUserId(), "userId");
+        ReqFields.required(req.getActivityId(), "activityId");
+        ReqFields.required(req.getSkuId(), "skuId");
+
         ActivityConfResp activity = activityService.queryActivityConf(req.getActivityId());
         if (activity == null || !activity.isAvailable()) {
             throw new BizException(ErrorCode.INVALID_PARAM, "活动不可参与: " + req.getActivityId());
@@ -187,6 +193,13 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
      */
     @Override
     public CreateTradeResp createTrade(CreateTradeReq req) {
+        // 四元组同时是锁键与 uk_idempotent 的组成。校验须先于加锁：任一为空则不同请求
+        // 拼出同一把锁，且落库时撞上同一个幂等键，第二笔被当作重复下单返回他人订单
+        ReqFields.required(req.getUserId(), "userId");
+        ReqFields.required(req.getActivityId(), "activityId");
+        ReqFields.required(req.getSkuId(), "skuId");
+        ReqFields.required(req.getClientReqNo(), "clientReqNo");
+
         return bizLock.aroundCreateTrade(
                 req.getUserId(),
                 req.getActivityId(),
@@ -350,14 +363,19 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     /**
      * 支付结果通知。
      *
-     * <p><b>验签在锁外、锁在验签之后</b>：未通过验签的请求不该占用锁资源 —— 否则伪造通知可以靠 刷同一个 {@code tradeNo}
-     * 把真实通知挡在锁外，形成一种廉价的拒绝服务。
+     * <p><b>验签在锁外、锁在验签之后</b>：未通过验签的请求不该占用锁资源 —— 否则伪造通知可以靠 刷同一个业务号把真实通知挡在锁外，形成一种廉价的拒绝服务。
      *
-     * <p>锁键取 {@code tradeNo}，与幂等键 {@code tradeNo + '_' + notifySeq} 同源但更粗 —— 同一支付单的多条通知（含乱序的
-     * SUCCESS 与 CLOSED）会被串行化，条件更新因此更少走到冲突分支。
+     * <p>锁键取 {@code outTradeNo}（= 主单号），<b>与关单锁同键</b> —— 「用户点取消的同时付款成功」 是这两条链路必须互斥的场景。同一订单的多条通知（含乱序的
+     * SUCCESS 与 CLOSED）也因此被串行化， 条件更新更少走到冲突分支。
      */
     @Override
     public RetStatus payCallback(PayCallbackReq req) {
+        // outTradeNo 是锁键与定位依据，notifySeq 参与幂等键 —— 任一为空都会让不同订单的
+        // 通知落到同一把锁、同一个 idempotent_key 上。校验先于验签：两者都不涉及业务数据，
+        // 而缺字段的请求连签名字段集都凑不齐
+        ReqFields.required(req.getOutTradeNo(), "outTradeNo");
+        ReqFields.required(req.getNotifySeq(), "notifySeq");
+
         // ① 验签，先于一切（PRD FR-B03 ①、BR-B-12「未通过验签的通知不得更新任何业务状态」）。
         //
         // 必须在定位主单之前：放到后面则未验签的请求已经能探测「这个 bizNo 存不存在」，
@@ -370,8 +388,8 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             throw new BizException(ErrorCode.PAY_NOTIFY_SIGN_INVALID, "支付通知验签失败");
         }
 
-        // ② 验签通过后才加锁：同一支付单的多条通知在此串行化
-        return bizLock.aroundPayCallback(req.getTradeNo(), () -> doPayCallback(req));
+        // ② 验签通过后才加锁：同一订单的多条通知、以及并发的关单，在此串行化
+        return bizLock.aroundPayCallback(req.getOutTradeNo(), () -> doPayCallback(req));
     }
 
     private RetStatus doPayCallback(PayCallbackReq req) {
@@ -382,19 +400,26 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
         }
 
+        PayStatus target = parsePayStatus(req.getPayStatus());
+
         // 金额校验：仅验签不够 —— 验签只证明消息来自支付方，不证明金额与本单应付一致。
         // 校验失败不推进任何状态（V2 补对账记录与 P0 告警）
-        if (req.getPayAmount() != order.getOrderAmount()
-                || !order.getCurrency().equals(req.getCurrency())) {
-            log.error(
-                    "payCallback amount mismatch, bizNo={}, expect={}, actual={}",
-                    bizNo,
-                    order.getOrderAmount(),
-                    req.getPayAmount());
-            throw new BizException(ErrorCode.PAY_AMOUNT_MISMATCH, "支付金额或币种不一致");
+        //
+        // 只校验收款通知。FAILED / CLOSED 说的是「这笔没收成」，支付方在这两类通知里
+        // 不带金额或带 0 是常态 —— 一律要求等于应付额，会把线上所有关闭通知判成 1731，
+        // 订单永远停在 WAIT_PAY 而告警里全是不存在的资损。校验的对象是「收了多少钱」，
+        // 没收钱时它没有可校验的内容
+        if (target == PayStatus.PAY_SUCCESS) {
+            if (req.getPayAmount() != order.getOrderAmount()
+                    || !order.getCurrency().equals(req.getCurrency())) {
+                log.error(
+                        "payCallback amount mismatch, bizNo={}, expect={}, actual={}",
+                        bizNo,
+                        order.getOrderAmount(),
+                        req.getPayAmount());
+                throw new BizException(ErrorCode.PAY_AMOUNT_MISMATCH, "支付金额或币种不一致");
+            }
         }
-
-        PayStatus target = parsePayStatus(req.getPayStatus());
 
         // 履约不在此处触发：GRANT 任务已在同一事务内落库，由调度器驱动（技术方案 §6.5）。
         // V1 曾在事务提交后同步调 grantBenefit —— 「改状态」与「触发履约」之间存在崩溃窗口，
@@ -538,10 +563,19 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
         }
 
-        // 重入分支：已完成则直接返回，不再调 reward
-        if (GrantStatus.GRANT_SUCCESS.name().equals(order.getGrantStatus())) {
+        // 重入分支：终态不重新发起。GRANT_SUCCESS 与 GRANT_FAILED 都是终态，且都不在
+        // startGranting 的入边内（入边为 NOT_START / GRANT_UNKNOWN）—— 不在此拦截则会照常
+        // 调一次下游，而 finishGrant 的条件更新命中 0 行，状态原地不动且不报错
+        GrantStatus current = GrantStatus.valueOf(order.getGrantStatus());
+        if (current == GrantStatus.GRANT_SUCCESS) {
             log.info("grantBenefit already done, skip, bizNo={}", bizNo);
             return RetStatus.SUCCESS;
+        }
+        if (current == GrantStatus.GRANT_FAILED) {
+            // 返回 FAIL 而非 SUCCESS：这是确定的失败结论，调度器据此置 DONE 停止重试。
+            // 返回 SUCCESS 会把「发放失败」记成「任务成功」，掩盖需要人工介入的单
+            log.info("grantBenefit already failed, no re-dispatch, bizNo={}", bizNo);
+            return RetStatus.FAIL;
         }
 
         // 事务 A：置 GRANTING + 落操作记录中间态。

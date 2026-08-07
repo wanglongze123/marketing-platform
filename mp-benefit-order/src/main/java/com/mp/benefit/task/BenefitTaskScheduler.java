@@ -93,18 +93,17 @@ public class BenefitTaskScheduler {
         TaskType type = TaskType.valueOf(task.getTaskType());
         TaskHandler handler = handlers.get(type);
         if (handler == null) {
-            // 无处理器不是任务的错，不进死信 —— 补上处理器后它应当能继续跑。
-            // 但必须把租约还回去：直接 return 会让任务留在 DOING 且持有租约，
-            // 要等租约过期再撞上每 N 轮一次的僵尸回收才捞得回来。PR-2 只实现了 GRANT，
-            // 其余类型（如 QUERY_GRANT）在后续 PR 接入前入队即会走到这里
+            // 无处理器不判死信：补上处理器后任务应能继续执行。租约必须归还，直接 return 会让
+            // 任务留在 DOING 并持有租约，须等租约过期再撞上每 N 轮一次的僵尸回收才捞得回来。
+            //
+            // 不计入 retry_count：这不是执行失败，而是本实例没有能力处理它。计入则计数在等待
+            // 处理器接入期间无上限累积，处理器注册后首次返回非终态即达阈值直接进死信
             log.error("no handler for task type {}, taskNo={}", type, task.getTaskNo());
+            // 退避取固定长档而非按 retry_count 索引：计数既然不增长，索引恒为首档，任务会以
+            // 最短间隔被反复领取。处理器要等到下次发版才会出现，高频轮询纯属浪费
             int rows =
-                    taskMapper.markRetry(
-                            task.getId(),
-                            owner,
-                            backoff.nextBackoffMicros(
-                                    RetStatus.UNKNOWN,
-                                    task.getRetryCount() == null ? 0 : task.getRetryCount()));
+                    taskMapper.releaseWithoutRetry(
+                            task.getId(), owner, backoff.maxBackoffMicros(RetStatus.UNKNOWN));
             logWriteBack(task, "PENDING(no handler)", rows);
             return;
         }

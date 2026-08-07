@@ -17,16 +17,21 @@ import org.apache.ibatis.annotations.Update;
 @Mapper
 public interface PlayBizRecordMapper extends BaseMapper<PlayBizRecord> {
 
-    /** 支付态推进。谓词限定前置状态，乱序到达的迟到通知在此被拒。 */
+    /**
+     * 支付态推进。谓词限定前置状态，乱序到达的迟到通知在此被拒。
+     *
+     * <p><b>不写 {@code pay_amount}</b>：本方法承接的是「交易未成立」的推进（{@code PAY_FAILED}）。
+     * 把通知里的金额记成实付，会让一笔根本没付成的单带着全额 {@code pay_amount} —— 对账按 「已收款」的口径扫到它即是一笔虚假的账。实付金额只在确认收款时写入，见
+     * {@link #advanceToPaySuccess}。
+     */
     @Update(
-            "UPDATE play_biz_record SET pay_status = #{toStatus}, pay_amount = #{payAmount},"
+            "UPDATE play_biz_record SET pay_status = #{toStatus},"
                     + " trade_no = COALESCE(trade_no, #{tradeNo})"
                     + " WHERE play_biz_record_no = #{bizNo} AND pay_status = #{fromStatus}")
     int advancePayStatus(
             @Param("bizNo") String bizNo,
             @Param("fromStatus") String fromStatus,
             @Param("toStatus") String toStatus,
-            @Param("payAmount") long payAmount,
             @Param("tradeNo") String tradeNo);
 
     /**
@@ -38,15 +43,20 @@ public interface PlayBizRecordMapper extends BaseMapper<PlayBizRecord> {
      *
      * <p>语义上：{@code CLOSING} 表示「关单结果未定」，而<b>支付成功通知是比查单更强的证据</b>，必须放行。 这是「UNKNOWN 不等于失败」在状态机层面的体现 ——
      * 中间态不能吞掉后到的确定结果。
+     *
+     * <p><b>{@code payAmount} 可为 {@code null}，此时不写实付金额</b>：查单收敛（{@code CLOSING → PAY_SUCCESS}）
+     * 走的是这条边，而它手上没有任何支付通知 —— 支付方只回答了「这笔已收款」，没说收了多少。 以应付额填充等于替支付方猜一个数，实付≠应付时对账口径就是错的。留空等通知回填，
+     * 「实付金额未知」本身是可表达的状态（{@code pay_amount} 可空），而一个猜来的数不是。
      */
     @Update(
-            "UPDATE play_biz_record SET pay_status = 'PAY_SUCCESS', pay_amount = #{payAmount},"
+            "UPDATE play_biz_record SET pay_status = 'PAY_SUCCESS',"
+                    + " pay_amount = COALESCE(#{payAmount}, pay_amount),"
                     + " trade_no = COALESCE(trade_no, #{tradeNo})"
                     + " WHERE play_biz_record_no = #{bizNo}"
                     + " AND pay_status IN ('WAIT_PAY', 'CLOSING')")
     int advanceToPaySuccess(
             @Param("bizNo") String bizNo,
-            @Param("payAmount") long payAmount,
+            @Param("payAmount") Long payAmount,
             @Param("tradeNo") String tradeNo);
 
     /**

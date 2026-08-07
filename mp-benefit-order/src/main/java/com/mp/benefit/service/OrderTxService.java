@@ -213,7 +213,6 @@ public class OrderTxService {
                                     bizNo,
                                     PayStatus.WAIT_PAY.name(),
                                     target.name(),
-                                    req.getPayAmount(),
                                     req.getTradeNo());
                 };
 
@@ -221,7 +220,7 @@ public class OrderTxService {
         // 取空串会让第二条在 uk_biz_op 上冲突被拒，执行不到上面的条件更新。
         opRecordMapper.upsert(
                 bizNo + "_PAY_" + req.getNotifySeq(),
-                IdempotentKeys.payCallback(req.getTradeNo(), req.getNotifySeq()),
+                IdempotentKeys.payCallback(bizNo, req.getNotifySeq()),
                 bizNo,
                 order.getUserId(),
                 order.getActivityId(),
@@ -471,11 +470,14 @@ public class OrderTxService {
      * 走的是与支付回调完全相同的两条任务，因为发生的是同一件事：这笔钱收到了。
      *
      * <p><b>不落释放任务</b>：钱收了，库存该转消耗而非归还。
+     *
+     * <p><b>{@code pay_amount} 传 {@code null}，不以应付额填充</b>：本路径手上没有支付通知 —— 支付方
+     * 只回答了「这笔已收款」，没说收了多少。填应付额是替它猜一个数，实付≠应付时对账口径就错了。 这与 {@code doCloseOrder} 的 {@code FAIL}
+     * 分支拒绝写状态是同一条理由（「越俎代庖会把金额等 字段写成猜测值」），那里不写，这里也不该写。留空等支付通知回填。
      */
     @BenefitTx
     public boolean applyPaidAfterClosing(String bizNo, PlayBizRecord order) {
-        if (bizRecordMapper.advanceToPaySuccess(bizNo, order.getOrderAmount(), order.getTradeNo())
-                == 0) {
+        if (bizRecordMapper.advanceToPaySuccess(bizNo, null, order.getTradeNo()) == 0) {
             log.info("closing order not advanced to PAY_SUCCESS, bizNo={}", bizNo);
             return false;
         }

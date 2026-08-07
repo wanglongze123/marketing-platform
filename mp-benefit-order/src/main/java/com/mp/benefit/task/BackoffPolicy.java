@@ -53,4 +53,14 @@ public final class BackoffPolicy {
     public Duration nextBackoff(RetStatus downstream, int retryCount) {
         return Duration.ofNanos(nextBackoffMicros(downstream, retryCount) * 1000);
     }
+
+    /**
+     * 该序列的末档退避，即最长间隔。
+     *
+     * <p>供不计重试次数的重排使用（如任务类型尚无处理器）：这类任务的 {@code retry_count} 不增长， 按它索引序列会恒取首档，使任务以最短间隔被反复领取。
+     */
+    public long maxBackoffMicros(RetStatus downstream) {
+        List<Duration> sequence = downstream == RetStatus.PROCESSING ? LONG : SHORT;
+        return nextBackoffMicros(downstream, sequence.size() - 1);
+    }
 }

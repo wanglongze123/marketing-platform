@@ -2,7 +2,6 @@ package com.mp.benefit.task;
 
 import com.mp.benefit.entity.BenefitTask;
 import com.mp.benefit.repository.BenefitTaskMapper;
-import java.util.ArrayList;
 import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
@@ -59,11 +58,7 @@ public class TaskClaimService {
             return List.of();
         }
         taskMapper.claim(ids, owner, leaseSeconds);
-
-        List<BenefitTask> claimed = new ArrayList<>(ids.size());
-        for (Long id : ids) {
-            claimed.add(taskMapper.selectByIdPlain(id));
-        }
-        return claimed;
+        // 批量读回，一批一条 SQL。逐个 selectById 会使每轮领取产生 BATCH 次往返
+        return taskMapper.selectByIds(ids);
     }
 }

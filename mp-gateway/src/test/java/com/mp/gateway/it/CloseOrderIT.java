@@ -511,9 +511,9 @@ class CloseOrderIT extends AbstractMySqlIT {
     void systemLevelUnknownStillRetries() throws Exception {
         String bizNo = createOrder("closeSysUnk");
 
-        // 键与 BizLock.aroundCloseOrder 一致。写死在此处是有意的：它若与实现漂移，
-        // 本用例会退化成「锁没被占住」而静默失效，故下面同时断言了「确实抛了 5002」
-        String lockKey = "lock:ben:close:" + bizNo;
+        // 键与 BizLock.orderKey 一致（支付回调与关单共用）。写死在此处是有意的：它若与实现
+        // 漂移，本用例会退化成「锁没被占住」而静默失效，故下面同时断言了「确实抛了 5002」
+        String lockKey = "lock:ben:order:" + bizNo;
         CountDownLatch acquired = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         Thread holder =
