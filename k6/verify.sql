@@ -21,7 +21,14 @@ FROM marketing_stock
 WHERE stock_key = 'sku:SKU_DEMO_001';
 
 -- ② 售出数：口径精确到活动 + SKU，且只算「占着库存」的单。
---    不能简单 COUNT(*) —— 已关闭/支付失败的单不占库存，算进去会虚高
+--    不能简单 COUNT(*) —— 已关闭/支付失败的单不占库存，算进去会虚高。
+--
+--    判据取 stock_status 而非 pay_status。两者不同步：CLOSING 表示关单结果未定，
+--    此阶段刻意不释放库存（结果未定就释放等于把额度让给别人，而钱可能已经收了），
+--    故该状态的单仍占着 locked。按 pay_status IN ('WAIT_PAY','PAY_SUCCESS') 统计会
+--    漏掉它们，使本该相等的两个数对不上 —— 表现为压测误报超卖，而实际没有。
+--
+--    stock_status 就是「本单是否占着库存」的权威记录，直接问它。
 SELECT
   COUNT(*) AS sold_orders,
   IF(COUNT(*) = (SELECT locked + consumed FROM marketing_stock
@@ -31,17 +38,24 @@ FROM play_biz_record
 WHERE activity_id = 'ACT_DEMO_001'
   AND sku_id = 'SKU_DEMO_001'
   AND client_req_no LIKE CONCAT('REQ_', @run_id, '%')
-  AND pay_status IN ('WAIT_PAY', 'PAY_SUCCESS');
+  AND stock_status IN ('LOCKED', 'CONSUMED');
 
--- ③ 幂等：同一 client_req_no 不得建出两笔单
+-- ③ 幂等：同一业务幂等键不得建出两笔单。
+--
+--    分组维度必须与 uk_idempotent 完全一致，即四元组 (user_id, activity_id, sku_id,
+--    client_req_no)。只按 client_req_no 分组是在验一个比唯一索引更强的约束 —— 该列上
+--    并无唯一索引，不同用户用相同 client_req_no 本就合法（contention.js 让多个 VU 共用
+--    clientReqNo 时也共用 userId，故当前恰好不触发，但这是脚本的巧合而非约束）。
+--
+--    维度写窄的后果是压测误报幂等失效；写宽则漏检。以唯一索引为准。
 SELECT
-  COUNT(*) AS duplicated_req_no,
+  COUNT(*) AS duplicated_idempotent_key,
   IF(COUNT(*) = 0, 'OK', '✗ 同一幂等键建出多笔单') AS check_idempotent
 FROM (
-  SELECT client_req_no
+  SELECT user_id, activity_id, sku_id, client_req_no
   FROM play_biz_record
   WHERE client_req_no LIKE CONCAT('REQ_', @run_id, '%')
-  GROUP BY client_req_no
+  GROUP BY user_id, activity_id, sku_id, client_req_no
   HAVING COUNT(*) > 1
 ) dup;
 
