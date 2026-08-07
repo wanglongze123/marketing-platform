@@ -2,7 +2,9 @@ package com.mp.benefit.service.impl;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.mp.api.activity.dto.ActivityConfResp;
 import com.mp.api.activity.service.ActivityService;
 import com.mp.api.benefit.dto.ConvergenceResp;
@@ -74,7 +76,21 @@ import org.springframework.stereotype.Service;
 public class BenefitOrderServiceImpl implements BenefitOrderService {
 
     private static final Logger log = LoggerFactory.getLogger(BenefitOrderServiceImpl.class);
-    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /**
+     * 快照的序列化器。<b>关闭未知字段报错</b>。
+     *
+     * <p>快照是长期持久化数据，写入与读出可能相隔数月，其间 {@link SnapshotItem} 的字段会增删。 Jackson 默认 {@code
+     * FAIL_ON_UNKNOWN_PROPERTIES = true}，于是新版写入的快照在回滚到旧版后 读不回来 —— 而履约、退款一律只读快照。
+     *
+     * <p>失效形态是<b>已收款但永不履约</b>：{@code groupByProvider} 抛 {@code IllegalStateException}， 调度器按未预期异常判
+     * {@code UNKNOWN} 并短退避重试，每一轮都在同一行 JSON 上失败，直至 {@code DEAD}。死信原因是一行序列化异常，排查时不会指向数据兼容性。
+     *
+     * <p>忽略未知字段只解决向前兼容（旧版读新版数据）。反向由 record 的字段默认值承担：新增字段 在旧数据中缺失时为 {@code null} 或 {@code
+     * 0}，故新增字段必须允许这两个取值有意义，不能把 「缺失」与「取值为零」当成不同语义。
+     */
+    private static final ObjectMapper JSON =
+            JsonMapper.builder().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
 
     /** 单号碰撞重试次数。UUIDv7 连撞三次实际不可能，超出即视为库层异常而非碰撞 */
     private static final int BIZ_NO_RETRY = 3;
