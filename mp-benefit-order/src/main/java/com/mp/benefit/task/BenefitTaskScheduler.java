@@ -5,6 +5,7 @@ import com.mp.benefit.repository.BenefitTaskMapper;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.enums.TaskType;
 import com.mp.common.exception.BizException;
+import com.mp.common.web.TraceIdHolder;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -90,6 +91,19 @@ public class BenefitTaskScheduler {
     }
 
     private void execute(BenefitTask task) {
+        // 每条任务一个 traceId，在此设置而非每轮一个：一轮领 50 条，共用一个 traceId 会把
+        // 50 笔无关业务的日志串成一条链。调度器不经过 TraceIdFilter，不设则全程为空 ——
+        // 而履约、关单、查单收敛正是最需要按链路排查的部分
+        TraceIdHolder.newTrace();
+        try {
+            doExecute(task);
+        } finally {
+            // 线程池的线程会被复用，不清理则下一条任务继承本条的 traceId
+            TraceIdHolder.clear();
+        }
+    }
+
+    private void doExecute(BenefitTask task) {
         TaskType type = TaskType.valueOf(task.getTaskType());
         TaskHandler handler = handlers.get(type);
         if (handler == null) {

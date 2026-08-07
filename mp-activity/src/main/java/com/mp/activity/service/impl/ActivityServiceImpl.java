@@ -1,11 +1,8 @@
 package com.mp.activity.service.impl;
 
-import com.baomidou.mybatisplus.core.toolkit.Wrappers;
-import com.mp.activity.entity.MarketingActivity;
 import com.mp.activity.repository.MarketingActivityMapper;
 import com.mp.api.activity.dto.ActivityConfResp;
 import com.mp.api.activity.service.ActivityService;
-import java.time.LocalDateTime;
 import org.apache.dubbo.config.annotation.DubboService;
 import org.springframework.stereotype.Service;
 
@@ -22,11 +19,7 @@ public class ActivityServiceImpl implements ActivityService {
 
     @Override
     public ActivityConfResp queryActivityConf(String activityId) {
-        MarketingActivity a =
-                activityMapper.selectOne(
-                        Wrappers.<MarketingActivity>lambdaQuery()
-                                .eq(MarketingActivity::getActivityId, activityId)
-                                .eq(MarketingActivity::getDeleted, 0));
+        MarketingActivityMapper.ActivityRow a = activityMapper.selectWithAvailability(activityId);
         if (a == null) {
             return null;
         }
@@ -38,12 +31,8 @@ public class ActivityServiceImpl implements ActivityService {
         resp.setScene(a.getScene());
         resp.setStatus(a.getStatus());
         resp.setCurVersion(a.getCurVersion());
-
-        LocalDateTime now = LocalDateTime.now();
-        resp.setAvailable(
-                "ONLINE".equals(a.getStatus())
-                        && now.isAfter(a.getStartTime())
-                        && now.isBefore(a.getEndTime()));
+        // 可用性由数据库判定：时间窗口的两端存在库里，比较也须用库的时钟
+        resp.setAvailable(a.isAvailable());
         return resp;
     }
 }
