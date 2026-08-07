@@ -37,9 +37,28 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(BizException.class)
     public ResponseEntity<ApiResponse<Void>> onBiz(BizException e) {
         log.warn("biz rejected, code={}, msg={}", e.getCode(), e.getMessage());
-        ApiResponse<Void> body = ApiResponse.fail(Integer.parseInt(e.getCode()), e.getMessage());
+        ApiResponse<Void> body = ApiResponse.fail(numericCode(e.getCode()), e.getMessage());
         body.setTraceId(TraceIdHolder.get());
         return ResponseEntity.ok(body);
+    }
+
+    /**
+     * 错误码转数字。<b>不可解析时退化为 {@code 5001}，不向外抛</b>。
+     *
+     * <p>{@code ErrorCode} 声明为 {@code String} 常量而响应体的 {@code code} 是 {@code int} —— 端侧按
+     * 号段分区判断处置方式（{@code 1xxx} 业务拒绝、{@code 4xxx} 入参非法、{@code 5xxx} 结果未知），
+     * 故必须是数字。当前十个码全为纯数字，但类型本身不作此保证：日后新增一个 {@code "B1001"} 形式的码，{@code Integer.parseInt}
+     * 会<b>在异常处理器内部抛异常</b>，响应壳随之崩塌，端上收到的 是不带 traceId 的裸 500。
+     *
+     * <p>退化取 {@code 5001} 而非 {@code 4001}：解析不了说明是平台自身的错误码定义问题，属系统异常。 判成入参非法会让调用方以为是自己传错了参数。
+     */
+    private static int numericCode(String code) {
+        try {
+            return Integer.parseInt(code);
+        } catch (NumberFormatException | NullPointerException ex) {
+            log.error("错误码非数字，无法映射到响应体 code，降级为 5001: {}", code);
+            return Integer.parseInt(ErrorCode.DOWNSTREAM_UNKNOWN);
+        }
     }
 
     /**

@@ -7,10 +7,14 @@ import com.mp.api.benefit.dto.CreateTradeResp;
 import com.mp.api.mock.dto.FaultMode;
 import com.mp.benefit.entity.BenefitTask;
 import com.mp.benefit.repository.BenefitTaskMapper;
+import com.mp.benefit.task.BenefitTaskScheduler;
 import com.mp.benefit.task.TaskClaimService;
+import com.mp.benefit.task.TaskHandler;
 import com.mp.common.enums.GrantStatus;
+import com.mp.common.enums.RetStatus;
 import com.mp.common.enums.TaskStatus;
 import com.mp.common.enums.TaskType;
+import com.mp.common.web.TraceIdHolder;
 import com.mp.mock.fault.FaultInjector;
 import java.util.ArrayList;
 import java.util.List;
@@ -22,6 +26,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 
 /**
@@ -401,6 +406,51 @@ class ReliableTaskIT extends AbstractMySqlIT {
         // 先把现存任务清空，避免受其他用例残留影响
         benefitJdbc.update("UPDATE benefit_task SET status = 'DONE' WHERE status = 'PENDING'");
         assertThat(scheduler.runOnce()).isZero();
+    }
+
+    /**
+     * 任务执行期间 MDC 里有 traceId，且每条任务各不相同、执行后清理。
+     *
+     * <p>调度器由 {@code @Scheduled} 驱动，不经过 {@code TraceIdFilter}。不设则履约、关单、查单收敛 这些最需要按链路排查的日志全部不带
+     * traceId，只能靠 bizNo 逐行 grep。
+     *
+     * <p>断言「每条任务各不相同」而非只断言「非空」：一轮领 50 条，若在轮级别设置一次，50 笔无关 业务的日志会被串成一条链。断言「执行后清理」则是因为线程会被复用 ——
+     * 不清理则下一条任务 继承上一条的 traceId。
+     *
+     * <p>取 MDC 而非解析日志输出：验的是「执行期间 MDC 是否被正确设置」，日志格式是另一件事。
+     */
+    @Test
+    void schedulerAssignsDistinctTraceIdPerTaskAndClearsAfterwards() {
+        // GRANT 无对应主单会抛 4001，被调度器判为确定拒绝 —— 与本用例无关，
+        // 此处只关心 handler 被调用时 MDC 的内容
+        enqueueBare("traceA", TaskType.GRANT);
+        enqueueBare("traceB", TaskType.GRANT);
+
+        List<String> seen = new ArrayList<>();
+        TraceCapturingHandler probe = new TraceCapturingHandler(seen);
+        BenefitTaskScheduler probed =
+                new BenefitTaskScheduler(taskMapper, claimService, List.of(probe), 30, 0.02);
+
+        probed.runOnce();
+
+        assertThat(seen).as("每条任务执行期间都应有 traceId").hasSize(2).doesNotContainNull();
+        assertThat(seen.get(0)).as("两条任务的 traceId 不应相同").isNotEqualTo(seen.get(1));
+        assertThat(MDC.get(TraceIdHolder.KEY)).as("执行完毕后必须清理，否则线程复用时会串链路").isNull();
+    }
+
+    /** 记录 handler 被调用时 MDC 中的 traceId。 */
+    private record TraceCapturingHandler(List<String> seen) implements TaskHandler {
+
+        @Override
+        public TaskType taskType() {
+            return TaskType.GRANT;
+        }
+
+        @Override
+        public RetStatus handle(BenefitTask task) {
+            seen.add(MDC.get(TraceIdHolder.KEY));
+            return RetStatus.SUCCESS;
+        }
     }
 
     /** 直接入队一条任务，不经业务链路 —— 本类验的是调度机制，不必每次都走下单支付。 */

@@ -7,7 +7,6 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.ServletRequest;
 import jakarta.servlet.ServletResponse;
 import java.io.IOException;
-import java.util.UUID;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
@@ -24,7 +23,7 @@ public class TraceIdFilter implements Filter {
     public void doFilter(ServletRequest req, ServletResponse resp, FilterChain chain)
             throws IOException, ServletException {
         try {
-            TraceIdHolder.set(UUID.randomUUID().toString().replace("-", ""));
+            TraceIdHolder.newTrace();
             chain.doFilter(req, resp);
         } finally {
             TraceIdHolder.clear();
