@@ -3,7 +3,6 @@ package com.mp.reward.entity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
-import com.baomidou.mybatisplus.annotation.Version;
 import java.time.LocalDateTime;
 
 /** 发奖幂等记录主表。{@code uk_op_no} 保证同一 opNo 至多一条。 */
@@ -28,7 +27,11 @@ public class RewardGrantRecord {
 
     private String errorCode;
 
-    @Version private Integer version;
+    /**
+     * 表中的 {@code version} 列，<b>当前不做乐观锁</b>，仅为映射完整而保留。理由同 {@code PlayBizRecord.version}：
+     * 未注册拦截器故注解不生效，且终态回写走 {@code finishIfProcessing} 的条件更新，不用 {@code updateById}。
+     */
+    private Integer version;
 
     private LocalDateTime createTime;
     private LocalDateTime updateTime;

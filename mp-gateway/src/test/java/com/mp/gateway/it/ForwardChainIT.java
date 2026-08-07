@@ -221,6 +221,46 @@ class ForwardChainIT extends AbstractMySqlIT {
                 .containsExactlyInAnyOrder("PROVIDER_A", "PROVIDER_B");
     }
 
+    /**
+     * 快照中出现未知字段时，履约仍能进行。
+     *
+     * <p>快照是长期持久化数据，写入与读出可能相隔数月，其间发过版也可能回滚过。若反序列化对未知 字段报错（Jackson 默认行为），新版写入的快照在回滚到旧版后读不回来 ——
+     * 而履约、退款一律 只读快照。
+     *
+     * <p>失效形态是<b>已收款但永不履约</b>：{@code groupByProvider} 抛 {@code IllegalStateException}， 调度器按未预期异常判
+     * {@code UNKNOWN} 短退避重试，每一轮都在同一行 JSON 上失败，直至 {@code DEAD}。
+     *
+     * <p>此处直接改库注入一个未来版本才有的字段 —— 比起等到真的加字段再回归，这是当下唯一能 构造出「旧版读新版数据」的方式。
+     */
+    @Test
+    void grantStillWorksWhenSnapshotCarriesUnknownFields() {
+        CreateTradeResp created = benefitOrderService.createTrade(newTradeReq("snapshotFwd"));
+        String bizNo = created.getBizNo();
+
+        // 给快照每一项塞一个当前 SnapshotItem 没有的字段，模拟新版写入的数据
+        benefitJdbc.update(
+                "UPDATE play_biz_record SET benefit_snapshot ="
+                        + " JSON_SET(benefit_snapshot, '$[0].validDays', 30,"
+                        + " '$[1].validDays', 90) WHERE play_biz_record_no = ?",
+                bizNo);
+
+        benefitOrderService.payCallback(
+                newPayCallback(bizNo, created.getTradeNo(), "NS_snapshotFwd_1", "SUCCESS"));
+        runScheduler();
+
+        assertThat(orderField("grant_status", bizNo))
+                .as("快照多出未知字段不应阻断履约 —— 否则已收款的单会一路重试到死信")
+                .isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+        // 已知字段照常解析：两个供应方各发一次，分组未因多余字段而错乱
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM benefit_fulfillment_record"
+                                        + " WHERE play_biz_record_no = ?",
+                                bizNo))
+                .isEqualTo(2);
+    }
+
     /** 下单 + 支付成功 + 驱动一轮调度器。履约由 GRANT 任务承接（V2 形态）。 */
     private String payAndGrant(String tag) {
         CreateTradeResp created = benefitOrderService.createTrade(newTradeReq(tag));
