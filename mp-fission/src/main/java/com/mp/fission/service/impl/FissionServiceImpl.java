@@ -668,7 +668,7 @@ public class FissionServiceImpl implements FissionService {
     /**
      * 跑一轮裂变侧对账（技术方案 §6.8 第 7、10、12、13 项）。编排在 {@link FissionReconcileService}， 本方法只是玩法层的对外入口。
      *
-     * <p><b>接线本身就是修复</b>：{@code FissionReconcileService} 早已实现，但此前全仓没有任何调用方 —— 那四项从未运行过，其中第 7
+     * <p><b>这是 {@code FissionReconcileService} 的唯一触达点</b>：它不被任何调度直接持有，缺了这个入口 那四项一次都不会运行 —— 其中第 7
      * 项（师傅奖漏发）与第 13 项（发奖在途标志超时）都是资损哨兵。
      *
      * <p><b>不加锁</b>：与权益侧同理，对账是旁路只读扫描 + 幂等补建，两个实例同时跑的后果只是补建 两次同一条任务 —— 而 {@code enqueue} 命中 {@code

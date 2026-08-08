@@ -328,7 +328,7 @@ class RefundExecutionIT extends AbstractMySqlIT {
     /**
      * <b>退款成功后须回补 {@code consumed}</b>（技术方案 §3.4 口径表）。
      *
-     * <p>此前 {@code settleRefund} 只推主单状态，既没有回补语句也不落任何库存任务 —— {@code consumed} 永远还不回去。
+     * <p>{@code settleRefund} 只推主单状态而不落库存任务的话，{@code consumed} 永远还不回去。
      *
      * <p><b>它的表现不是超卖，而是对账第 6 项每轮报一次假差异</b>：该项比对 {@code consumed} 与「已支付 且未退款成功」的份数（{@code
      * sumConsumedQuantity} 的谓词含 {@code refund_status <> 'REFUND_SUCCESS'}）， 退款后分母减少而 {@code
@@ -382,7 +382,7 @@ class RefundExecutionIT extends AbstractMySqlIT {
      *
      * <p>这是 §7.4 反复强调的那条：<b>下界谓词提供不了每单幂等</b>。{@code consumed} 是该 {@code stock_key}
      * 下所有订单共享的计数器，本单重复回补时它因别的单占用仍大于 0，{@code WHERE consumed >= qty} 照常放行 ——
-     * 结果是这一单还掉了别人的已售份额，可售余量凭空多出一份，直接超卖。
+     * 结果是这一单还掉了别人的已售份额，可售余量多出一份，直接超卖。
      *
      * <p>故必须先造一笔 B 单占着 {@code consumed}。<b>若只有 A 单，回补后 {@code consumed} 归零，第二次被下界 挡下 ——
      * 验的就成了「下界生效」而不是「不动别人的份额」</b>，与 §7.4 记的「这个错误只有一种用例能 暴露」是同一条。
@@ -470,7 +470,7 @@ class RefundExecutionIT extends AbstractMySqlIT {
     /**
      * <b>{@code REFUND_FAILED} 必须能由人工重入，否则它是死状态</b>（技术方案 §6.4）。
      *
-     * <p>状态迁移表把 {@code REFUND_FAILED → REFUNDING} 标注为人工重试边，而此前三条通路都够不着它： 准入的前置态只有 {@code NONE} /
+     * <p>状态迁移表把 {@code REFUND_FAILED → REFUNDING} 标注为人工重试边，而另三条通路都够不着它： 准入的前置态只有 {@code NONE} /
      * {@code REVOKE_FAILED}，{@code createRefund} 要求 {@code REVOKING}， {@code manualRepair}
      * 的「重试退款」只补查单任务而 {@code failRefund} 的前置态是 {@code REFUNDING}。 于是一笔退款失败的单永远退不了款，只能改库。
      *
@@ -557,8 +557,8 @@ class RefundExecutionIT extends AbstractMySqlIT {
     /**
      * <b>人工准入须把 {@code operator} / {@code reason} 落进操作记录</b>（BR-C-27、技术方案 §6.4）。
      *
-     * <p>§6.4 把「人工通道显式开口」与「留审计」写成同一条：谓词给人工路径开例外，代价是那次操作 必须可追溯到人。<b>此前该参数被接收却从未使用</b> ——
-     * 开了口却没留痕，比不开口更糟：库里查不出 「谁把这单从退款失败拉回来重试的」，对账也算不出真实的自动收敛率。
+     * <p>§6.4 把「人工通道显式开口」与「留审计」写成同一条：谓词给人工路径开例外，代价是那次操作 必须可追溯到人。<b>参数只被接收而不落库等于开了口却没留痕</b> ——
+     * 库里查不出「谁把这单从 退款失败拉回来重试的」，对账也算不出真实的自动收敛率。
      */
     @Test
     void manualAdmissionPersistsOperatorAudit() {

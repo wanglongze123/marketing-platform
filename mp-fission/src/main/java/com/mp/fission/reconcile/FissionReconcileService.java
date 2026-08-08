@@ -74,8 +74,8 @@ public class FissionReconcileService {
     /**
      * 第 7 项：徒弟已发奖但师傅返奖任务缺失 → 补建 {@code SPONSOR_REWARD} 任务。
      *
-     * <p><b>返奖键派生自 {@code outFlowNo}，而关系行上没有这个值</b>。首版读 {@code relation.out_biz_no} 当 {@code
-     * outFlowNo} 用，那是错的：技术方案 §4.1 把两者定义为不同的东西 —— {@code OutBizNo} 标识一次业务关系，{@code OutFlowNo}
+     * <p><b>返奖键派生自 {@code outFlowNo}，而关系行上没有这个值</b>。读 {@code relation.out_biz_no} 当 {@code
+     * outFlowNo} 用是错的：技术方案 §4.1 把两者定义为不同的东西 —— {@code OutBizNo} 标识一次业务关系，{@code OutFlowNo}
      * 标识本次操作，一次关系下可发生多次操作，二者不天然相等 （加入与确权是两次调用，各带各的 {@code OutFlowNo}，而关系行存的是加入时那次的 {@code
      * OutBizNo}）。
      *

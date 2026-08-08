@@ -851,9 +851,9 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
 
         // ② 幂等命中：这一笔退款请求已受理过，返回原结果。
         //
-        // 判据必须是「同一个 refundReqNo」，不能只看主单是否已在退款中。首版写成
-        // 「refund_status 已是 REFUNDING/REFUND_SUCCESS 就返回成功」，于是客服换个工单号
-        // 再点一次，会拿到 admitted=true —— 而那笔退款根本没发生。钱没多退（后续闸挡住了），
+        // 判据必须是「同一个 refundReqNo」，不能只看主单是否已在退款中。判据取
+        // 「refund_status 已是 REFUNDING/REFUND_SUCCESS 就返回成功」的话，客服换个工单号
+        // 再点一次会拿到 admitted=true —— 而那笔退款未发生。钱不会多退（后续闸挡得住），
         // 但调用方据此以为受理成功，工单被误标为已处理，用户的第二次诉求就此消失
         String revokeNo = IdempotentKeys.revokeNo(bizNo, req.getRefundReqNo());
         RefundStatus refundStatus = RefundStatus.valueOf(order.getRefundStatus());
@@ -941,10 +941,9 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             RevokeRewardReq rr = new RevokeRewardReq();
             // 每条明细一把回收键，粒度与 grantOpNo 对齐（一次发放调用 = 一次回收调用）。
             //
-            // 由三段直接拼出，不接 revokeNo + grantOpNo 两把完整的键 —— 首版那样写，
-            // 实测 90+ 字符溢出 VARCHAR(64)，而插入异常被「异常一律 UNKNOWN」捕获，
-            // 表现与供应方超时完全一样：主单进 REVOKING、落 REVOKE 任务、回报结果未定，
-            // 而回收请求根本没发出去
+            // 由三段直接拼出，不接 revokeNo + grantOpNo 两把完整的键：那样拼实测 90+ 字符，
+            // 溢出 VARCHAR(64)，而插入异常被「异常一律 UNKNOWN」捕获，表现与供应方超时完全
+            // 一样 —— 主单进 REVOKING、落 REVOKE 任务、回报结果未定，而回收请求未发出
             rr.setRevokeNo(IdempotentKeys.revokeItemNo(bizNo, refundReqNo, item.getProviderType()));
             rr.setBizOrderNo(bizNo);
             rr.setOpNo(item.getGrantOpNo());
@@ -1141,7 +1140,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         // 真正发出去的键：本单已有退款单号则复用它，不按本次 refundReqNo 重新派生（BR-B-38）。
         //
         // 这条只在「REFUND_FAILED 经人工重入」这一路上才显形，且必须放在上面两道判定之后 ——
-        // 提前复用会让「客服换个工单号再点一次」变成幂等命中返回成功，而那笔退款根本没发生。
+        // 提前复用会让「客服换个工单号再点一次」变成幂等命中返回成功，而那笔退款未发生。
         // 判定看本次带来的键（是不是同一次请求），发送用库里那把（同一单只对支付方用一把键）。
         //
         // 不复用的后果：主单的 fillRefundNo 带 IS NULL 守卫，库里存的还是旧号，而**发给支付方的

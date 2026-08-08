@@ -557,7 +557,7 @@ public class OrderTxService {
      * </ul>
      *
      * <p><b>不放行 {@code REFUND_FAILED} 即让它成为死状态</b>：状态迁移表把 {@code REFUND_FAILED → REFUNDING}
-     * 标注为人工重试边，而此前三条通路都够不着它 —— 准入的前置态里没有它，{@code createRefund} 要求 {@code REVOKING}，{@code
+     * 标注为人工重试边，而另三条通路都够不着它 —— 准入的前置态里没有它，{@code createRefund} 要求 {@code REVOKING}，{@code
      * manualRepair} 的「重试退款」只补查单任务而 {@code failRefund} 的前置态是 {@code
      * REFUNDING}。于是一笔退款失败的单永远退不了款，只能改库。§6.4 原话：「若准入谓词不给 例外分支，这两条边永远 {@code
      * affected_rows=0}，它们又会退化成死状态」。
@@ -565,8 +565,8 @@ public class OrderTxService {
      * <p><b>做法不是悄悄放宽谓词，而是把人工通道显式化</b>：{@code operator} 为空时前置态集合里就没有 {@code
      * REFUND_FAILED}，自动链路照旧撞不进来 —— 开口只对带审计的调用生效。
      *
-     * <p><b>{@code operator} / {@code reason} 随操作记录落库</b>（BR-C-27）。此前该参数被接收却从未使用，
-     * 于是「谁把这单从退款失败拉回来重试的」在库里查不到 —— 开了口却没留痕，比不开口更糟。
+     * <p><b>{@code operator} / {@code reason} 随操作记录落库</b>（BR-C-27）。参数只被接收而不落库的话，
+     * 「谁把这单从退款失败拉回来重试的」在库里查不到 —— 开了口却没留痕，比不开口更糟。
      *
      * @param operator 人工处置操作人；{@code null} 表示自动路径，此时不放行 {@code REFUND_FAILED}
      * @return {@code false} 表示条件更新未命中 —— 状态非法或并发已推进，这是三道闸的第一道
@@ -849,7 +849,7 @@ public class OrderTxService {
      *
      * <p><b>每单幂等由 {@code stock_status} 的条件更新承担</b>（{@code CONSUMED → RESTORED}），不由库存 SQL
      * 的下界承担：{@code consumed} 是该 {@code stock_key} 下所有订单共享的计数器，本单重复回补时 它因别的订单占用仍大于 0，{@code consumed
-     * >= qty} 照常放行 —— 结果是这一单还掉了别人的已售份额， 可售余量凭空多出一份，直接超卖。这与 {@code releaseStock} 里那道闸是同一条理由。
+     * >= qty} 照常放行 —— 结果是这一单还掉了别人的已售份额，可售余量多出一份，直接超卖。这与 {@code releaseStock} 里那道闸是同一条理由。
      *
      * <p>前置态限定 {@code CONSUMED} 而非 {@code LOCKED}：只有真正转过消耗的单才有 {@code consumed} 可还。 一笔关单释放过的单其
      * {@code stock_status} 是 {@code RELEASED}，命中 0 行，跳过 —— 这正是 {@code RESTORED} 不复用 {@code
@@ -861,14 +861,14 @@ public class OrderTxService {
         if (bizRecordMapper.advanceStockStatus(
                         bizNo, StockStatus.CONSUMED.name(), StockStatus.RESTORED.name())
                 == 0) {
-            // 已回补过，或这一单根本没转过消耗（关单释放过的单停在 RELEASED）。
+            // 已回补过，或这一单未转过消耗（关单释放过的单停在 RELEASED）。
             // 两者都不该再回补，且都不是错误 —— 任务重跑本就是预期路径
             log.info("stock not consumed or already restored, skip, bizNo={}", bizNo);
             return RetStatus.SUCCESS;
         }
         stockMapper.tryRestore(StockKeys.stockKey(order.getSkuId()), order.getQuantity());
         // 限购额度不返还（§3.4 口径表）：quota_status 停在 LOCKED 不动，
-        // 「买了再退」不该刷回额度，否则限购形同虚设
+        // 「买了再退」不该刷回额度，否则反复买退即可绕过限购
         log.info("stock restored after refund, bizNo={}", bizNo);
         return RetStatus.SUCCESS;
     }

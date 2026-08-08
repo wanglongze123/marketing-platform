@@ -15,14 +15,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.context.TestPropertySource;
 
 /**
- * 裂变侧对账（技术方案 §6.8 第 7、10、12、13 项）。PR-10 后置 review 补。
+ * 裂变侧对账（技术方案 §6.8 第 7、10、12、13 项）。
  *
- * <p><b>本类此前不存在，因为被测的东西根本没接线</b>：{@code FissionReconcileService} 早已实现，但全仓 没有任何调用方 —— 四项从未运行过，其中第 7
+ * <p><b>四项对账须有调用方才会运行</b>：{@code FissionReconcileService} 不被任何调度直接持有，入口 缺失时四项一次都不执行 —— 其中第 7
  * 项（师傅奖漏发）与第 13 项（发奖在途标志超时）都是 资损哨兵。一条对账项写好了却没接线，与没写的区别只在代码行数上。
  *
- * <p><b>第 7 项的键派生此前也是错的</b>：读 {@code relation.out_biz_no} 当 {@code outFlowNo} 用，而技术方案 §4.1
+ * <p><b>第 7 项的键派生是本类的重点</b>：读 {@code relation.out_biz_no} 当 {@code outFlowNo} 用是错的，技术方案 §4.1
  * 把两者定义为不同的东西 —— 一次关系下可发生多次操作（加入与确权各带各的 {@code OutFlowNo}）， 关系行存的是加入时那次的 {@code
- * OutBizNo}。补出的键与主链路那把不同 → 唯一键不冲突 → 下游当成 一笔全新的发放 → 师傅奖发两次。<b>这一项本是「漏发」的兜底，那样写反而造出重发。</b>
+ * OutBizNo}。补出的键与主链路那把不同 → 唯一键不冲突 → 下游当成 一笔全新的发放 → 师傅奖发两次。这一项本是「漏发」的兜底，取错键则造出重发。
  *
  * <p>{@code stale-seconds=0} 的理由同 {@link ReconcileIT}：压的是判据的时间维度，不是判据本身。
  */
@@ -89,10 +89,10 @@ class FissionReconcileIT extends AbstractMySqlIT {
     }
 
     /**
-     * <b>补建的返奖键必须与主链路同键</b> —— 这是本次 review 修掉的那个缺陷的守卫。
+     * <b>补建的返奖键必须与主链路同键</b>。
      *
-     * <p>两把发奖键都派生自 {@code outFlowNo}（{@code _FL} / {@code _SP}），而关系行上根本没有这个值。 首版读 {@code
-     * out_biz_no} 当 {@code outFlowNo} 用，派生出的是一把<b>与主链路不同的键</b>：
+     * <p>两把发奖键都派生自 {@code outFlowNo}（{@code _FL} / {@code _SP}），而关系行上不存这个值。 读 {@code out_biz_no} 当
+     * {@code outFlowNo} 用，派生出的是一把<b>与主链路不同的键</b>：
      *
      * <pre>
      * 主链路：  sponsorFlowNo("OF_DONE_x") = "OF_DONE_x_SP"
@@ -102,7 +102,7 @@ class FissionReconcileIT extends AbstractMySqlIT {
      * <p>于是 {@code uk_biz_type_op} 不冲突、任务照常入队、下游按新 {@code opNo} 当成一笔全新的发放 —— <b>师傅奖发两次，直接资损</b>。
      *
      * <p><b>本用例刻意让 {@code outBizNo} 与 {@code outFlowNo} 取不同值</b>（{@code OB_rec7key} 与 {@code
-     * OF_DONE_rec7key}）：两者同值时错误实现照样能派生出正确的键，这条守卫就形同虚设 —— 而 §4.1 明确 二者不天然相等。
+     * OF_DONE_rec7key}）：两者同值时错误实现照样能派生出正确的键，这条守卫就拦不住任何东西 —— 而 §4.1 明确 二者不天然相等。
      */
     @Test
     void repairedSponsorKeyMatchesMainPath() {

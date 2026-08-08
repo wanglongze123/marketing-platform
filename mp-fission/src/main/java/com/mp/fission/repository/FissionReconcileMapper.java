@@ -91,7 +91,7 @@ public interface FissionReconcileMapper {
      * 按关系号取徒弟发奖幂等号（{@code followerGrantNo}），供第 7 项派生师傅返奖键。
      *
      * <p><b>为什么必须回查而不能读 {@code relation.out_biz_no}</b>：两把发奖键（{@code _FL} / {@code _SP}）都派生自 {@code
-     * outFlowNo}，而关系行上根本没有这个值 —— 它存的是 {@code out_biz_no}。技术方案 §4.1 把两者定义 为不同的东西：{@code OutBizNo}
+     * outFlowNo}，而关系行上不存这个值 —— 它存的是 {@code out_biz_no}。技术方案 §4.1 把两者定义 为不同的东西：{@code OutBizNo}
      * 标识一次业务关系，{@code OutFlowNo} 标识本次操作，一次关系下可发生 多次操作（加入与确权各一次），二者不天然相等。
      *
      * <p>拿 {@code out_biz_no} 当 {@code outFlowNo} 用会派生出一把<b>与主链路不同的键</b>，于是 {@code uk_biz_type_op}
