@@ -26,9 +26,34 @@ public final class BizNoGenerator {
         return gen("FF");
     }
 
+    /** 可靠任务号，落 {@code benefit_task.task_no}。 */
+    public static String taskNo() {
+        return gen("TK");
+    }
+
     /** 裂变关系号（V3）。 */
     public static String fissionRelationNo() {
         return gen("FR");
+    }
+
+    /** 裂变组号，落 {@code fission_group.group_id}（V3）。 */
+    public static String fissionGroupNo() {
+        return gen("FG");
+    }
+
+    /** 裂变操作单号，落 {@code fission_op_record.op_no}（V3）。 */
+    public static String fissionOpNo() {
+        return gen("FO");
+    }
+
+    /** 活动操作单号，落 {@code activity_op_record.op_no}（V3）。 */
+    public static String activityOpNo() {
+        return gen("AO");
+    }
+
+    /** 活动业务号，落 {@code marketing_activity.activity_id}（V3）。 */
+    public static String activityId() {
+        return gen("ACT");
     }
 
     private static String gen(String prefix) {

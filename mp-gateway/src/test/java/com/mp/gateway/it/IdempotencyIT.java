@@ -37,6 +37,7 @@ class IdempotencyIT extends AbstractMySqlIT {
         assertThat(second.getBizNo()).isEqualTo(first.getBizNo());
         assertThat(
                         count(
+                                benefitJdbc,
                                 "SELECT COUNT(*) FROM play_biz_record WHERE client_req_no = ?",
                                 "REQ_dupCreate"))
                 .isEqualTo(1);
@@ -59,6 +60,7 @@ class IdempotencyIT extends AbstractMySqlIT {
         assertThat(again.getBizNo()).isEqualTo(a.getBizNo());
         assertThat(
                         str(
+                                benefitJdbc,
                                 "SELECT user_id FROM play_biz_record WHERE play_biz_record_no = ?",
                                 again.getBizNo()))
                 .isEqualTo("U_ownerA");
@@ -79,9 +81,17 @@ class IdempotencyIT extends AbstractMySqlIT {
         assertThat(second.getItems().get(0).getProviderOrderNo())
                 .isEqualTo(first.getItems().get(0).getProviderOrderNo());
 
-        assertThat(count("SELECT COUNT(*) FROM reward_grant_record WHERE op_no = ?", opNo))
+        assertThat(
+                        count(
+                                rewardJdbc,
+                                "SELECT COUNT(*) FROM reward_grant_record WHERE op_no = ?",
+                                opNo))
                 .isEqualTo(1);
-        assertThat(count("SELECT COUNT(*) FROM reward_grant_item WHERE op_no = ?", opNo))
+        assertThat(
+                        count(
+                                rewardJdbc,
+                                "SELECT COUNT(*) FROM reward_grant_item WHERE op_no = ?",
+                                opNo))
                 .isEqualTo(1);
     }
 
@@ -93,14 +103,20 @@ class IdempotencyIT extends AbstractMySqlIT {
         String tradeNo = created.getTradeNo();
 
         benefitOrderService.payCallback(newPayCallback(bizNo, tradeNo, "NS_1", "SUCCESS"));
+        runScheduler();
         String updateTimeAfterFirst =
-                str("SELECT update_time FROM play_biz_record WHERE play_biz_record_no = ?", bizNo);
+                str(
+                        benefitJdbc,
+                        "SELECT update_time FROM play_biz_record WHERE play_biz_record_no = ?",
+                        bizNo);
 
         benefitOrderService.payCallback(newPayCallback(bizNo, tradeNo, "NS_1", "SUCCESS"));
+        runScheduler();
 
         assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.PAY_SUCCESS.name());
         assertThat(
                         str(
+                                benefitJdbc,
                                 "SELECT update_time FROM play_biz_record WHERE play_biz_record_no = ?",
                                 bizNo))
                 .isEqualTo(updateTimeAfterFirst);
@@ -109,6 +125,7 @@ class IdempotencyIT extends AbstractMySqlIT {
         assertThat(opRecordCount(bizNo, OpType.PAY_CALLBACK.name())).isEqualTo(1);
         assertThat(
                         num(
+                                benefitJdbc,
                                 "SELECT retry_count FROM play_op_record WHERE play_biz_record_no = ?"
                                         + " AND op_type = ?",
                                 bizNo,
@@ -133,11 +150,13 @@ class IdempotencyIT extends AbstractMySqlIT {
         String tradeNo = created.getTradeNo();
 
         benefitOrderService.payCallback(newPayCallback(bizNo, tradeNo, "NS_A", "SUCCESS"));
+        runScheduler();
         benefitOrderService.payCallback(newPayCallback(bizNo, tradeNo, "NS_B", "SUCCESS"));
+        runScheduler();
 
         // 两条通知各自留痕
         List<String> seqs =
-                jdbc.queryForList(
+                benefitJdbc.queryForList(
                         "SELECT op_seq FROM play_op_record WHERE play_biz_record_no = ?"
                                 + " AND op_type = ? ORDER BY op_seq",
                         String.class,
@@ -158,9 +177,11 @@ class IdempotencyIT extends AbstractMySqlIT {
         String bizNo = created.getBizNo();
         benefitOrderService.payCallback(
                 newPayCallback(bizNo, created.getTradeNo(), "NS_1", "SUCCESS"));
+        runScheduler();
 
         String providerOrderNo =
                 str(
+                        benefitJdbc,
                         "SELECT provider_order_no FROM benefit_fulfillment_record"
                                 + " WHERE play_biz_record_no = ? ORDER BY benefit_item_id LIMIT 1",
                         bizNo);
@@ -173,6 +194,7 @@ class IdempotencyIT extends AbstractMySqlIT {
         // 下游单号未变 —— 变了就说明又发了一次奖
         assertThat(
                         str(
+                                benefitJdbc,
                                 "SELECT provider_order_no FROM benefit_fulfillment_record"
                                         + " WHERE play_biz_record_no = ? ORDER BY benefit_item_id LIMIT 1",
                                 bizNo))
@@ -191,8 +213,9 @@ class IdempotencyIT extends AbstractMySqlIT {
         String bizNo = created.getBizNo();
         benefitOrderService.payCallback(
                 newPayCallback(bizNo, created.getTradeNo(), "NS_1", "SUCCESS"));
+        runScheduler();
 
-        jdbc.update(
+        benefitJdbc.update(
                 "UPDATE play_biz_record SET grant_status = ? WHERE play_biz_record_no = ?",
                 GrantStatus.GRANTING.name(),
                 bizNo);
@@ -218,12 +241,15 @@ class IdempotencyIT extends AbstractMySqlIT {
         insertBareOrder("BZ_IT_null_1", "U_nullA");
         assertThatCode(() -> insertBareOrder("BZ_IT_null_2", "U_nullB")).doesNotThrowAnyException();
 
-        assertThat(count("SELECT COUNT(*) FROM play_biz_record WHERE trade_no IS NULL"))
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM play_biz_record WHERE trade_no IS NULL"))
                 .isGreaterThanOrEqualTo(2);
     }
 
     private void insertBareOrder(String bizNo, String userId) {
-        jdbc.update(
+        benefitJdbc.update(
                 "INSERT INTO play_biz_record (play_biz_record_no, activity_id, sku_id, user_id,"
                         + " client_req_no, quantity, pay_status, order_amount, config_version,"
                         + " price_snapshot, benefit_snapshot, expire_time)"

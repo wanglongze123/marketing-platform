@@ -18,7 +18,17 @@ public class CreateTradeReq {
      */
     private int quantity;
 
-    // V2 加：consultToken（咨询凭证）、ReqTerminalInfo、RiskInfo
+    /**
+     * 咨询凭证，由 {@code preConsult} 签发，下单时原样回传。
+     *
+     * <p>验签只证明凭证由平台签发且未被篡改，<b>不证明它是发给本次请求的</b> —— 故 {@code createTrade} 还要把凭证里的 user/activity/sku
+     * 与请求逐字段比对，并以凭证中的成交价 与服务端重算价比对（技术方案 §5.2 ①、④.5）。
+     *
+     * <p>成交价<b>不在本请求里</b>：客户端回传金额一律不信任（PRD BR-B-04）。价格的唯一可信来源 是凭证中被签名覆盖的那一份。
+     */
+    private String consultToken;
+
+    // V3 加：ReqTerminalInfo、RiskInfo
 
     public String getUserId() {
         return userId;
@@ -58,5 +68,13 @@ public class CreateTradeReq {
 
     public void setQuantity(int quantity) {
         this.quantity = quantity;
+    }
+
+    public String getConsultToken() {
+        return consultToken;
+    }
+
+    public void setConsultToken(String consultToken) {
+        this.consultToken = consultToken;
     }
 }

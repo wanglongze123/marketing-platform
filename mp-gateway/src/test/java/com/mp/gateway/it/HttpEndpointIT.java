@@ -57,6 +57,9 @@ class HttpEndpointIT extends AbstractMySqlIT {
         // 四分类只在 data.status 里出现，不映射成 HTTP 状态码或顶层 code
         assertThat(paid.getBody().get("data").get("status").asText()).isEqualTo("SUCCESS");
 
+        // 履约由 GRANT 任务承接，回调返回时尚未发生
+        runScheduler();
+
         ResponseEntity<JsonNode> queried =
                 rest.getForEntity("/api/benefit/order/" + bizNo, JsonNode.class);
         JsonNode data = queried.getBody().get("data");

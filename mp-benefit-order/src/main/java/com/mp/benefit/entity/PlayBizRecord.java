@@ -3,7 +3,6 @@ package com.mp.benefit.entity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
-import com.baomidou.mybatisplus.annotation.Version;
 import java.time.LocalDateTime;
 
 /**
@@ -29,6 +28,22 @@ public class PlayBizRecord {
 
     private Integer quantity;
 
+    /** 下单城市，参与资格判定与分维度库存（V3）。V2 不写入 */
+    private String cityCode;
+
+    /** 来源渠道，参与资格判定与归因（V3）。V2 不写入 */
+    private String sourceChannel;
+
+    /** 本单库存处置态，库存类任务每单幂等的承重点。取值见 {@code StockStatus} */
+    private String stockStatus;
+
+    /**
+     * 本单限购额度处置态，额度返还的每单幂等承重点。取值见 {@code QuotaStatus}。
+     *
+     * <p>与 {@code stockStatus} 分列：库存对每一单都预占，额度只在 SKU 配了限购时才扣。
+     */
+    private String quotaStatus;
+
     private String payStatus;
     private String grantStatus;
     private String refundStatus;
@@ -52,9 +67,28 @@ public class PlayBizRecord {
     /** 支付单号。可为 NULL —— 建单时支付方尚未返回 */
     private String tradeNo;
 
+    /**
+     * 退款单号（V3）。V2 不写入。
+     *
+     * <p>与 {@code refundAmount} 一同映射，尽管 V2 无退款链路：表中已有这两列，实体不映射则写 退款代码时不会注意到位置已经留好，容易另加一张表或另起字段名。
+     */
+    private String refundNo;
+
+    /** 退款金额，分（V3）。V2 不写入 */
+    private Long refundAmount;
+
     private LocalDateTime expireTime;
 
-    @Version private Integer version;
+    /**
+     * 表中的 {@code version} 列，<b>当前不做乐观锁</b>，仅为映射完整而保留。
+     *
+     * <p>原带 {@code @Version} 注解，但全仓未注册 {@code OptimisticLockerInnerInterceptor}，注解不生效；
+     * 且状态变更一律走带前置状态的条件更新，不用 {@code updateById}，乐观锁本就无从触发。留着注解 会让人以为它在保护并发写，进而写出依赖它的代码。
+     *
+     * <p>不做乐观锁是有意的：条件更新的谓词（{@code WHERE pay_status = ?}）比版本号比对更强 —— 前者表达
+     * 「只有处于该状态才允许推进」，后者只表达「这行没被别人改过」。见 {@code V2102__create_marketing_stock.sql} 对两张库存表的同一取舍。
+     */
+    private Integer version;
 
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
@@ -113,6 +147,38 @@ public class PlayBizRecord {
 
     public void setQuantity(Integer quantity) {
         this.quantity = quantity;
+    }
+
+    public String getCityCode() {
+        return cityCode;
+    }
+
+    public void setCityCode(String cityCode) {
+        this.cityCode = cityCode;
+    }
+
+    public String getSourceChannel() {
+        return sourceChannel;
+    }
+
+    public void setSourceChannel(String sourceChannel) {
+        this.sourceChannel = sourceChannel;
+    }
+
+    public String getStockStatus() {
+        return stockStatus;
+    }
+
+    public void setStockStatus(String stockStatus) {
+        this.stockStatus = stockStatus;
+    }
+
+    public String getQuotaStatus() {
+        return quotaStatus;
+    }
+
+    public void setQuotaStatus(String quotaStatus) {
+        this.quotaStatus = quotaStatus;
     }
 
     public String getPayStatus() {
@@ -193,6 +259,22 @@ public class PlayBizRecord {
 
     public void setTradeNo(String tradeNo) {
         this.tradeNo = tradeNo;
+    }
+
+    public String getRefundNo() {
+        return refundNo;
+    }
+
+    public void setRefundNo(String refundNo) {
+        this.refundNo = refundNo;
+    }
+
+    public Long getRefundAmount() {
+        return refundAmount;
+    }
+
+    public void setRefundAmount(Long refundAmount) {
+        this.refundAmount = refundAmount;
     }
 
     public LocalDateTime getExpireTime() {

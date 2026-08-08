@@ -41,6 +41,20 @@ class ForwardChainIT extends AbstractMySqlIT {
                         newPayCallback(bizNo, created.getTradeNo(), "NS_e2e_1", "SUCCESS"));
         assertThat(ret).isEqualTo(RetStatus.SUCCESS);
 
+        // 履约转异步：回调返回时支付态已到位，发放态仍未启动，GRANT 任务在库里等调度。
+        // 这一段正是「已收款必履约」的可观测形态 —— 任务与收款同事务落库，进程此刻崩溃也能续跑
+        assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.PAY_SUCCESS.name());
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.NOT_START.name());
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ? AND task_type ="
+                                        + " 'GRANT' AND status = 'PENDING'",
+                                bizNo))
+                .isEqualTo(1);
+
+        runScheduler();
+
         // 标准 2：三子状态独立推进，各自到位
         assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.PAY_SUCCESS.name());
         assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
@@ -49,10 +63,12 @@ class ForwardChainIT extends AbstractMySqlIT {
         // 标准 18：下单时冻结的配置版本 = 活动当前版本，不是硬编码
         Integer curVersion =
                 num(
+                        activityJdbc,
                         "SELECT cur_version FROM marketing_activity WHERE activity_id = ?",
                         ACTIVITY_ID);
         assertThat(
                         num(
+                                benefitJdbc,
                                 "SELECT config_version FROM play_biz_record WHERE play_biz_record_no = ?",
                                 bizNo))
                 .isEqualTo(curVersion)
@@ -71,7 +87,7 @@ class ForwardChainIT extends AbstractMySqlIT {
         assertThat(fulfillmentCount(bizNo)).isEqualTo(2);
 
         List<Map<String, Object>> rows =
-                jdbc.queryForList(
+                benefitJdbc.queryForList(
                         "SELECT benefit_item_id, provider_type, provider_order_no, grant_status,"
                                 + " grant_op_no FROM benefit_fulfillment_record"
                                 + " WHERE play_biz_record_no = ? ORDER BY benefit_item_id",
@@ -100,7 +116,7 @@ class ForwardChainIT extends AbstractMySqlIT {
         String bizNo = payAndGrant("op");
 
         List<Map<String, Object>> ops =
-                jdbc.queryForList(
+                benefitJdbc.queryForList(
                         "SELECT op_type, op_seq, status, idempotent_key FROM play_op_record"
                                 + " WHERE play_biz_record_no = ? ORDER BY id",
                         bizNo);
@@ -134,7 +150,7 @@ class ForwardChainIT extends AbstractMySqlIT {
         assertThat(grantItemCount(bizNo)).isEqualTo(2);
 
         List<Map<String, Object>> records =
-                jdbc.queryForList(
+                rewardJdbc.queryForList(
                         "SELECT op_no, play_type, result FROM reward_grant_record"
                                 + " WHERE biz_order_no = ? ORDER BY op_no",
                         bizNo);
@@ -153,7 +169,7 @@ class ForwardChainIT extends AbstractMySqlIT {
         // 若误用全局下标，第二组会是 1，而 uk_op_item 的第一维 op_no 已隔开不同组 —— 全局编号既多余又会
         // 让「按供应方重发某一组」时下标对不上
         List<Integer> seqs =
-                jdbc.queryForList(
+                rewardJdbc.queryForList(
                         "SELECT i.item_seq FROM reward_grant_item i JOIN reward_grant_record r"
                                 + " ON i.op_no = r.op_no WHERE r.biz_order_no = ? ORDER BY i.op_no",
                         Integer.class,
@@ -167,7 +183,7 @@ class ForwardChainIT extends AbstractMySqlIT {
         String bizNo = payAndGrant("mid");
 
         List<Map<String, Object>> ops =
-                jdbc.queryForList(
+                benefitJdbc.queryForList(
                         "SELECT status, downstream_result, finish_time, create_time"
                                 + " FROM play_op_record WHERE play_biz_record_no = ? AND op_type = ?",
                         bizNo,
@@ -205,12 +221,53 @@ class ForwardChainIT extends AbstractMySqlIT {
                 .containsExactlyInAnyOrder("PROVIDER_A", "PROVIDER_B");
     }
 
-    /** 下单 + 支付成功，返回 bizNo。履约由 payCallback 同步触发（V1 形态）。 */
+    /**
+     * 快照中出现未知字段时，履约仍能进行。
+     *
+     * <p>快照是长期持久化数据，写入与读出可能相隔数月，其间发过版也可能回滚过。若反序列化对未知 字段报错（Jackson 默认行为），新版写入的快照在回滚到旧版后读不回来 ——
+     * 而履约、退款一律 只读快照。
+     *
+     * <p>失效形态是<b>已收款但永不履约</b>：{@code groupByProvider} 抛 {@code IllegalStateException}， 调度器按未预期异常判
+     * {@code UNKNOWN} 短退避重试，每一轮都在同一行 JSON 上失败，直至 {@code DEAD}。
+     *
+     * <p>此处直接改库注入一个未来版本才有的字段 —— 比起等到真的加字段再回归，这是当下唯一能 构造出「旧版读新版数据」的方式。
+     */
+    @Test
+    void grantStillWorksWhenSnapshotCarriesUnknownFields() {
+        CreateTradeResp created = benefitOrderService.createTrade(newTradeReq("snapshotFwd"));
+        String bizNo = created.getBizNo();
+
+        // 给快照每一项塞一个当前 SnapshotItem 没有的字段，模拟新版写入的数据
+        benefitJdbc.update(
+                "UPDATE play_biz_record SET benefit_snapshot ="
+                        + " JSON_SET(benefit_snapshot, '$[0].validDays', 30,"
+                        + " '$[1].validDays', 90) WHERE play_biz_record_no = ?",
+                bizNo);
+
+        benefitOrderService.payCallback(
+                newPayCallback(bizNo, created.getTradeNo(), "NS_snapshotFwd_1", "SUCCESS"));
+        runScheduler();
+
+        assertThat(orderField("grant_status", bizNo))
+                .as("快照多出未知字段不应阻断履约 —— 否则已收款的单会一路重试到死信")
+                .isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+        // 已知字段照常解析：两个供应方各发一次，分组未因多余字段而错乱
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM benefit_fulfillment_record"
+                                        + " WHERE play_biz_record_no = ?",
+                                bizNo))
+                .isEqualTo(2);
+    }
+
+    /** 下单 + 支付成功 + 驱动一轮调度器。履约由 GRANT 任务承接（V2 形态）。 */
     private String payAndGrant(String tag) {
         CreateTradeResp created = benefitOrderService.createTrade(newTradeReq(tag));
         benefitOrderService.payCallback(
                 newPayCallback(
                         created.getBizNo(), created.getTradeNo(), "NS_" + tag + "_1", "SUCCESS"));
+        runScheduler();
         return created.getBizNo();
     }
 }

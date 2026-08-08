@@ -1,14 +1,69 @@
-spring:
-  datasource:
-    url: jdbc:mysql://localhost:3306/db_reward?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
-    username: root
-    password: root
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    hikari:
-      # 虚拟线程开启后连接池必须显式设定，否则数万虚拟线程抢连接会打爆数据库
-      maximum-pool-size: 20
-      minimum-idle: 5
-  flyway:
+mp:
+  lock:
+    # L2 分布式锁开关。置 false 即去锁对照组（退出标准第 15 条）——
+    # 断言正确性结果与开锁组完全一致，只有 DB 冲突指标不同。
+    # 若关掉后正确性就变了，说明有地方错把锁当成了正确性依据，而非性能优化
     enabled: true
-    locations: classpath:db/migration
-    baseline-on-migrate: true
+  pay-notify:
+    # 支付通知验签密钥，与支付方共享。与 consult-token.secret 刻意分开 ——
+    # 两者是不同的信任边界：凭证密钥平台自签自验，泄露只影响下单校验；支付密钥泄露
+    # 可伪造收款通知，直接资损。共用一把还会让「轮换支付方密钥」连带作废在途凭证
+    secret: local-dev-pay-notify-secret-do-not-use-in-prod
+  consult-token:
+    # 咨询凭证 HMAC 密钥。本地/测试取值，V3 上真实环境改为从密钥管理服务注入。
+    # 不给代码内默认值：缺配置就启动失败，比用一个「大家都知道的默认密钥」跑起来更安全 ——
+    # 后者的失效形态是签名照常验过，而任何人都能伪造凭证
+    secret: local-dev-consult-secret-do-not-use-in-prod
+    # 有效期 15 分钟：够用户看完权益详情再下单，又短到凭证泄露后价格早已刷新。
+    # 过期时刻在签发时算定并进签名，消费侧改不了
+    ttl-seconds: 900
+
+spring:
+  data:
+    redis:
+      # V2 起启用：docker compose --profile v2 up -d
+      host: localhost
+      port: 6379
+
+  datasource:
+    # 四库各用仅授权自身 schema 的账号 —— 权限隔离让「禁止跨库 JOIN」在运行期成为约束，
+    # 而非仅靠多数据源（同实例下带库名限定的 JOIN 照常执行）。见《分阶段方案》§5.6 ①
+    #
+    # 迁移由各模块的 DataSourceConfig 以独立 Flyway 实例驱动，不走 spring.flyway —— 后者
+    # 只认单一 DataSource，四库共用一份配置正是 V1 九张表全落 db_reward 的原因。
+    activity:
+      url: jdbc:mysql://localhost:3306/db_activity?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_activity
+      password: mp_activity
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        # 虚拟线程开启后连接池必须显式设定，否则数万虚拟线程抢连接会打爆数据库。
+        # 四池总上限 40，低于 MySQL 默认 max_connections=151
+        maximum-pool-size: 10
+        minimum-idle: 2
+    benefit:
+      url: jdbc:mysql://localhost:3306/db_benefit?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_benefit
+      password: mp_benefit
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        # 主链路所在库，池最大
+        maximum-pool-size: 15
+        minimum-idle: 5
+    reward:
+      url: jdbc:mysql://localhost:3306/db_reward?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_reward
+      password: mp_reward
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 2
+    fission:
+      url: jdbc:mysql://localhost:3306/db_fission?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_fission
+      password: mp_fission
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        # V3 才有表，池留最小
+        maximum-pool-size: 5
+        minimum-idle: 1

@@ -24,12 +24,6 @@ dubbo:
   scan:
     base-packages: com.mp
 
-mybatis-plus:
-  configuration:
-    map-underscore-to-camel-case: true
-  global-config:
-    banner: false
-
 logging:
   level:
     root: INFO

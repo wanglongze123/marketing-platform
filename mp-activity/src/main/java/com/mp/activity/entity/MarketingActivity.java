@@ -5,7 +5,7 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
 
-/** 活动主表。V1 由 seed SQL 初始化，只读。 */
+/** 活动主表。V1 由 seed SQL 初始化只读，V3 补齐创建、发布与状态变更。 */
 @TableName("marketing_activity")
 public class MarketingActivity {
 
@@ -20,8 +20,26 @@ public class MarketingActivity {
     private LocalDateTime startTime;
     private LocalDateTime endTime;
 
+    /** JSON 数组，空表示不限。V3 资格决策据此判定 */
+    private String cityScope;
+
+    private String channelScope;
+
+    private String crowdRule;
+
+    private String riskRule;
+
+    /** 草稿态玩法私有配置，发布时快照进版本表 */
+    private String playConfig;
+
+    /** 草稿态奖励/价格/退款规则，发布时快照进版本表 */
+    private String rewardConfig;
+
     /** 当前发布配置版本。下单时冻结进主单 */
     private Integer curVersion;
+
+    /** 最近一次创建/发布/状态变更的操作人（BR-C-27） */
+    private String operator;
 
     private Integer deleted;
 
@@ -89,12 +107,68 @@ public class MarketingActivity {
         this.endTime = endTime;
     }
 
+    public String getCityScope() {
+        return cityScope;
+    }
+
+    public void setCityScope(String cityScope) {
+        this.cityScope = cityScope;
+    }
+
+    public String getChannelScope() {
+        return channelScope;
+    }
+
+    public void setChannelScope(String channelScope) {
+        this.channelScope = channelScope;
+    }
+
+    public String getCrowdRule() {
+        return crowdRule;
+    }
+
+    public void setCrowdRule(String crowdRule) {
+        this.crowdRule = crowdRule;
+    }
+
+    public String getRiskRule() {
+        return riskRule;
+    }
+
+    public void setRiskRule(String riskRule) {
+        this.riskRule = riskRule;
+    }
+
+    public String getPlayConfig() {
+        return playConfig;
+    }
+
+    public void setPlayConfig(String playConfig) {
+        this.playConfig = playConfig;
+    }
+
+    public String getRewardConfig() {
+        return rewardConfig;
+    }
+
+    public void setRewardConfig(String rewardConfig) {
+        this.rewardConfig = rewardConfig;
+    }
+
     public Integer getCurVersion() {
         return curVersion;
     }
 
     public void setCurVersion(Integer curVersion) {
         this.curVersion = curVersion;
+    }
+
+    public String getOperator() {
+        return operator;
+    }
+
+    public void setOperator(String operator) {
+        this.operator = operator;
     }
 
     public Integer getDeleted() {

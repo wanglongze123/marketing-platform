@@ -232,8 +232,12 @@ class ReadOnlyQueryIT extends AbstractMySqlIT {
 
         String payBefore = orderField("pay_status", bizNo);
         String grantBefore = orderField("grant_status", bizNo);
+        // 四库拆分后 count 需显式指定数据源：play_op_record 属 benefit 库
         int opsBefore =
-                count("SELECT COUNT(*) FROM play_op_record WHERE play_biz_record_no = ?", bizNo);
+                count(
+                        benefitJdbc,
+                        "SELECT COUNT(*) FROM play_op_record WHERE play_biz_record_no = ?",
+                        bizNo);
         int ffBefore = fulfillmentCount(bizNo);
         // 取实际值而非硬编码：发奖记录数 = 供应方组数（每组一个 grantOpNo），
         // 权益项数变化时硬编码的期望值会失准，而这里要验的是「查询前后不变」
@@ -250,7 +254,11 @@ class ReadOnlyQueryIT extends AbstractMySqlIT {
 
         assertThat(orderField("pay_status", bizNo)).isEqualTo(payBefore);
         assertThat(orderField("grant_status", bizNo)).isEqualTo(grantBefore);
-        assertThat(count("SELECT COUNT(*) FROM play_op_record WHERE play_biz_record_no = ?", bizNo))
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM play_op_record WHERE play_biz_record_no = ?",
+                                bizNo))
                 .isEqualTo(opsBefore);
         assertThat(fulfillmentCount(bizNo)).isEqualTo(ffBefore);
         // 发奖侧同样不得因查询而多出记录
