@@ -48,6 +48,16 @@ public final class ErrorCode {
     public static final String SPONSOR_IS_FOLLOWER = "1614";
 
     /**
+     * 被分享对象未通过好友过滤（PRD FR-F05、BR-F-12）。V3 PR-6 引入。
+     *
+     * <p>归 1xxx：确定的业务拒绝 —— 该好友本轮不可被分享，重试结果不变。
+     *
+     * <p>与 {@link #FRIEND_RECALL_UNAVAILABLE} 严格分开：本码是「这个人不该被邀请」，那条是
+     * 「候选名单拉不出来」。合并会让召回方故障时前端显示「你的好友都不符合条件」。
+     */
+    public static final String FOLLOWER_FILTERED = "1611";
+
+    /**
      * 关系非 {@code JOINED}，不能确权（PRD FR-F07）。V3 PR-4 引入。
      *
      * <p>确权的前置是「徒弟已加入」。对已 {@code DONE} 的关系重复确权同样落到这里 —— 那是重复 发奖的入口，必须拦在发奖之前。
@@ -126,6 +136,15 @@ public final class ErrorCode {
      * 与资格决策的 1201/5201 是同一条分界线。
      */
     public static final String FISSION_QUERY_ERROR = "5601";
+
+    /**
+     * 好友召回能力不可用（PRD FR-F03）。V3 PR-6 引入。
+     *
+     * <p>归 5xxx：候选名单拉不出来是系统故障，重试可能成功。<b>不降级为空列表</b> —— 空列表与 「这个人没有好友」不可区分，端上会显示一个看起来正常的空页面，而故障无人察觉。
+     *
+     * <p>与过滤器的 fail-open 处置不同：<b>召回失败没有可放行的对象</b>，而过滤器失败时手上有一批 明确的候选人，可按各自的失败语义处置。两者不是同一类判断。
+     */
+    public static final String FRIEND_RECALL_UNAVAILABLE = "5603";
 
     /**
      * 同一业务对象正在被并发处理，请稍后重试。V2 PR-7 引入。

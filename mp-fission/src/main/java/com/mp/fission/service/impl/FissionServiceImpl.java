@@ -6,12 +6,15 @@ import com.mp.api.activity.dto.QualifyResp;
 import com.mp.api.activity.service.ActivityService;
 import com.mp.api.fission.dto.FollowerDoneReq;
 import com.mp.api.fission.dto.FollowerJoinReq;
+import com.mp.api.fission.dto.FriendFilterResp;
+import com.mp.api.fission.dto.GetFriendsReq;
 import com.mp.api.fission.dto.GroupQueryResp;
 import com.mp.api.fission.dto.ShareInviteReq;
 import com.mp.api.fission.dto.ShareInviteResp;
 import com.mp.api.fission.dto.SponsorQueryReq;
 import com.mp.api.fission.dto.SponsorQueryResp;
 import com.mp.api.fission.service.FissionService;
+import com.mp.api.mock.service.MockSocialService;
 import com.mp.api.reward.dto.GrantRewardReq;
 import com.mp.api.reward.service.RewardService;
 import com.mp.common.enums.ErrorCode;
@@ -22,6 +25,8 @@ import com.mp.common.util.BizNoGenerator;
 import com.mp.common.util.IdempotentKeys;
 import com.mp.fission.entity.FissionGroup;
 import com.mp.fission.entity.FissionRelation;
+import com.mp.fission.filter.FilterContext;
+import com.mp.fission.filter.FriendFilterChain;
 import com.mp.fission.repository.FissionGroupMapper;
 import com.mp.fission.repository.FissionOpRecordMapper;
 import com.mp.fission.repository.FissionRelationMapper;
@@ -65,6 +70,22 @@ public class FissionServiceImpl implements FissionService {
      */
     private static final long GRANTING_WINDOW_SECONDS = 600;
 
+    /** 好友召回的分页大小，与 §7.1 的 N=200 一致 */
+    private static final int RECALL_PAGE_SIZE = 200;
+
+    /** 默认召回页数 */
+    private static final int DEFAULT_MAX_PAGES = 5;
+
+    /**
+     * 召回页数上限（FR-F04 前置条件「候选集大小在受控上限内」）。
+     *
+     * <p>上限落在页数而非总人数：分页拉取时超限要么整页丢弃、要么截断成半页，前者浪费一次调用、 后者让「拉了多少」取决于最后一页的大小。按页数限制则每一页都是完整的。
+     */
+    private static final int MAX_PAGES_LIMIT = 50;
+
+    /** 影响力阈值：粉丝量超过它的用户不作为裂变对象（BR-F-07-e）。V3 取固定值 */
+    private static final long INFLUENCE_THRESHOLD = 10000L;
+
     /** 徒弟奖励类型与配置 id。V3 取固定值，运营配置化后改由活动配置快照填充 */
     private static final String FOLLOWER_REWARD_TYPE = "COUPON";
 
@@ -78,21 +99,25 @@ public class FissionServiceImpl implements FissionService {
     // 序列化一并处理，此时提前引入只会让错误码在单进程阶段就已失效。
     @Autowired private ActivityService activityService;
     @Autowired private RewardService rewardService;
+    @Autowired private MockSocialService socialService;
 
     private final FissionGroupMapper groupMapper;
     private final FissionRelationMapper relationMapper;
     private final FissionOpRecordMapper opRecordMapper;
     private final FissionTxService tx;
+    private final FriendFilterChain filterChain;
 
     public FissionServiceImpl(
             FissionGroupMapper groupMapper,
             FissionRelationMapper relationMapper,
             FissionOpRecordMapper opRecordMapper,
-            FissionTxService tx) {
+            FissionTxService tx,
+            FriendFilterChain filterChain) {
         this.groupMapper = groupMapper;
         this.relationMapper = relationMapper;
         this.opRecordMapper = opRecordMapper;
         this.tx = tx;
+        this.filterChain = filterChain;
     }
 
     // ------------------------------------------------------------------
@@ -248,7 +273,100 @@ public class FissionServiceImpl implements FissionService {
     }
 
     // ------------------------------------------------------------------
-    // ④ 分享
+    // ④ 好友获取与过滤
+    // ------------------------------------------------------------------
+
+    /**
+     * 召回 + 过滤，一次请求的两段。
+     *
+     * <p><b>先把全部页召回，再整批过滤</b>，而不是逐页召回逐页过滤。两者的差别是下游调用次数：
+     *
+     * <pre>
+     * 逐页过滤：page 页 × 8 条规则 = page × 8 次调用
+     * 整批过滤：8 次调用
+     * </pre>
+     *
+     * <p>这正是 BR-F-09「编排维度为按过滤器遍历，非按分页遍历」的落点 —— 逐页写法在代码上更 自然（召回一页顺手过滤一页），而它把过滤器循环嵌进了分页循环里。
+     *
+     * <p>代价是候选集要整批驻留内存，故 {@code maxPages} 有上限（FR-F04 的前置条件「候选集大小 在受控上限内」）。
+     */
+    @Override
+    public FriendFilterResp getFriends(GetFriendsReq req) {
+        requireText(req.getGroupId(), "groupId");
+        requireText(req.getSponsorId(), "sponsorId");
+
+        FissionGroup group = requireRunningGroup(req.getGroupId());
+
+        int pages = req.getMaxPages() <= 0 ? DEFAULT_MAX_PAGES : req.getMaxPages();
+        if (pages > MAX_PAGES_LIMIT) {
+            throw new BizException(
+                    ErrorCode.INVALID_PARAM, "候选页数超上限 " + MAX_PAGES_LIMIT + ": " + pages);
+        }
+
+        List<String> candidates = recall(req.getSponsorId(), pages);
+
+        FilterContext ctx =
+                new FilterContext(
+                        req.getGroupId(),
+                        group.getActivityId(),
+                        req.getSponsorId(),
+                        group.getConfigVersion(),
+                        INFLUENCE_THRESHOLD);
+        List<String> passed = filterChain.filter(ctx, candidates);
+
+        FriendFilterResp resp = new FriendFilterResp();
+        resp.setPassed(passed);
+        resp.setRejected(ctx.getRejected());
+        resp.setConfigVersion(group.getConfigVersion());
+        resp.setDegradedRules(ctx.degradedRuleNames());
+        resp.setCandidateCount(candidates.size());
+
+        // 只记数量与原因分布，不打印完整用户列表（FR-F04 的日志要求）：一次请求可达数百人，
+        // 全打出来会淹没日志，且好友关系本身是敏感数据
+        log.info(
+                "getFriends done, groupId={}, impl={}, candidates={}, passed={}, rejected={},"
+                        + " degraded={}",
+                req.getGroupId(),
+                filterChain.relationFilterImpl(),
+                candidates.size(),
+                passed.size(),
+                ctx.getRejected().size(),
+                ctx.degradedRuleNames());
+        return resp;
+    }
+
+    /**
+     * 逐页召回，拉满 {@code maxPages} 或下游返回空页为止。
+     *
+     * <p>召回不可用抛 {@code 5603}，<b>不吞成空列表</b>：空列表与「这个人没有好友」不可区分。
+     *
+     * <p><b>去重在这里做，不在过滤链里</b>：不同页返回同一个人是召回侧的问题（分页期间名单变动）， 而过滤链的入参契约是「一批互不相同的候选人」——
+     * 让它自己去重等于把上游的毛病带进下游。
+     */
+    private List<String> recall(String sponsorId, int maxPages) {
+        java.util.LinkedHashSet<String> all = new java.util.LinkedHashSet<>();
+        for (int page = 0; page < maxPages; page++) {
+            List<String> batch;
+            try {
+                batch = socialService.recallFriends(sponsorId, page, RECALL_PAGE_SIZE);
+            } catch (Exception e) {
+                log.warn("friend recall failed, sponsorId={}, page={}", sponsorId, page, e);
+                throw new BizException(ErrorCode.FRIEND_RECALL_UNAVAILABLE, "好友召回不可用");
+            }
+            if (batch == null || batch.isEmpty()) {
+                break;
+            }
+            all.addAll(batch);
+            if (batch.size() < RECALL_PAGE_SIZE) {
+                // 不足一页即最后一页，不必再问下游一次拿空页
+                break;
+            }
+        }
+        return new ArrayList<>(all);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑤ 分享
     // ------------------------------------------------------------------
 
     @Override
@@ -261,18 +379,44 @@ public class FissionServiceImpl implements FissionService {
 
         FissionGroup group = requireRunningGroup(req.getGroupId());
 
-        List<String> invited = new ArrayList<>();
-        List<String> already = new ArrayList<>();
-
+        List<String> targets = new ArrayList<>();
         for (String followerId : req.getFollowerIds()) {
             if (followerId == null || followerId.isBlank()) {
                 continue;
             }
-            // 师徒非同人：分享给自己不成立
+            // 师徒非同人：分享给自己不成立。先于过滤判 —— 自邀是刷奖入口，不该混在
+            // 「未通过过滤」这个较软的结论里
             if (followerId.equals(req.getSponsorId())) {
                 throw new BizException(ErrorCode.SPONSOR_IS_FOLLOWER, "师徒不能为同一人");
             }
+            targets.add(followerId);
+        }
 
+        // BR-F-12：被分享对象须通过过滤。分享侧独立校验一次，不信任 getFriends 的结果 ——
+        // 两次调用之间对方可能已注销、已被拉黑，或客户端根本没调过 getFriends 而直接构造了
+        // 一批 id。分享是写路径，把关只在读路径上做等于没做
+        //
+        // 关系那条规则在此关闭：它剔除的是「已有进行中关系」的人，而在分享路径上这批人的
+        // 正确处置是 BR-F-11 的「重复分享不重复创建，且不作为错误」（下方由撞键分支承接）。
+        // 启用它会让重复分享被判 1611，与 BR-F-11 直接冲突
+        FilterContext ctx =
+                new FilterContext(
+                        req.getGroupId(),
+                        group.getActivityId(),
+                        req.getSponsorId(),
+                        group.getConfigVersion(),
+                        INFLUENCE_THRESHOLD);
+        List<String> passed = filterChain.filter(ctx, targets, false);
+        if (passed.isEmpty() && !targets.isEmpty()) {
+            // 一个都没通过：这是确定的业务拒绝，不建任何关系
+            throw new BizException(
+                    ErrorCode.FOLLOWER_FILTERED, "被分享对象均未通过过滤: " + ctx.getRejected());
+        }
+
+        List<String> invited = new ArrayList<>();
+        List<String> already = new ArrayList<>();
+
+        for (String followerId : passed) {
             try {
                 tx.createInvitedRelation(
                         req.getGroupId(),
@@ -292,11 +436,13 @@ public class FissionServiceImpl implements FissionService {
         ShareInviteResp resp = new ShareInviteResp();
         resp.setInvitedFollowerIds(invited);
         resp.setAlreadyInvitedFollowerIds(already);
+        resp.setFilteredFollowerIds(ctx.getRejected());
         log.info(
-                "shareInvite done, groupId={}, invited={}, already={}",
+                "shareInvite done, groupId={}, invited={}, already={}, filtered={}",
                 req.getGroupId(),
                 invited.size(),
-                already.size());
+                already.size(),
+                ctx.getRejected().size());
         return resp;
     }
 

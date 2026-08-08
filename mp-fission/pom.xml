@@ -50,6 +50,13 @@
       <groupId>com.mp</groupId>
       <artifactId>mp-api-reward</artifactId>
     </dependency>
+    <!-- 好友召回与画像查询走 mock 社交能力（V3 PR-6）。与 benefit-order / reward 依赖
+         mp-api-mock 同源：真实社交系统不在本项目范围内，但「依赖不可用时各过滤器的
+         失败语义」必须能被验证，故把它建模在服务边界的另一侧 -->
+    <dependency>
+      <groupId>com.mp</groupId>
+      <artifactId>mp-api-mock</artifactId>
+    </dependency>
     <dependency>
       <groupId>com.mp</groupId>
       <artifactId>mp-activity</artifactId>
