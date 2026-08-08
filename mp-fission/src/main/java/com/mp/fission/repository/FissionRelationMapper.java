@@ -51,6 +51,21 @@ public interface FissionRelationMapper extends BaseMapper<FissionRelation> {
     FissionRelation selectByRelationId(@Param("relationId") String relationId);
 
     /**
+     * 按 {@code (groupId, followerId)} 取关系，<b>不看 {@code active_flag}</b>。
+     *
+     * <p>与 {@link #selectActive} 的分工：确权成功后关系进终态、{@code active_flag} 已释放，此时 {@code selectActive}
+     * 查不到它。幂等命中要回查那条已终结的关系，用本方法。
+     *
+     * <p>同一对师徒在多轮之间可有多条历史关系，故取最新一条 —— 而「进行中至多一条」由唯一键 保证，不需要在这里再判。
+     */
+    @Select(
+            "SELECT * FROM fission_relation"
+                    + " WHERE group_id = #{groupId} AND follower_id = #{followerId}"
+                    + " ORDER BY id DESC LIMIT 1")
+    FissionRelation selectLatest(
+            @Param("groupId") String groupId, @Param("followerId") String followerId);
+
+    /**
      * 非终态之间的推进，条件更新（《开发规范》§7.1）。
      *
      * <p>{@code WHERE status = #{fromStatus}} 使重复推进 {@code affected_rows = 0}，天然幂等 （BR-F-17）。<b>不更新
@@ -114,6 +129,25 @@ public interface FissionRelationMapper extends BaseMapper<FissionRelation> {
             @Param("relationId") String relationId,
             @Param("fromStatus") String fromStatus,
             @Param("toStatus") String toStatus);
+
+    /**
+     * 置发奖在途豁免（BR-F-26）：发奖期间过期治理须跳过这条关系。
+     *
+     * <p>窗口由库内算出（{@code DATE_ADD(NOW(3), ...)}），与治理判据 {@code granting_until < NOW(3)} 同一时钟 ——
+     * 应用侧传绝对时刻会让两端时钟不一致时豁免要么永不失效、要么立即失效。
+     *
+     * <p>它<b>必须有过期时间而非永久标记</b>：发奖进程崩溃后标记若永不失效，这行关系就永生 —— 既不推进也不被治理。过期即允许接管并告警，对账第 13 项据此扫描。
+     */
+    @Update(
+            "UPDATE fission_relation"
+                    + " SET granting_until = DATE_ADD(NOW(3), INTERVAL #{windowSeconds} SECOND)"
+                    + " WHERE relation_id = #{relationId}")
+    int markGranting(
+            @Param("relationId") String relationId, @Param("windowSeconds") long windowSeconds);
+
+    /** 清空发奖在途豁免。发奖已确定失败时用 —— 留着会让过期治理永久跳过这条关系。 */
+    @Update("UPDATE fission_relation SET granting_until = NULL WHERE relation_id = #{relationId}")
+    int clearGranting(@Param("relationId") String relationId);
 
     /** 该组的关系列表，游标分页走 {@code idx_group_status_id}。 */
     @Select(

@@ -2,12 +2,15 @@ package com.mp.fission.service;
 
 import com.mp.common.enums.OpStatus;
 import com.mp.common.enums.RelationStatus;
+import com.mp.common.enums.RetStatus;
+import com.mp.common.enums.TaskType;
 import com.mp.common.util.BizNoGenerator;
 import com.mp.fission.config.FissionTx;
 import com.mp.fission.entity.FissionRelation;
 import com.mp.fission.repository.FissionGroupMapper;
 import com.mp.fission.repository.FissionOpRecordMapper;
 import com.mp.fission.repository.FissionRelationMapper;
+import com.mp.fission.repository.FissionTaskMapper;
 import org.springframework.stereotype.Service;
 
 /**
@@ -24,14 +27,17 @@ public class FissionTxService {
     private final FissionGroupMapper groupMapper;
     private final FissionRelationMapper relationMapper;
     private final FissionOpRecordMapper opRecordMapper;
+    private final FissionTaskMapper taskMapper;
 
     public FissionTxService(
             FissionGroupMapper groupMapper,
             FissionRelationMapper relationMapper,
-            FissionOpRecordMapper opRecordMapper) {
+            FissionOpRecordMapper opRecordMapper,
+            FissionTaskMapper taskMapper) {
         this.groupMapper = groupMapper;
         this.relationMapper = relationMapper;
         this.opRecordMapper = opRecordMapper;
+        this.taskMapper = taskMapper;
     }
 
     /**
@@ -144,6 +150,121 @@ public class FissionTxService {
                 OpStatus.SUCCESS.name(),
                 null);
         return relationId;
+    }
+
+    /**
+     * 确权前置：落 {@code PROCESSING} 操作记录 + 置发奖在途豁免 + 落查单任务，<b>同事务</b>。
+     *
+     * <p><b>任务前置是收敛率 100% 的基础</b>（技术方案 §5.1 ④）：查单任务与 {@code op=PROCESSING} 同事务落库，而非等发奖成功后再建。否则 RPC
+     * 发出后宕机，记录停在 {@code PROCESSING}、 无任务，对账若只扫 {@code UNKNOWN} 就永久悬挂 —— 徒弟究竟收没收到奖，无人查证。
+     *
+     * <p>{@code granting_until} 同时置上：发奖在途期间过期治理须跳过这条关系（BR-F-26），否则一边 在发奖一边被推到 {@code EXPIRED}。
+     *
+     * @return {@code false} 表示幂等命中（该 {@code outFlowNo} 已受理过）
+     */
+    @FissionTx
+    public boolean prepareDone(
+            String relationId,
+            String groupId,
+            String activityId,
+            String followerId,
+            String outBizNo,
+            String outFlowNo,
+            String followerGrantNo,
+            long grantingWindowSeconds) {
+        try {
+            opRecordMapper.insert(
+                    BizNoGenerator.fissionOpNo(),
+                    outFlowNo,
+                    outBizNo,
+                    activityId,
+                    followerId,
+                    "FOLLOWER_DONE",
+                    "",
+                    OpStatus.PROCESSING.name(),
+                    null);
+        } catch (org.springframework.dao.DuplicateKeyException e) {
+            // 同 outFlowNo 已受理：幂等命中，不重复发起
+            return false;
+        }
+
+        relationMapper.markGranting(relationId, grantingWindowSeconds);
+        taskMapper.enqueue(
+                BizNoGenerator.fissionTaskNo(),
+                relationId,
+                TaskType.QUERY_GRANT.name(),
+                followerGrantNo,
+                0,
+                "{}");
+        return true;
+    }
+
+    /**
+     * 确权后置，<b>四写同一本地事务</b>（技术方案 §5.1 ⑥、BR-F-20）：
+     *
+     * <ol>
+     *   <li>{@code op_record} 置 {@code SUCCESS}
+     *   <li>关系 {@code JOINED → DONE}，同时释放 {@code active_flag}、清空 {@code granting_until}
+     *   <li>查单任务置 {@code DONE}
+     *   <li>落 {@code SPONSOR_REWARD} 任务
+     * </ol>
+     *
+     * <p><b>分两个事务即漏发师傅奖</b>：若「op=SUCCESS」与「关系 DONE + 师傅返奖任务」分属两个 事务，中间宕机将导致徒弟已发奖、而师傅返奖任务根本不存在 ——
+     * 师傅奖永久漏发且无重试载体。
+     *
+     * <p>关系推进用 {@code terminate}（条件更新 {@code WHERE status='JOINED'}）：重复确权时 {@code
+     * affected_rows=0}，天然幂等（BR-F-17）。
+     *
+     * @return {@code false} 表示关系已被推进（重复确权）
+     */
+    @FissionTx
+    public boolean settleDone(
+            String relationId,
+            String groupId,
+            String outBizNo,
+            String outFlowNo,
+            String followerGrantNo,
+            String sponsorFlowNo) {
+        int rows =
+                relationMapper.terminate(
+                        relationId, RelationStatus.JOINED.name(), RelationStatus.DONE.name());
+        if (rows == 0) {
+            return false;
+        }
+
+        opRecordMapper.finish(outFlowNo, OpStatus.SUCCESS.name(), RetStatus.SUCCESS.name());
+        taskMapper.markDoneByBizAndOp(relationId, TaskType.QUERY_GRANT.name(), followerGrantNo);
+
+        // 师傅返奖走本地消息表异步：主链路只保证徒弟发奖同步完成，避免一次请求串两次外部
+        // 发奖拉长 RT。biz_no 取 relationId 而非 groupId —— 后者会让一师傅仅一条任务、漏发
+        taskMapper.enqueue(
+                BizNoGenerator.fissionTaskNo(),
+                relationId,
+                TaskType.SPONSOR_REWARD.name(),
+                sponsorFlowNo,
+                0,
+                "{}");
+
+        // 轮次进度 +1（BR-F-18）。SQL 自增而非读出加一回写，并发下两个徒弟同时完成才不会只记一个
+        groupMapper.incrementProgress(groupId);
+        return true;
+    }
+
+    /** 发奖未收敛：操作记录置未知态，<b>不推进关系</b>，保留查单任务由收敛处置。 */
+    @FissionTx
+    public void markDoneUnresolved(String outFlowNo, RetStatus downstream) {
+        opRecordMapper.finish(outFlowNo, OpStatus.UNKNOWN.name(), downstream.name());
+    }
+
+    /**
+     * 发奖确定失败：操作记录置失败，清空 {@code granting_until}，<b>关系保持 {@code JOINED}</b>。
+     *
+     * <p>关系不推进也不终结 —— 可人工或重试重入（技术方案 §5.1 异常分支）。清 {@code granting_until} 是因为发奖已不在途，留着会让过期治理永久跳过这条关系。
+     */
+    @FissionTx
+    public void markDoneFailed(String relationId, String outFlowNo) {
+        opRecordMapper.finish(outFlowNo, OpStatus.FAILED.name(), RetStatus.FAIL.name());
+        relationMapper.clearGranting(relationId);
     }
 
     /**

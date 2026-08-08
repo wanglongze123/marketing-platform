@@ -47,6 +47,13 @@ public final class ErrorCode {
      */
     public static final String SPONSOR_IS_FOLLOWER = "1614";
 
+    /**
+     * 关系非 {@code JOINED}，不能确权（PRD FR-F07）。V3 PR-4 引入。
+     *
+     * <p>确权的前置是「徒弟已加入」。对已 {@code DONE} 的关系重复确权同样落到这里 —— 那是重复 发奖的入口，必须拦在发奖之前。
+     */
+    public static final String RELATION_NOT_JOINED = "1617";
+
     /** 价格不一致：凭证成交价 ≠ 服务端重算价。V2 引入比价后使用 */
     public static final String PRICE_MISMATCH = "1711";
 

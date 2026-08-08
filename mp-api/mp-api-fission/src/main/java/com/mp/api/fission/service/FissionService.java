@@ -1,5 +1,6 @@
 package com.mp.api.fission.service;
 
+import com.mp.api.fission.dto.FollowerDoneReq;
 import com.mp.api.fission.dto.FollowerJoinReq;
 import com.mp.api.fission.dto.GroupQueryResp;
 import com.mp.api.fission.dto.ShareInviteReq;
@@ -67,4 +68,17 @@ public interface FissionService {
      * @return 关系号
      */
     String followerJoin(FollowerJoinReq req);
+
+    /**
+     * 徒弟完成，触发双向发奖（FR-F07）。
+     *
+     * <p>组件序：关系预处理 → 徒弟发奖 → 关系后处理 → 师傅返奖（异步）。
+     *
+     * <p><b>接口响应不返回师傅返奖状态</b>（BR-F-21）：它走本地消息表异步，结果由子流程保证。 同步返回等于让调用方等两次外部发奖。
+     *
+     * <p>关系非 {@code JOINED} 抛 {@code 1617}；发奖未收敛时关系<b>不推进</b>，由查单任务收敛。
+     *
+     * @return 关系号
+     */
+    String followerDone(FollowerDoneReq req);
 }

@@ -50,5 +50,27 @@ public final class IdempotentKeys {
         return bizNo + "_CLOSE";
     }
 
-    // V3 补：refundNo、revokeNo、followerGrantNo、sponsorFlowNo
+    /**
+     * 徒弟发奖。<b>与师傅返奖同源派生自 {@code outFlowNo}</b>（技术方案 §5.1）。
+     *
+     * <p>一次确权派生两把确定性键，重试时可重算 —— 这是「超时重试必须复用原键」的前提：任务表 只存 {@code outFlowNo}，两把发奖键在每次执行时现算，不落库也不会漂移。
+     *
+     * <p><b>不各自生成随机号</b>：那样重试会派生出新键，同一次确权变成两笔发放。
+     *
+     * @param outFlowNo 上游流水号，标识本次确权
+     */
+    public static String followerGrantNo(String outFlowNo) {
+        return outFlowNo + "_FL";
+    }
+
+    /**
+     * 师傅返奖。同源派生，后缀与徒弟发奖不同。
+     *
+     * <p>两者<b>必须是不同的键</b>：同一个键会让师傅返奖被 {@code uk_idempotent} 当成徒弟发奖的重传 挡下 —— 师傅永远拿不到奖，且不报错。
+     */
+    public static String sponsorFlowNo(String outFlowNo) {
+        return outFlowNo + "_SP";
+    }
+
+    // V3 后续补：refundNo、revokeNo
 }

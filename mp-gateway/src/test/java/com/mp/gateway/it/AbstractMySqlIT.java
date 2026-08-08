@@ -83,6 +83,10 @@ abstract class AbstractMySqlIT {
         // 不压得更狠（如 0.001 → 首档 1ms）：那个量级与调度器每轮自身耗时同级，退避量淹没在
         // 噪声里，「退避取 0」的注入测不出来（已实测确认）
         registry.add("mp.task.backoff-scale", () -> "0.02");
+        // 裂变调度器同样关掉定时器、压缩退避 —— 它与权益的调度器各配一份（任务表分库，
+        // 各库各有一个调度器），配置键也各自独立，不能指望改一个键同时作用于两者
+        registry.add("mp.fission.task.timer.enabled", () -> "false");
+        registry.add("mp.fission.task.backoff-scale", () -> "0.02");
         // 凭证配置与生产同形状，取值不同：密钥不用生产那份，有效期照生产的 15 分钟。
         // 有效期不压小 —— 压到毫秒级会让「凭证还没过期」本身变得不稳定，正常用例随机变红。
         // 「过期凭证被拒」改用负有效期签一张来验（TokenAndPricingIT），既不等待也不改配置

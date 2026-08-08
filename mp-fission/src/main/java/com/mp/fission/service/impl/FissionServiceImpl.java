@@ -4,6 +4,7 @@ import com.mp.api.activity.dto.ActivityConfResp;
 import com.mp.api.activity.dto.QualifyReq;
 import com.mp.api.activity.dto.QualifyResp;
 import com.mp.api.activity.service.ActivityService;
+import com.mp.api.fission.dto.FollowerDoneReq;
 import com.mp.api.fission.dto.FollowerJoinReq;
 import com.mp.api.fission.dto.GroupQueryResp;
 import com.mp.api.fission.dto.ShareInviteReq;
@@ -11,16 +12,21 @@ import com.mp.api.fission.dto.ShareInviteResp;
 import com.mp.api.fission.dto.SponsorQueryReq;
 import com.mp.api.fission.dto.SponsorQueryResp;
 import com.mp.api.fission.service.FissionService;
+import com.mp.api.reward.dto.GrantRewardReq;
+import com.mp.api.reward.service.RewardService;
 import com.mp.common.enums.ErrorCode;
 import com.mp.common.enums.RelationStatus;
+import com.mp.common.enums.RetStatus;
 import com.mp.common.exception.BizException;
 import com.mp.common.util.BizNoGenerator;
+import com.mp.common.util.IdempotentKeys;
 import com.mp.fission.entity.FissionGroup;
 import com.mp.fission.entity.FissionRelation;
 import com.mp.fission.repository.FissionGroupMapper;
 import com.mp.fission.repository.FissionOpRecordMapper;
 import com.mp.fission.repository.FissionRelationMapper;
 import com.mp.fission.service.FissionTxService;
+import com.mp.fission.service.RewardItemFactory;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.dubbo.config.annotation.DubboService;
@@ -52,6 +58,18 @@ public class FissionServiceImpl implements FissionService {
     /** 单号碰撞后的换号重试上限 */
     private static final int ID_RETRY_LIMIT = 3;
 
+    /**
+     * 发奖在途豁免窗口：10 分钟（《分阶段方案》§6.4 ③）。
+     *
+     * <p>须长于「发奖 + 查单收敛」的正常耗时（V2 实测 PROCESSING 收敛 153s），短到不让一行永久 豁免。超时后允许治理接管并告警，对账第 13 项据此扫描。
+     */
+    private static final long GRANTING_WINDOW_SECONDS = 600;
+
+    /** 徒弟奖励类型与配置 id。V3 取固定值，运营配置化后改由活动配置快照填充 */
+    private static final String FOLLOWER_REWARD_TYPE = "COUPON";
+
+    private static final String FOLLOWER_REWARD_CONFIG_ID = "FISSION_FOLLOWER_REWARD";
+
     // V3 单进程用 Spring 注入；V4 拆服务后改为 @DubboReference(protocol="tri")。
     //
     // 与 benefit-order / reward 的既有形态保持一致，不提前用 @DubboReference：injvm 代理会把
@@ -59,6 +77,7 @@ public class FissionServiceImpl implements FissionService {
     // 调度器判「确定拒绝」还是「结果未知」的依据（V2 PR-8）。跨进程的异常传播要在 V4 连同
     // 序列化一并处理，此时提前引入只会让错误码在单进程阶段就已失效。
     @Autowired private ActivityService activityService;
+    @Autowired private RewardService rewardService;
 
     private final FissionGroupMapper groupMapper;
     private final FissionRelationMapper relationMapper;
@@ -356,6 +375,140 @@ public class FissionServiceImpl implements FissionService {
             throw new BizException(ErrorCode.FISSION_QUERY_ERROR, "加入失败且未查到关系");
         }
         return r.getRelationId();
+    }
+
+    // ------------------------------------------------------------------
+    // ⑦ 徒弟完成与双向发奖
+    // ------------------------------------------------------------------
+
+    /**
+     * 组件序：关系预处理 → 徒弟发奖 → 关系后处理 → 师傅返奖（异步）。
+     *
+     * <p><b>与 {@code payCallback} 占据同一架构位置</b>（技术方案 §5.0）：一个「已确认的凭证事件」 触发「公共能力层发奖」。二者上游不同（社交行为 vs
+     * 付款），下游收敛到同一套 {@code reward.grantReward} + 可靠任务查单。
+     *
+     * <p>师傅返奖走本地消息表异步（BR-F-21）：主链路只保证徒弟发奖同步完成，接口响应不返回师傅 返奖状态 —— 一次请求串两次外部发奖会把 RT 拉长一倍，而师傅奖最终一致即可。
+     */
+    @Override
+    public String followerDone(FollowerDoneReq req) {
+        requireText(req.getGroupId(), "groupId");
+        requireText(req.getFollowerId(), "followerId");
+        requireText(req.getOutBizNo(), "outBizNo");
+        requireText(req.getOutFlowNo(), "outFlowNo");
+
+        FissionGroup group = requireRunningGroup(req.getGroupId());
+
+        // ① 幂等前置查，必须先于定位关系：确权成功后关系已进 DONE 并释放 active_flag，
+        // 此时 selectActive 查不到它 —— 先定位再判幂等的话，重复确权拿到的是「关系不存在」
+        // 而非幂等命中。对上游而言那是一个会触发告警的错误，而它本该静默成功
+        if (opRecordMapper.selectOpNoByIdempotentKey(req.getOutFlowNo()) != null) {
+            // 回查用 selectLatest（不看 active_flag）：确权成功的那条关系已释放唯一键
+            FissionRelation done =
+                    relationMapper.selectLatest(req.getGroupId(), req.getFollowerId());
+            log.info("followerDone idempotent hit, outFlowNo={}", req.getOutFlowNo());
+            return done == null ? null : done.getRelationId();
+        }
+
+        // ② 关系预处理：定位唯一进行中关系，校验 JOINED
+        FissionRelation relation =
+                relationMapper.selectActive(req.getGroupId(), req.getFollowerId());
+        if (relation == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "关系不存在: " + req.getFollowerId());
+        }
+        if (!RelationStatus.JOINED.name().equals(relation.getStatus())) {
+            throw new BizException(
+                    ErrorCode.RELATION_NOT_JOINED, "关系非 JOINED: " + relation.getStatus());
+        }
+
+        // 两把发奖键同源派生自 outFlowNo，重试可重算（技术方案 §5.1）
+        String followerGrantNo = IdempotentKeys.followerGrantNo(req.getOutFlowNo());
+        String sponsorFlowNo = IdempotentKeys.sponsorFlowNo(req.getOutFlowNo());
+
+        // ③ 任务前置：op=PROCESSING + granting_until + 查单任务，同事务。
+        // 此后任何时刻宕机，任务都在 —— 这是收敛率 100% 的基础
+        boolean accepted =
+                tx.prepareDone(
+                        relation.getRelationId(),
+                        req.getGroupId(),
+                        group.getActivityId(),
+                        req.getFollowerId(),
+                        req.getOutBizNo(),
+                        req.getOutFlowNo(),
+                        followerGrantNo,
+                        GRANTING_WINDOW_SECONDS);
+        if (!accepted) {
+            // 前置查与本次插入之间的并发窗口：另一线程已插入同一 outFlowNo。
+            // 前置查挡的是「重传」，这里挡的是「并发」—— 后者才是真正的兜底（唯一索引）
+            log.info("followerDone concurrent idempotent hit, outFlowNo={}", req.getOutFlowNo());
+            return relation.getRelationId();
+        }
+
+        // ④ 徒弟发奖：调公共能力层
+        RetStatus result = grantToFollower(group, relation, req, followerGrantNo);
+
+        switch (result) {
+            case SUCCESS -> {
+                // ⑤ 关系后处理：四写同事务
+                boolean settled =
+                        tx.settleDone(
+                                relation.getRelationId(),
+                                req.getGroupId(),
+                                req.getOutBizNo(),
+                                req.getOutFlowNo(),
+                                followerGrantNo,
+                                sponsorFlowNo);
+                log.info(
+                        "followerDone settled, relationId={}, settled={}",
+                        relation.getRelationId(),
+                        settled);
+            }
+            case FAIL -> {
+                // 确定失败：关系保持 JOINED，可人工或重试重入
+                tx.markDoneFailed(relation.getRelationId(), req.getOutFlowNo());
+                log.warn("followerDone grant FAILED, relationId={}", relation.getRelationId());
+            }
+            default -> {
+                // UNKNOWN / PROCESSING：不推进关系，保留查单任务由收敛处置。
+                // 判 FAIL 会让一笔可能已发放的奖被当成没发，补发即重复发放
+                tx.markDoneUnresolved(req.getOutFlowNo(), result);
+                log.info(
+                        "followerDone unresolved, keep QUERY_GRANT, relationId={}, result={}",
+                        relation.getRelationId(),
+                        result);
+            }
+        }
+        return relation.getRelationId();
+    }
+
+    /**
+     * 徒弟发奖，调 {@code reward.grantReward}。
+     *
+     * <p><b>这是 §1.2 论断的验收点</b>：裂变能否原样调用为权益售卖设计的接口。六个字段的取值见 《分阶段方案》§6.3 的填表结论；三个对裂变无语义的字段由 {@link
+     * RewardItemFactory} 填约定值。
+     */
+    private RetStatus grantToFollower(
+            FissionGroup group,
+            FissionRelation relation,
+            FollowerDoneReq req,
+            String followerGrantNo) {
+        GrantRewardReq grantReq = new GrantRewardReq();
+        grantReq.setPlayType("FISSION");
+        grantReq.setActivityId(group.getActivityId());
+        // bizOrderNo 取 relationId 而非 groupId：一个组下 N 条关系各自发奖，取 groupId 会让
+        // uk_biz_op 把同组第二个徒弟的发奖当成重复操作挡下
+        grantReq.setBizOrderNo(relation.getRelationId());
+        grantReq.setOpNo(followerGrantNo);
+        grantReq.setReceiverId(req.getFollowerId());
+        grantReq.setRewardItems(
+                RewardItemFactory.of(FOLLOWER_REWARD_TYPE, List.of(FOLLOWER_REWARD_CONFIG_ID)));
+
+        try {
+            return rewardService.grantReward(grantReq).getRetStatus();
+        } catch (Exception e) {
+            // 异常映射 UNKNOWN 而非 FAIL：异常可能发生在 RPC 发出之后，下游未必没执行
+            log.warn("grantReward threw, treat as UNKNOWN, opNo={}", followerGrantNo, e);
+            return RetStatus.UNKNOWN;
+        }
     }
 
     // ------------------------------------------------------------------
