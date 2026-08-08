@@ -2,6 +2,8 @@ package com.mp.api.fission.service;
 
 import com.mp.api.fission.dto.FollowerDoneReq;
 import com.mp.api.fission.dto.FollowerJoinReq;
+import com.mp.api.fission.dto.FriendFilterResp;
+import com.mp.api.fission.dto.GetFriendsReq;
 import com.mp.api.fission.dto.GroupQueryResp;
 import com.mp.api.fission.dto.ShareInviteReq;
 import com.mp.api.fission.dto.ShareInviteResp;
@@ -43,9 +45,24 @@ public interface FissionService {
     GroupQueryResp queryGroup(String activityId, String sponsorId, boolean includeHistory);
 
     /**
+     * 拉可分享好友（FR-F03），召回过程中回调过滤（FR-F04）。
+     *
+     * <p><b>只读，无任何副作用</b>。返回四部分：通过集合、按原因归类的拒绝集合、生效配置版本、 本次降级规则清单。
+     *
+     * <p>召回不可用抛 {@code 5603}，<b>不降级为空列表</b> —— 空列表与「这个人没有好友」不可区分， 端上会显示一个看起来正常的空页面而故障无人察觉。这与过滤器的
+     * fail-open 不是同一类判断： 召回失败时手上没有任何可放行的对象。
+     *
+     * <p>日志默认只记数量与原因分布，不打印完整用户列表（FR-F04 的日志要求）。
+     */
+    FriendFilterResp getFriends(GetFriendsReq req);
+
+    /**
      * 分享：为每个被分享对象创建 {@code INVITED} 关系（FR-F05 能力一）。
      *
      * <p>重复分享不重复创建（BR-F-11）—— 由 {@code uk_group_follower_active} 保证，撞键即视为 已邀请过，不作为错误。
+     *
+     * <p><b>被分享对象须通过过滤</b>（BR-F-12，{@code 1611}）。分享侧独立校验一次，不信任 {@code getFriends}
+     * 的结果：两次调用之间对方可能已注销、已被拉黑，或客户端根本没调过 {@code getFriends} 而直接构造了一批 id —— 而分享是写路径，把关只在读路径上做等于没做。
      */
     ShareInviteResp shareInvite(ShareInviteReq req);
 

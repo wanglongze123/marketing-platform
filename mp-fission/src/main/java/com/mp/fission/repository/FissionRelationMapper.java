@@ -159,6 +159,52 @@ public interface FissionRelationMapper extends BaseMapper<FissionRelation> {
             @Param("limit") int limit);
 
     /**
+     * 好友过滤的关系下推（§7.1 的优化对象、BR-F-10）。
+     *
+     * <p><b>整页一次 {@code IN} 查询，替代「页内逐用户各查一次」</b>。收益是两笔账：
+     *
+     * <ul>
+     *   <li>批量化把 SQL 次数从 {@code page × N} 降到 {@code page × 1}（N 为每页人数，≈200）
+     *   <li>下推 + 正确索引把单次扫描行数从 O(师傅全量关系 R) 降到 O(命中数 h)
+     * </ul>
+     *
+     * <p><b>索引必须是 {@code idx_group_follower_status (group_id, follower_id, status)}</b>。若走 {@code
+     * (group_id, status)}，{@code follower_id} 只能在回表后逐行过滤，扫描行数仍等于该师傅当前 轮次的全部进行中关系（千级）—— 下推就没有意义。换索引后
+     * {@code IN} 列表转为 N 次 index seek， 扫描行数等于命中行数。
+     *
+     * <p><b>只返回 {@code follower_id} 而非整行</b>：过滤只需要「这个人有没有进行中关系」这一个 布尔值。取整行会让覆盖索引失效（{@code status}
+     * 之外的列要回表），把刚省下的扫描成本还回去。
+     *
+     * <p>{@code IN} 列表长度受候选页大小约束（N ≤ 200），不会退化为大 {@code IN}。
+     */
+    @Select({
+        "<script>",
+        "SELECT follower_id FROM fission_relation",
+        " WHERE group_id = #{groupId}",
+        " AND follower_id IN <foreach item='id' collection='followerIds' open='(' separator=','"
+                + " close=')'>#{id}</foreach>",
+        " AND status IN ('INVITED', 'CONNECTED', 'JOINED')",
+        "</script>"
+    })
+    List<String> selectActiveFollowerIdsIn(
+            @Param("groupId") String groupId, @Param("followerIds") List<String> followerIds);
+
+    /**
+     * 单个用户是否有进行中关系。<b>基线实现专用，主链路不调用</b>。
+     *
+     * <p>它就是 §7.1 记的病根形态 —— 候选页内逐用户各查一次。保留它是因为退出标准第 2 条要 before/after
+     * 三组对照数据，而<b>「基线」若只靠口算或引用文档公式，那不是实测</b>。
+     *
+     * <p><b>不额外劣化</b>：这条 SQL 与下推版走同一张表、同一批谓词，差别只在「一次问一个人」 还是「一次问一页人」。基线写成一个刻意很慢的实现，对照数据就没有意义了。
+     */
+    @Select(
+            "SELECT COUNT(*) FROM fission_relation"
+                    + " WHERE group_id = #{groupId} AND follower_id = #{followerId}"
+                    + " AND status IN ('INVITED', 'CONNECTED', 'JOINED')")
+    int countActiveRelation(
+            @Param("groupId") String groupId, @Param("followerId") String followerId);
+
+    /**
      * 过期治理的批量语句（FR-F09）：分片 + 排除在途 + 释放唯一性，<b>三者缺一不可</b>。
      *
      * <p><b>释放 {@code active_flag} 是这条语句里最容易漏的一半</b>：只置 {@code status='EXPIRED'} 的话，该行 仍占着 {@code
