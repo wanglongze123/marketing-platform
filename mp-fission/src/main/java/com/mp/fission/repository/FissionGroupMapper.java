@@ -105,4 +105,29 @@ public interface FissionGroupMapper extends BaseMapper<FissionGroup> {
             @Param("groupId") String groupId,
             @Param("fromStatus") String fromStatus,
             @Param("toStatus") String toStatus);
+
+    /**
+     * 轮次过期治理的批量语句，与 {@code fission_relation.expireBatch} 同构。
+     *
+     * <p><b>轮次治理与关系治理必须一起做，不能只做后者</b>（《分阶段方案》§6.6 的连带结论）：已过期 但未被治理的轮次仍占着 {@code
+     * uk_activity_sponsor_active}，而 {@code openGroup} 的判据取 {@code selectActive}（只认 {@code
+     * active_flag}）—— 于是该师傅在该活动下<b>永远开不了下一轮</b>， 且报的是业务提示「已存在未终结的轮次」，看起来像正常拒绝。
+     *
+     * <p><b>没有 {@code granting_until} 那一维</b>：发奖在途豁免是关系维度的概念（一条关系对应一次 双向发奖），轮次不直接参与发奖。轮次到期即可终结 ——
+     * 其下若有发奖在途的关系，那条关系 自身被 {@code granting_until} 豁免，不受轮次终结影响；关系的四写也不读轮次状态，只 {@code
+     * incrementProgress} 带 {@code status='RUNNING'} 谓词，轮次已终结时进度不再累加，而那正是 正确的：过期轮次的进度没有意义。
+     *
+     * <p>分片区间与 {@code LIMIT} 循环的理由同关系表，不再重复。
+     */
+    @Update(
+            "UPDATE fission_group SET status = 'EXPIRED', active_flag = group_id"
+                    + " WHERE status = 'RUNNING' AND expire_time < NOW(3)"
+                    + " AND id BETWEEN #{fromId} AND #{toId}"
+                    + " LIMIT #{limit}")
+    int expireBatch(
+            @Param("fromId") long fromId, @Param("toId") long toId, @Param("limit") int limit);
+
+    /** 全表 {@code id} 边界，供分片区间计算。空表时两字段均为 {@code null}。 */
+    @Select("SELECT MIN(id) AS minId, MAX(id) AS maxId FROM fission_group")
+    FissionRelationMapper.IdRange selectIdRange();
 }
