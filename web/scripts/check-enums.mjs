@@ -28,6 +28,13 @@ const MAPPING = {
   RetStatus: 'RET_STATUS',
   OpStatus: 'OP_STATUS',
   OpType: 'OP_TYPE',
+  ActivityStatus: 'ACTIVITY_STATUS',
+  TaskStatus: 'TASK_STATUS',
+  TaskType: 'TASK_TYPE',
+  RelationStatus: 'RELATION_STATUS',
+  StockStatus: 'STOCK_STATUS',
+  QuotaStatus: 'QUOTA_STATUS',
+  QualifyReason: 'QUALIFY_REASON',
 }
 
 /** 从 Java 源码抽枚举常量。去注释后取 enum 体内的大写标识符 */

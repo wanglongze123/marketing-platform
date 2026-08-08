@@ -185,8 +185,8 @@ class ShapeFreezeTest {
     void txServicesUseSchemaBoundAnnotationsInsteadOfBareTransactional() {
         try (Stream<Path> files = Files.walk(REPO)) {
             List<Path> txServices =
-                    files.filter(p -> p.toString().contains("/src/main/java/"))
-                            .filter(p -> !p.toString().contains("/target/"))
+                    files.filter(ShapeFreezeTest::underSrcMainJava)
+                            .filter(p -> !contains(p, "target"))
                             .filter(p -> p.getFileName().toString().endsWith("TxService.java"))
                             .toList();
             assertThat(txServices).as("至少应存在 OrderTxService").isNotEmpty();
@@ -446,9 +446,6 @@ class ShapeFreezeTest {
     @Test
     void noCatchAllMapsToFailure() {
         try (Stream<Path> files = Files.walk(REPO)) {
-            // 用 Path 元素比对而非字符串含 "/src/main/java/" —— Windows 上分隔符是 "\"，
-            // 字符串匹配恒为空集，assertThat(sources).isNotEmpty() 会在此处失败，
-            // 使这道闸在 Windows 开发机上根本没检查到任何文件
             List<Path> sources =
                     files.filter(p -> p.getFileName().toString().endsWith(".java"))
                             .filter(p -> underSrcMainJava(p) && !contains(p, "target"))
@@ -929,11 +926,12 @@ class ShapeFreezeTest {
         return source.replaceAll("\\s+", "");
     }
 
-    private static List<String> names(Class<? extends Enum<?>> type) {
-        return Arrays.stream(type.getEnumConstants()).map(Enum::name).toList();
-    }
-
-    /** 路径中是否含某个目录名。按 Path 元素比对，跨平台。 */
+    /**
+     * 路径中是否含某个目录名。
+     *
+     * <p>按 {@link Path} 元素比对而非字符串含 {@code "/target/"} —— Windows 的分隔符是 {@code
+     * "\"}，字符串匹配恒不命中。失效形态是<b>这道闸一个文件都没检查却显示通过</b>： 过滤后集合为空，遍历零次，断言自然不红。
+     */
     private static boolean contains(Path p, String dirName) {
         for (Path part : p) {
             if (part.toString().equals(dirName)) {
@@ -943,7 +941,7 @@ class ShapeFreezeTest {
         return false;
     }
 
-    /** 是否位于 {@code src/main/java} 之下。要求三段连续，避免误纳 src/test/java。 */
+    /** 是否位于 {@code src/main/java} 之下。要求三段连续，避免误纳 {@code src/test/java}。 */
     private static boolean underSrcMainJava(Path p) {
         for (int i = 0; i + 2 < p.getNameCount(); i++) {
             if (p.getName(i).toString().equals("src")
@@ -953,6 +951,10 @@ class ShapeFreezeTest {
             }
         }
         return false;
+    }
+
+    private static List<String> names(Class<? extends Enum<?>> type) {
+        return Arrays.stream(type.getEnumConstants()).map(Enum::name).toList();
     }
 
     private static String read(String relative) {

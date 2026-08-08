@@ -5,14 +5,19 @@
  * 相比旧版新增：只读端点的场景（列表分页、非法枚举、只读性）。
  */
 import {
+  closeOrder,
   createTrade,
   newClientReqNo,
   newNotifySeq,
   payCallback,
+  preConsult,
+  queryConvergence,
   queryOpRecords,
   queryOrder,
   queryOrders,
   querySku,
+  signPayNotify,
+  simulatePayNotify,
 } from '@/api/benefit'
 import { SEED_ACTIVITY_ID, SEED_SKU_ID } from '@/stores/session'
 import { ERROR_CODE } from '@/contracts/errorCode'
@@ -63,21 +68,40 @@ function expectRejected<T>(r: ApiResult<T>, code: number, what: string) {
   if (actual !== code) fail(`${what} 期望 code=${code}，实际 ${actual}`)
 }
 
-const trade = (userId: string, clientReqNo: string, quantity = 1) =>
-  createTrade({
+/** 取一张咨询凭证。下单必须携带，无凭证 4003 */
+async function consultToken(userId: string): Promise<string> {
+  const r = await preConsult({
     userId,
     activityId: SEED_ACTIVITY_ID,
     skuId: SEED_SKU_ID,
-    clientReqNo,
-    quantity,
   })
+  return expectOk(r, '预咨询').consultToken
+}
 
+/** 下单。默认自动取凭证；传 token 可复用或故意传错 */
+async function trade(
+  userId: string,
+  clientReqNo: string,
+  opts: { quantity?: number; token?: string; activityId?: string; skuId?: string } = {}
+) {
+  const token = opts.token ?? (await consultToken(userId))
+  return createTrade({
+    userId,
+    activityId: opts.activityId ?? SEED_ACTIVITY_ID,
+    skuId: opts.skuId ?? SEED_SKU_ID,
+    clientReqNo,
+    quantity: opts.quantity ?? 1,
+    consultToken: token,
+  })
+}
+
+/** 支付通知。先取签名再发 —— V2 起验签，无 sign 返回 4731 */
 const callback = (
   bizNo: string,
   amount: number,
   opts: { payStatus?: 'SUCCESS' | 'FAILED'; currency?: string } = {}
 ) =>
-  payCallback({
+  simulatePayNotify({
     outTradeNo: bizNo,
     tradeNo: `PAY_${bizNo}`,
     notifySeq: newNotifySeq(),
@@ -86,6 +110,23 @@ const callback = (
     currency: opts.currency ?? 'CNY',
     merchantId: 'M001',
   })
+
+/**
+ * 等发放线离开非终态。履约 V2 起异步，回调返回时 grantStatus 仍是 NOT_START，
+ * 断言「已发放」前必须等调度器跑完，否则每个成功场景都会假失败。
+ */
+async function awaitGrant(bizNo: string, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const o = expectOk(await queryOrder(bizNo), '查单')
+    if (o.grantStatus !== 'NOT_START' && o.grantStatus !== 'GRANTING') return o
+    if (o.payStatus !== 'PAY_SUCCESS') return o
+    if (Date.now() >= deadline) {
+      fail(`等待发放超时（${timeoutMs}ms），grantStatus 仍为 ${o.grantStatus}`)
+    }
+    await new Promise((r) => setTimeout(r, 800))
+  }
+}
 
 export const SCENARIOS: Scenario[] = [
   {
@@ -104,11 +145,23 @@ export const SCENARIOS: Scenario[] = [
         expectOk(await callback(created.bizNo, created.orderAmount), '支付回调')
       })
 
-      const order = await c.step(
-        '查单，期望 PAY_SUCCESS + GRANT_SUCCESS',
+      await c.step(
+        '回调刚返回时发放线仍为 NOT_START（履约已转异步）',
         async () => {
           const o = expectOk(await queryOrder(created.bizNo), '查单')
           c.assert(o.payStatus === 'PAY_SUCCESS', `payStatus=${o.payStatus}`)
+          c.assert(
+            o.grantStatus === 'NOT_START' || o.grantStatus === 'GRANTING',
+            `grantStatus=${o.grantStatus}（若已是终态说明履约仍是同步的）`
+          )
+        },
+        'V2 起支付回调只在同一事务内落 GRANT 任务，发放由调度器驱动'
+      )
+
+      const order = await c.step(
+        '等调度器跑完，期望 GRANT_SUCCESS',
+        async () => {
+          const o = await awaitGrant(created.bizNo)
           c.assert(o.grantStatus === 'GRANT_SUCCESS', `grantStatus=${o.grantStatus}`)
           return o
         }
@@ -128,6 +181,192 @@ export const SCENARIOS: Scenario[] = [
           c.assert(ff.every((f) => !!f.providerOrderNo), '存在未回填下游单号的明细')
         },
         '两项刻意分属不同供应方 —— 只有存在两组时分组逻辑才会被真实走到'
+      )
+    },
+  },
+
+  {
+    id: 'consultToken',
+    name: '咨询凭证',
+    desc: '无凭证下单被拒 4003；凭证成交价由服务端算定',
+    async run(c) {
+      await c.step(
+        '不带 consultToken 下单，期望 4003',
+        async () => {
+          const r = await createTrade({
+            userId: c.userId,
+            activityId: SEED_ACTIVITY_ID,
+            skuId: SEED_SKU_ID,
+            clientReqNo: newClientReqNo(),
+            quantity: 1,
+            consultToken: '',
+          })
+          expectRejected(r, ERROR_CODE.INVALID_TOKEN, '无凭证下单')
+        },
+        'V2 起下单必须先调 POST /consult 取凭证'
+      )
+
+      await c.step('凭证被篡改，期望 4003', async () => {
+        const good = await consultToken(c.userId)
+        // 改签名段的一个字符：验签必须失败
+        const tampered = good.slice(0, -1) + (good.endsWith('A') ? 'B' : 'A')
+        const r = await trade(c.userId, newClientReqNo(), { token: tampered })
+        expectRejected(r, ERROR_CODE.INVALID_TOKEN, '篡改凭证')
+      })
+
+      await c.step(
+        '凭证里的成交价与 SKU 售卖价一致',
+        async () => {
+          const t = expectOk(
+            await preConsult({
+              userId: c.userId,
+              activityId: SEED_ACTIVITY_ID,
+              skuId: SEED_SKU_ID,
+            }),
+            '预咨询'
+          )
+          const sku = expectOk(await querySku(SEED_SKU_ID), '商品详情')
+          c.assert(
+            t.dealPrice === sku.salePrice,
+            `dealPrice=${t.dealPrice} salePrice=${sku.salePrice}`
+          )
+          c.assert(t.expireAt > Date.now(), '凭证已过期')
+        },
+        '成交价由服务端算定并签进凭证，下单时重算比价，不等返回 1711'
+      )
+    },
+  },
+
+  {
+    id: 'paySignature',
+    name: '支付通知验签',
+    desc: '无签名回调被拒 4731；签名覆盖金额字段',
+    async run(c) {
+      const created = await c.step('下单', async () =>
+        expectOk(await trade(c.userId, newClientReqNo()), '下单')
+      )
+
+      await c.step(
+        '不带 sign 的回调，期望 4731',
+        async () => {
+          const r = await payCallback({
+            outTradeNo: created.bizNo,
+            tradeNo: `PAY_${created.bizNo}`,
+            notifySeq: newNotifySeq(),
+            payStatus: 'SUCCESS',
+            payAmount: created.orderAmount,
+            currency: 'CNY',
+            merchantId: 'M001',
+            sign: '',
+          })
+          expectRejected(r, ERROR_CODE.PAY_NOTIFY_SIGN_INVALID, '无签名回调')
+        },
+        '真实场景签名由支付方送来；本项目须先调 /api/fault/pay-notify/sign'
+      )
+
+      await c.step(
+        '拿 A 金额的签名去发 B 金额，期望 4731',
+        async () => {
+          const base = {
+            outTradeNo: created.bizNo,
+            tradeNo: `PAY_${created.bizNo}`,
+            notifySeq: newNotifySeq(),
+            payStatus: 'SUCCESS' as const,
+            payAmount: created.orderAmount,
+            currency: 'CNY',
+            merchantId: 'M001',
+          }
+          const signed = expectOk(await signPayNotify(base), '取签名')
+          // 金额改成 1 分但沿用原签名 —— 金额在签名字段内，必须被验出
+          const r = await payCallback({ ...base, payAmount: 1, sign: signed.sign })
+          expectRejected(r, ERROR_CODE.PAY_NOTIFY_SIGN_INVALID, '改金额后原签名')
+        },
+        '验签先于金额校验，故这里是 4731 而非 1731'
+      )
+
+      await c.step('状态未被这些失败请求推进', async () => {
+        const o = expectOk(await queryOrder(created.bizNo), '查单')
+        c.assert(o.payStatus === 'WAIT_PAY', `payStatus=${o.payStatus}`)
+      })
+    },
+  },
+
+  {
+    id: 'asyncGrant',
+    name: '履约异步化',
+    desc: '回调返回时未发放，由 GRANT 任务驱动',
+    async run(c) {
+      const created = await c.step('下单 + 回调 SUCCESS', async () => {
+        const d = expectOk(await trade(c.userId, newClientReqNo()), '下单')
+        expectOk(await callback(d.bizNo, d.orderAmount), '回调')
+        return d
+      })
+
+      await c.step(
+        '回调刚返回：已支付但未发放',
+        async () => {
+          const o = expectOk(await queryOrder(created.bizNo), '查单')
+          c.assert(o.payStatus === 'PAY_SUCCESS', `payStatus=${o.payStatus}`)
+          c.assert(
+            o.grantStatus === 'NOT_START' || o.grantStatus === 'GRANTING',
+            `grantStatus=${o.grantStatus}`
+          )
+        },
+        '支付回调只在同一事务内落任务，不在事务里发 RPC'
+      )
+
+      await c.step('收敛快照里存在 GRANT 任务', async () => {
+        const conv = expectOk(await queryConvergence(created.bizNo), '收敛快照')
+        c.assert(
+          conv.tasks.some((t) => t.taskType === 'GRANT'),
+          `任务类型：${conv.tasks.map((t) => t.taskType).join(',') || '（无）'}`
+        )
+      })
+
+      await c.step('等调度器执行，期望发放完成且任务终态', async () => {
+        const o = await awaitGrant(created.bizNo)
+        c.assert(o.grantStatus === 'GRANT_SUCCESS', `grantStatus=${o.grantStatus}`)
+        c.assert(o.fulfillments.length === 2, `履约 ${o.fulfillments.length} 条`)
+
+        const conv = expectOk(await queryConvergence(created.bizNo), '收敛快照')
+        const grant = conv.tasks.find((t) => t.taskType === 'GRANT')
+        c.assert(!!grant, '缺少 GRANT 任务')
+        c.assert(grant!.status === 'DONE', `GRANT 任务状态=${grant!.status}`)
+      })
+    },
+  },
+
+  {
+    id: 'closeOrder',
+    name: '关闭订单',
+    desc: '待支付可关；已支付拒绝关闭 1741',
+    async run(c) {
+      const toClose = await c.step('下单一笔待支付的单', async () =>
+        expectOk(await trade(c.userId, newClientReqNo()), '下单')
+      )
+      await c.step('关闭，期望受理', async () => {
+        expectOk(await closeOrder(toClose.bizNo), '关单')
+      })
+      await c.step('期望 payStatus 离开 WAIT_PAY', async () => {
+        const o = expectOk(await queryOrder(toClose.bizNo), '查单')
+        c.assert(
+          o.payStatus === 'CLOSED' || o.payStatus === 'CLOSING',
+          `payStatus=${o.payStatus}`
+        )
+      })
+
+      const paid = await c.step('另下一单并支付成功', async () => {
+        const d = expectOk(await trade(c.userId, newClientReqNo()), '下单')
+        expectOk(await callback(d.bizNo, d.orderAmount), '回调')
+        await awaitGrant(d.bizNo)
+        return d
+      })
+      await c.step(
+        '关闭已支付的单，期望 1741',
+        async () => {
+          expectRejected(await closeOrder(paid.bizNo), ERROR_CODE.ORDER_ALREADY_PAID, '关已支付单')
+        },
+        '已支付的单不得被关闭，否则钱收了而订单显示已关'
       )
     },
   },
@@ -166,8 +405,8 @@ export const SCENARIOS: Scenario[] = [
         return d
       })
 
-      const before = await c.step('记录首次结果', async () => {
-        const o = expectOk(await queryOrder(created.bizNo), '查单')
+      const before = await c.step('等发放完成，记录首次结果', async () => {
+        const o = await awaitGrant(created.bizNo)
         c.assert(o.grantStatus === 'GRANT_SUCCESS', `grantStatus=${o.grantStatus}`)
         return o
       })
@@ -183,6 +422,9 @@ export const SCENARIOS: Scenario[] = [
       await c.step(
         '期望状态与履约行数不变（未重复发放）',
         async () => {
+          // 给调度器留一轮时间：若重复回调错误地又落了一个 GRANT 任务，
+          // 立刻查会在它执行前，行数「不变」是假象
+          await new Promise((r) => setTimeout(r, 3000))
           const after = expectOk(await queryOrder(created.bizNo), '查单')
           c.assert(after.payStatus === before.payStatus, `payStatus 变了`)
           c.assert(after.grantStatus === before.grantStatus, `grantStatus 变了`)
@@ -261,14 +503,16 @@ export const SCENARIOS: Scenario[] = [
         )
       })
       await c.step(
-        '期望 PAY_FAILED + grantStatus 仍 NOT_START',
+        '等一轮调度后，期望 PAY_FAILED 且始终无履约',
         async () => {
+          // 等足一轮：履约异步后，「立刻查还没发放」不能证明「不会发放」
+          await new Promise((r) => setTimeout(r, 3000))
           const o = expectOk(await queryOrder(created.bizNo), '查单')
           c.assert(o.payStatus === 'PAY_FAILED', `payStatus=${o.payStatus}`)
           c.assert(o.grantStatus === 'NOT_START', `grantStatus=${o.grantStatus}`)
           c.assert(o.fulfillments.length === 0, '产生了履约记录')
         },
-        '仅推进到 PAY_SUCCESS 才触发履约'
+        '仅推进到 PAY_SUCCESS 才落 GRANT 任务'
       )
     },
   },
@@ -282,39 +526,51 @@ export const SCENARIOS: Scenario[] = [
         'quantity=3，期望 4001',
         async () => {
           expectRejected(
-            await trade(c.userId, newClientReqNo(), 3),
+            await trade(c.userId, newClientReqNo(), { quantity: 3 }),
             ERROR_CODE.INVALID_PARAM,
             'quantity=3'
           )
         },
         'V1 冻结 quantity=1，显式拒绝而非默默忽略 —— 否则付一份钱得一份权益且无报错'
       )
-      await c.step('活动不存在，期望 4001', async () => {
+      await c.step(
+        '活动不存在，预咨询阶段即 4001',
+        async () => {
+          expectRejected(
+            await preConsult({
+              userId: c.userId,
+              activityId: 'ACT_NOT_EXIST',
+              skuId: SEED_SKU_ID,
+            }),
+            ERROR_CODE.INVALID_PARAM,
+            '活动不存在'
+          )
+        },
+        'V2 起拒绝点前移到预咨询 —— 拿不到凭证就走不到下单'
+      )
+      await c.step('SKU 不存在，预咨询阶段即 4001', async () => {
         expectRejected(
-          await createTrade({
-            userId: c.userId,
-            activityId: 'ACT_NOT_EXIST',
-            skuId: SEED_SKU_ID,
-            clientReqNo: newClientReqNo(),
-            quantity: 1,
-          }),
-          ERROR_CODE.INVALID_PARAM,
-          '活动不存在'
-        )
-      })
-      await c.step('SKU 不存在，期望 4001', async () => {
-        expectRejected(
-          await createTrade({
+          await preConsult({
             userId: c.userId,
             activityId: SEED_ACTIVITY_ID,
             skuId: 'SKU_NOT_EXIST',
-            clientReqNo: newClientReqNo(),
-            quantity: 1,
           }),
           ERROR_CODE.INVALID_PARAM,
           'SKU 不存在'
         )
       })
+      await c.step(
+        '凭证与请求不一致（换 activityId），期望 4003',
+        async () => {
+          const token = await consultToken(c.userId)
+          const r = await trade(c.userId, newClientReqNo(), {
+            token,
+            activityId: 'ACT_NOT_EXIST',
+          })
+          expectRejected(r, ERROR_CODE.INVALID_TOKEN, '凭证与请求不符')
+        },
+        '凭证里签了 activityId/skuId/成交价，下单时逐字段比对'
+      )
       await c.step('查不存在的订单，期望 4001', async () => {
         expectRejected(
           await queryOrder(`BZ_NOT_EXIST_${Date.now()}`),
@@ -409,8 +665,8 @@ export const SCENARIOS: Scenario[] = [
         return d
       })
 
-      const before = await c.step('记录基线', async () => {
-        const o = expectOk(await queryOrder(created.bizNo), '查单')
+      const before = await c.step('等发放完成，记录基线', async () => {
+        const o = await awaitGrant(created.bizNo)
         const ops = expectOk(await queryOpRecords(created.bizNo), '操作记录')
         c.assert(o.fulfillments.length === 2, `履约 ${o.fulfillments.length} 条`)
         c.assert(ops.length >= 3, `操作记录 ${ops.length} 条`)
@@ -442,9 +698,10 @@ export const SCENARIOS: Scenario[] = [
     name: '操作记录分列',
     desc: '本地执行态与下游四分类分列返回，不合并',
     async run(c) {
-      const created = await c.step('下单 + 回调', async () => {
+      const created = await c.step('下单 + 回调 + 等发放', async () => {
         const d = expectOk(await trade(c.userId, newClientReqNo()), '下单')
         expectOk(await callback(d.bizNo, d.orderAmount), '回调')
+        await awaitGrant(d.bizNo)
         return d
       })
       await c.step(

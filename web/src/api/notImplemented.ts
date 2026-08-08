@@ -64,26 +64,12 @@ export const PENDING: Record<string, PendingCapability> = {
     phase: 'unplanned',
     why: '人群/城市/渠道/风控多维判定，返回标准原因码。只读无副作用，是运营配好活动后的自检入口。',
   },
-  preConsult: {
-    key: 'preConsult',
-    name: '预咨询与试算',
-    endpoint: 'POST /api/benefit/pre-consult',
-    phase: 'V2',
-    why: '签发咨询凭证、试算价格与库存限购。缺它时收银台只能直接下单，无法先给用户看「能不能买、多少钱」。',
-  },
-  closeOrder: {
-    key: 'closeOrder',
-    name: '订单关闭',
-    endpoint: 'POST /api/benefit/order/{bizNo}/close',
-    phase: 'V2',
-    why: '支付超时关单，依赖可靠任务表。缺它时 WAIT_PAY 的单会一直停在待支付。',
-  },
   taskBoard: {
     key: 'taskBoard',
-    name: '可靠任务看板',
+    name: '全局任务看板',
     endpoint: 'GET /api/ops/tasks',
-    phase: 'V2',
-    why: '租约、重试次数、故障接管情况。benefit_task 表 V2 才建。',
+    phase: 'unplanned',
+    why: '按单查任务已可用（GET /convergence/{bizNo}，见订单详情页），但没有「列出全部待执行/死信任务」的接口。运维要主动发现 DEAD 任务只能查库。',
   },
   refund: {
     key: 'refund',
@@ -101,10 +87,10 @@ export const PENDING: Record<string, PendingCapability> = {
   },
   fission: {
     key: 'fission',
-    name: '裂变玩法全链路',
-    endpoint: '13 个接口，见《PRD》第 6 章',
+    name: '裂变玩法的 HTTP 端点',
+    endpoint: '见《PRD》第 6 章',
     phase: 'V3',
-    why: 'mp-fission 与 mp-api-fission 目前只有 pom.xml，模块是空的。关系状态机、好友过滤、双向发奖全部未实现。',
+    why: '后端已实现师傅进场、关系状态机、分享建联与徒弟加入（mp-fission 有 Dubbo 服务与四张表），但 gateway 尚未暴露对应的 HTTP 端点，前端无从调用。',
   },
   reconcile: {
     key: 'reconcile',

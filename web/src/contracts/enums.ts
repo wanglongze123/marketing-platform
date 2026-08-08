@@ -83,6 +83,75 @@ export const OP_TYPE = [
 ] as const
 export type OpType = (typeof OP_TYPE)[number]
 
-/** 玩法类型。裂变后端尚未实现（mp-fission 目前只有 pom.xml） */
+/** 玩法类型 */
 export const PLAY_TYPE = ['BENEFIT_SELL', 'FISSION'] as const
 export type PlayType = (typeof PLAY_TYPE)[number]
+
+// ------------------------------------------------------------------
+// V2 / V3 后端引入的枚举
+// ------------------------------------------------------------------
+
+/** 活动状态机。对应 ActivityStatus.java */
+export const ACTIVITY_STATUS = [
+  'DRAFT',
+  'SCHEDULED',
+  'ONLINE',
+  'PAUSED',
+  'ENDED',
+] as const
+export type ActivityStatus = (typeof ACTIVITY_STATUS)[number]
+
+/** 可靠任务执行态。对应 TaskStatus.java —— DEAD 是死信，需人工介入 */
+export const TASK_STATUS = ['PENDING', 'DOING', 'DONE', 'DEAD'] as const
+export type TaskStatus = (typeof TASK_STATUS)[number]
+
+/** 任务类型。对应 TaskType.java。QUERY_* 是查单收敛任务，与主任务成对 */
+export const TASK_TYPE = [
+  'GRANT',
+  'QUERY_GRANT',
+  'CLOSE_ORDER',
+  'QUERY_CLOSE',
+  'STOCK_CONSUME',
+  'STOCK_RELEASE',
+  'QUOTA_RELEASE',
+  'REFUND',
+  'QUERY_REFUND',
+  'REVOKE',
+] as const
+export type TaskType = (typeof TASK_TYPE)[number]
+
+/** 裂变关系状态机。对应 RelationStatus.java */
+export const RELATION_STATUS = [
+  'INVITED',
+  'CONNECTED',
+  'JOINED',
+  'DONE',
+  'EXPIRED',
+  'CANCEL',
+] as const
+export type RelationStatus = (typeof RELATION_STATUS)[number]
+
+/** 库存占用态。对应 StockStatus.java */
+export const STOCK_STATUS = ['NONE', 'LOCKED', 'CONSUMED', 'RELEASED'] as const
+export type StockStatus = (typeof STOCK_STATUS)[number]
+
+/** 限购额度占用态。对应 QuotaStatus.java —— 无 CONSUMED，额度不随发放消耗 */
+export const QUOTA_STATUS = ['NONE', 'LOCKED', 'RELEASED'] as const
+export type QuotaStatus = (typeof QUOTA_STATUS)[number]
+
+/**
+ * 资格决策原因码。对应 QualifyReason.java。
+ *
+ * CONTEXT_UNAVAILABLE 与其余不同：它是<b>系统故障</b>（映射 5201）而非「不符合条件」，
+ * 前端不得当作「你没资格」展示 —— 展示与重试策略完全不同。
+ */
+export const QUALIFY_REASON = [
+  'PASS',
+  'ACTIVITY_UNAVAILABLE',
+  'CITY_NOT_MATCH',
+  'CHANNEL_NOT_MATCH',
+  'CROWD_NOT_MATCH',
+  'RISK_REJECTED',
+  'CONTEXT_UNAVAILABLE',
+] as const
+export type QualifyReason = (typeof QUALIFY_REASON)[number]

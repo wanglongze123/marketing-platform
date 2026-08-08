@@ -16,6 +16,7 @@ import type {
   OpStatus,
   PayStatus,
   RefundStatus,
+  TaskStatus,
 } from './enums'
 import type { QueryOrderResp, OrderListItem } from './dto'
 
@@ -68,6 +69,33 @@ export const OP_STATUS_DISPLAY: Record<OpStatus, Display> = {
   SUCCESS: { label: '成功', tone: 'ok' },
   FAILED: { label: '失败', tone: 'error' },
   UNKNOWN: { label: '结果未知', tone: 'unknown' },
+}
+
+/**
+ * 可靠任务执行态。
+ *
+ * DEAD 是死信：重试次数耗尽仍未成功，须人工介入。它不等于「业务失败」——
+ * 任务死了而业务可能已在下游成功，故 tone 用 error 但文案不说「失败」。
+ */
+export const TASK_STATUS_DISPLAY: Record<TaskStatus, Display> = {
+  PENDING: { label: '待执行', tone: 'idle' },
+  DOING: { label: '执行中', tone: 'wait' },
+  DONE: { label: '已完成', tone: 'ok' },
+  DEAD: { label: '死信待人工', tone: 'error' },
+}
+
+/** 任务类型的中文名 */
+export const TASK_TYPE_LABEL: Record<string, string> = {
+  GRANT: '权益发放',
+  QUERY_GRANT: '发放查单收敛',
+  CLOSE_ORDER: '关闭订单',
+  QUERY_CLOSE: '关单查单收敛',
+  STOCK_CONSUME: '库存核销',
+  STOCK_RELEASE: '库存释放',
+  QUOTA_RELEASE: '额度释放',
+  REFUND: '退款',
+  QUERY_REFUND: '退款查单收敛',
+  REVOKE: '权益回收',
 }
 
 /** 操作类型的中文名，用于操作记录时间线 */

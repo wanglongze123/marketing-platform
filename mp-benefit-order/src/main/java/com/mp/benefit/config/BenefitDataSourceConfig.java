@@ -1,6 +1,7 @@
 package com.mp.benefit.config;
 
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
 import com.baomidou.mybatisplus.spring.MybatisSqlSessionFactoryBean;
 import com.zaxxer.hikari.HikariDataSource;
 import javax.sql.DataSource;
@@ -54,7 +55,9 @@ public class BenefitDataSourceConfig {
     @Bean
     @DependsOn("benefitFlyway")
     SqlSessionFactory benefitSqlSessionFactory(
-            @Qualifier("benefitDataSource") DataSource dataSource) throws Exception {
+            @Qualifier("benefitDataSource") DataSource dataSource,
+            MybatisPlusInterceptor interceptor)
+            throws Exception {
         MybatisConfiguration configuration = new MybatisConfiguration();
         configuration.setMapUnderscoreToCamelCase(true);
 
@@ -62,6 +65,10 @@ public class BenefitDataSourceConfig {
         factory.setDataSource(dataSource);
         factory.setConfiguration(configuration);
         factory.setTypeAliasesPackage("com.mp.benefit.entity");
+        // 拦截器必须显式挂到本工厂上。自建 SqlSessionFactory 不经 starter 的自动装配，
+        // 容器里有 MybatisPlusInterceptor 这个 bean 也不会被用上 ——
+        // 表现是 selectPage 不报错却不分页：SQL 无 LIMIT、返回全表、getTotal() 恒 0
+        factory.setPlugins(interceptor);
         return factory.getObject();
     }
 

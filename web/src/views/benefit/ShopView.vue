@@ -13,9 +13,10 @@ import {
   createTrade,
   newClientReqNo,
   newNotifySeq,
-  payCallback,
+  preConsult,
   queryOrder,
   querySku,
+  simulatePayNotify,
 } from '@/api/benefit'
 import { SEED_ACTIVITY_ID, SEED_SKU_ID, useSessionStore } from '@/stores/session'
 import { remember } from '@/stores/orderTracker'
@@ -23,7 +24,6 @@ import { deriveDisplayState, toYuan } from '@/contracts/display'
 import { ERROR_CODE_TEXT } from '@/contracts/errorCode'
 import type { QueryOrderResp, QuerySkuResp } from '@/contracts/dto'
 import FulfillmentTable from '@/components/FulfillmentTable.vue'
-import PendingNotice from '@/components/PendingNotice.vue'
 
 const router = useRouter()
 const session = useSessionStore()
@@ -61,10 +61,17 @@ const itemMeta = (id: string) => ITEM_META[id] ?? { name: id, icon: '🎁' }
 type Stage = 'closed' | 'confirm' | 'processing' | 'result'
 const stage = ref<Stage>('closed')
 const busy = ref(false)
+const processingText = ref('支付结果处理中…')
+
+/** 等待异步履约的上限与轮询间隔。超时不判失败，只是停止等待 */
+const GRANT_WAIT_MS = 15_000
+const GRANT_POLL_MS = 1_000
 
 const bizNo = ref('')
 const tradeNo = ref<string | null>(null)
 const amount = ref(0)
+/** 凭证里的成交价，应付以它为准 */
+const dealPrice = ref(0)
 const order = ref<QueryOrderResp | null>(null)
 /** 非 ok 结果的提示。区分「确定失败」与「结果未知」 */
 const notice = ref<{ tone: 'error' | 'unknown'; text: string } | null>(null)
@@ -74,6 +81,28 @@ async function startBuy() {
   busy.value = true
   notice.value = null
 
+  // 第一步：预咨询。V2 起下单必须携带凭证，无凭证一律 4003。
+  // 凭证里签了成交价与包版本，下单时服务端逐字段比对并重算比价
+  const consult = await preConsult({
+    userId: session.userId,
+    activityId: sku.value.activityId || SEED_ACTIVITY_ID,
+    skuId: sku.value.skuId,
+  })
+  if (consult.kind !== 'ok') {
+    busy.value = false
+    notice.value = {
+      tone: consult.kind === 'unknown' ? 'unknown' : 'error',
+      text: ERROR_CODE_TEXT[consult.code] ?? consult.message,
+    }
+    stage.value = 'result'
+    order.value = null
+    return
+  }
+  // 应付以凭证里的成交价为准，不用页面上展示的售卖价 ——
+  // 两者不一致时下单会被比价拒绝（1711），而页面价可能已是旧数据
+  dealPrice.value = consult.data.dealPrice
+
+  // 第二步：下单
   const r = await createTrade({
     userId: session.userId,
     activityId: sku.value.activityId || SEED_ACTIVITY_ID,
@@ -81,6 +110,7 @@ async function startBuy() {
     // 同一次购买意图只生成一次，重试才会命中幂等
     clientReqNo: newClientReqNo(),
     quantity: 1,
+    consultToken: consult.data.consultToken,
   })
   busy.value = false
 
@@ -112,9 +142,12 @@ async function payAndSettle(payStatus: 'SUCCESS' | 'FAILED') {
   if (busy.value) return
   busy.value = true
   stage.value = 'processing'
+  processingText.value =
+    payStatus === 'SUCCESS' ? '支付结果处理中…' : '正在回传支付失败结果…'
   notice.value = null
 
-  const cb = await payCallback({
+  // 签名 + 回调。V2 起 /pay-callback 验签，无 sign 返回 4731
+  const cb = await simulatePayNotify({
     outTradeNo: bizNo.value, // 按 bizNo 定位，不用 tradeNo
     tradeNo: tradeNo.value ?? `PAY_${bizNo.value}`,
     notifySeq: newNotifySeq(),
@@ -138,12 +171,40 @@ async function payAndSettle(payStatus: 'SUCCESS' | 'FAILED') {
     }
   }
 
-  // 无论回调是哪一态，都回查一次订单 —— 状态以服务端为准
-  const q = await queryOrder(bizNo.value)
-  order.value = q.kind === 'ok' ? q.data : null
+  // 履约已转异步：回调返回时 grantStatus 仍是 NOT_START，由调度器驱动发放。
+  // 立刻展示会让用户看到「支付成功但什么都没拿到」，故轮询等发放线走完
+  const settled = await waitForGrant(bizNo.value)
+  order.value = settled
   busy.value = false
   stage.value = 'result'
 }
+
+/**
+ * 轮询直到发放线离开非终态，或超时。
+ *
+ * 超时不算失败 —— 返回最后一次查到的订单，由 deriveDisplayState 决定怎么说。
+ * 「还在发放中」与「发放失败」是两回事，前者不能显示成后者。
+ */
+async function waitForGrant(no: string): Promise<QueryOrderResp | null> {
+  const deadline = Date.now() + GRANT_WAIT_MS
+  let last: QueryOrderResp | null = null
+
+  for (;;) {
+    const q = await queryOrder(no)
+    if (q.kind === 'ok') {
+      last = q.data
+      const done =
+        last.grantStatus !== 'NOT_START' && last.grantStatus !== 'GRANTING'
+      // 支付没成功就不会有发放，无须再等
+      if (done || last.payStatus !== 'PAY_SUCCESS') return last
+    }
+    if (Date.now() >= deadline) return last
+    processingText.value = '支付成功，正在发放权益…'
+    await sleep(GRANT_POLL_MS)
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 const state = computed(() => (order.value ? deriveDisplayState(order.value) : null))
 
@@ -220,11 +281,10 @@ function gotoDetail() {
           <span class="muted tip">支付由 mock 支付方模拟，不产生真实扣款</span>
         </div>
 
-        <div class="preconsult">
-          <PendingNotice
-            capability="preConsult"
-            detail="收银台目前直接下单。有了预咨询后，这里会先展示试算价格、库存与限购判定结果。"
-          />
+        <div class="preconsult note">
+          点「立即购买」会先调 <code>POST /consult</code> 取咨询凭证（服务端算定成交价并签名），
+          再带凭证下单。支付通知须先取签名再发送 —— 无凭证返回 <code>4003</code>，无签名返回
+          <code>4731</code>。
         </div>
       </div>
     </div>
@@ -250,6 +310,13 @@ function gotoDetail() {
             <dd>{{ bizNo }}</dd>
             <dt>支付单号</dt>
             <dd>{{ tradeNo ?? '—' }}</dd>
+            <dt>凭证成交价</dt>
+            <dd>
+              ¥{{ toYuan(dealPrice) }}
+              <span v-if="dealPrice !== amount" class="mismatch">
+                与应付不一致，下单会被比价拒绝
+              </span>
+            </dd>
           </dl>
           <div class="method">
             <span class="ico">💳</span>
@@ -270,7 +337,11 @@ function gotoDetail() {
         <!-- 处理中 -->
         <div v-else-if="stage === 'processing'" class="modal-body">
           <div class="spinner" />
-          <p class="center muted">支付结果处理中，正在发放权益…</p>
+          <p class="center muted">{{ processingText }}</p>
+          <p class="center note" style="margin-top: 12px">
+            履约由调度器异步驱动 —— 支付回调返回时发放线还是
+            <code>NOT_START</code>，这里在等它走完。
+          </p>
         </div>
 
         <!-- 结果 -->
@@ -540,6 +611,11 @@ function gotoDetail() {
 }
 .small {
   font-size: 11.5px;
+}
+.mismatch {
+  color: var(--error);
+  font-size: 11px;
+  margin-left: 6px;
 }
 .actions {
   display: flex;

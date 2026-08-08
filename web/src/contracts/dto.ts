@@ -19,6 +19,32 @@ export interface ApiEnvelope<T> {
   traceId: string
 }
 
+/** 预咨询入参。只读，不占库存、不建单 */
+export interface PreConsultReq {
+  userId: string
+  activityId: string
+  skuId: string
+}
+
+/**
+ * 预咨询出参。
+ *
+ * <b>consultToken 是下单的前置条件</b>：V2 起 createTrade 必须携带，缺失或过期返回 4003。
+ * 凭证里签了成交价与包版本，下单时服务端逐字段比对并重算比价（不等返回 1711）。
+ */
+export interface PreConsultResp {
+  activityId: string
+  skuId: string
+  configVersion: number
+  /** 划线价，分 */
+  originPrice: number
+  /** 成交价，分。由服务端算定 */
+  dealPrice: number
+  consultToken: string
+  /** 凭证过期时间，epoch 毫秒 */
+  expireAt: number
+}
+
 /** 下单入参。clientReqNo 参与幂等键，重试时必须保持不变 */
 export interface CreateTradeReq {
   userId: string
@@ -27,6 +53,8 @@ export interface CreateTradeReq {
   clientReqNo: string
   /** V1 冻结为 1，传其他值后端返回 4001 */
   quantity: number
+  /** 咨询凭证，取自 preConsult。V2 起必填，缺失返回 4003 */
+  consultToken: string
 }
 
 export interface CreateTradeResp {
@@ -49,6 +77,13 @@ export interface PayCallbackReq {
   payAmount: number
   currency: string
   merchantId: string
+  /**
+   * 通知签名。V2 起必填，验签失败返回 4731。
+   *
+   * 真实场景由支付方算好随通知一起送来。本项目 mock 支付，前端模拟支付时须先调
+   * POST /api/fault/pay-notify/sign 取签名 —— 那是 mock 侧的「支付方私钥」所在。
+   */
+  sign: string
 }
 
 export interface PayCallbackResp {
@@ -149,6 +184,50 @@ export interface QuerySkuResp {
  * 两者刻意拼写不同（FAILED vs FAIL），合并展示会掩盖「本地记为失败、下游实际成功」。
  * 类型用 string 而非枚举：这是排查视图，需如实回显库里的值。
  */
+/**
+ * 收敛过程快照：操作记录 + 可靠任务的当前值。
+ *
+ * 验收对象是<b>状态迁移过程</b>而非终态 —— queryOrder 只给当前值，无法区分「正确收敛」
+ * 与「未发生故障」。任务每轮重试原地覆盖 nextTime / retryCount，故这是快照不是序列，
+ * 序列由观察者按固定间隔轮询累积。
+ */
+export interface ConvergenceResp {
+  bizNo: string
+  payStatus: string
+  grantStatus: string
+  refundStatus: string
+  opRecords: ConvergenceOpRecord[]
+  tasks: ConvergenceTask[]
+}
+
+export interface ConvergenceOpRecord {
+  opType: string
+  opSeq: string
+  /** 本地执行态 OpStatus */
+  status: string
+  /** 下游四分类 RetStatus。与 status 分列 —— 合并即无法区分 PROCESSING 与 UNKNOWN */
+  downstreamResult: string | null
+  retryCount: number | null
+}
+
+export interface ConvergenceTask {
+  taskType: string
+  opNo: string
+  /** TaskStatus：PENDING / DOING / DONE / DEAD */
+  status: string
+  retryCount: number | null
+  /** 下次执行时间，退避序列体现在这里 */
+  nextTime: string | null
+  leaseOwner: string | null
+  leaseExpire: string | null
+}
+
+/** 支付通知签名出参。mock 支付方代签，真实场景由支付方随通知送来 */
+export interface PayNotifySignResp {
+  sign: string
+  signedFields: Record<string, string>
+}
+
 export interface OpRecordItem {
   opNo: string
   opType: OpType | string

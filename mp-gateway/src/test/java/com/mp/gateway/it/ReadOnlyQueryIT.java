@@ -32,6 +32,9 @@ class ReadOnlyQueryIT extends AbstractMySqlIT {
 
     @Autowired private TestRestTemplate rest;
 
+    /** seed 给 SKU_DEMO_001 配的每人限购数（V2190__seed_stock.sql）。超出即 1713 */
+    private static final int PURCHASE_LIMIT = 2;
+
     // ------------------------------------------------------------------
     // 订单列表
     // ------------------------------------------------------------------
@@ -39,16 +42,21 @@ class ReadOnlyQueryIT extends AbstractMySqlIT {
     /** 按 userId 过滤，且分页真实生效（size 生效、total 为过滤后总数而非本页行数）。 */
     @Test
     void orderListFiltersByUserAndPaginates() {
+        // newTradeReq 按 tag 派生 userId 并据此签发凭证。要让多笔同属一个用户，
+        // 必须连 tag 一起固定、只改 clientReqNo —— 改 userId 会与凭证里签的值不符（4003）。
+        //
+        // 笔数取 SKU 的限购上限：V2 起同一用户超额下单直接被拒（1713），
+        // 造不出「一个用户很多单」的数据。分页仍验得到 —— size=1 即可制造多页
         String user = "U_roList";
-        for (int i = 1; i <= 3; i++) {
-            CreateTradeReq req = newTradeReq("roList" + i);
-            req.setUserId(user); // 同一用户三笔，clientReqNo 不同故不触发幂等
+        for (int i = 1; i <= PURCHASE_LIMIT; i++) {
+            CreateTradeReq req = newTradeReq("roList");
+            req.setClientReqNo("REQ_roList_" + i); // 请求号不同，故不触发幂等
             benefitOrderService.createTrade(req);
         }
 
         ResponseEntity<JsonNode> resp =
                 rest.getForEntity(
-                        "/api/benefit/orders?userId=" + user + "&page=1&size=2", JsonNode.class);
+                        "/api/benefit/orders?userId=" + user + "&page=1&size=1", JsonNode.class);
 
         assertThat(resp.getStatusCode().value()).isEqualTo(200);
         JsonNode body = resp.getBody();
@@ -56,12 +64,12 @@ class ReadOnlyQueryIT extends AbstractMySqlIT {
         assertThat(body.get("traceId").asText()).isNotBlank();
 
         JsonNode data = body.get("data");
-        // size=2 生效：未注册分页插件时此处会是 3
-        assertThat(data.get("items")).hasSize(2);
+        // size=1 生效：未注册分页插件时此处会是全部行
+        assertThat(data.get("items")).hasSize(1);
         // total 是过滤后总数，不受 size 限制
-        assertThat(data.get("total").asLong()).isEqualTo(3);
+        assertThat(data.get("total").asLong()).isEqualTo(PURCHASE_LIMIT);
         assertThat(data.get("page").asInt()).isEqualTo(1);
-        assertThat(data.get("size").asInt()).isEqualTo(2);
+        assertThat(data.get("size").asInt()).isEqualTo(1);
 
         // 列表行只含主单信息，不含履约明细
         JsonNode first = data.get("items").get(0);
@@ -70,10 +78,10 @@ class ReadOnlyQueryIT extends AbstractMySqlIT {
         assertThat(first.get("grantStatus").asText()).isEqualTo(GrantStatus.NOT_START.name());
         assertThat(first.get("orderAmount").asLong()).isEqualTo(SALE_PRICE);
 
-        // 第二页拿到剩下的一笔，且与第一页不重复
+        // 第二页拿到另一笔，且与第一页不重复 —— 重复即说明 OFFSET 没生效
         ResponseEntity<JsonNode> p2 =
                 rest.getForEntity(
-                        "/api/benefit/orders?userId=" + user + "&page=2&size=2", JsonNode.class);
+                        "/api/benefit/orders?userId=" + user + "&page=2&size=1", JsonNode.class);
         assertThat(p2.getBody().get("data").get("items")).hasSize(1);
         String p1First = first.get("bizNo").asText();
         String p2First = p2.getBody().get("data").get("items").get(0).get("bizNo").asText();
@@ -182,6 +190,8 @@ class ReadOnlyQueryIT extends AbstractMySqlIT {
         String bizNo = created.getBizNo();
         benefitOrderService.payCallback(
                 newPayCallback(bizNo, created.getTradeNo(), "NS_roOp", "SUCCESS"));
+        // 履约转异步：回调只落 GRANT 任务，须驱动一轮调度器才有发放的操作记录
+        runScheduler();
 
         JsonNode records =
                 rest.getForEntity("/api/benefit/order/" + bizNo + "/op-records", JsonNode.class)
@@ -229,6 +239,9 @@ class ReadOnlyQueryIT extends AbstractMySqlIT {
         String bizNo = created.getBizNo();
         benefitOrderService.payCallback(
                 newPayCallback(bizNo, created.getTradeNo(), "NS_roPure", "SUCCESS"));
+        // 先把履约跑完再取基线：在「发放中」取基线，后续的「不变」断言会被调度器的
+        // 正常推进弄红，看起来像只读接口有副作用
+        runScheduler();
 
         String payBefore = orderField("pay_status", bizNo);
         String grantBefore = orderField("grant_status", bizNo);

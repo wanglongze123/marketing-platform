@@ -9,16 +9,27 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { newNotifySeq, payCallback, queryOpRecords, queryOrder } from '@/api/benefit'
+import {
+  closeOrder,
+  newNotifySeq,
+  queryConvergence,
+  queryOpRecords,
+  queryOrder,
+  simulatePayNotify,
+} from '@/api/benefit'
 import {
   OP_STATUS_DISPLAY,
   OP_TYPE_LABEL,
+  TASK_STATUS_DISPLAY,
+  TASK_TYPE_LABEL,
   deriveDisplayState,
   formatTime,
   toYuan,
 } from '@/contracts/display'
 import { ERROR_CODE_TEXT } from '@/contracts/errorCode'
-import type { OpRecordItem, QueryOrderResp } from '@/contracts/dto'
+import type { ConvergenceResp, OpRecordItem, QueryOrderResp } from '@/contracts/dto'
+import { TASK_STATUS } from '@/contracts/enums'
+import type { TaskStatus } from '@/contracts/enums'
 import type { OpStatus } from '@/contracts/enums'
 import { OP_STATUS } from '@/contracts/enums'
 import FulfillmentTable from '@/components/FulfillmentTable.vue'
@@ -35,11 +46,17 @@ const loading = ref(true)
 const error = ref('')
 const notice = ref<{ tone: 'error' | 'unknown' | 'ok'; text: string } | null>(null)
 const paying = ref(false)
+const closing = ref(false)
+const convergence = ref<ConvergenceResp | null>(null)
 
 async function load() {
   loading.value = true
   error.value = ''
-  const [o, r] = await Promise.all([queryOrder(bizNo.value), queryOpRecords(bizNo.value)])
+  const [o, r, c] = await Promise.all([
+    queryOrder(bizNo.value),
+    queryOpRecords(bizNo.value),
+    queryConvergence(bizNo.value),
+  ])
   loading.value = false
 
   if (o.kind === 'ok') order.value = o.data
@@ -48,6 +65,7 @@ async function load() {
     error.value = o.message
   }
   records.value = r.kind === 'ok' ? r.data : []
+  convergence.value = c.kind === 'ok' ? c.data : null
 }
 
 onMounted(load)
@@ -72,12 +90,16 @@ const currentStep = computed(() => {
 const isKnownOpStatus = (s: string): s is OpStatus =>
   (OP_STATUS as readonly string[]).includes(s)
 
+const isKnownTaskStatus = (s: string): s is TaskStatus =>
+  (TASK_STATUS as readonly string[]).includes(s)
+
 async function simulatePay(payStatus: 'SUCCESS' | 'FAILED') {
   if (!order.value || paying.value) return
   paying.value = true
   notice.value = null
 
-  const cb = await payCallback({
+  // 先取签名再回调 —— V2 起 /pay-callback 验签，无 sign 返回 4731
+  const cb = await simulatePayNotify({
     outTradeNo: order.value.bizNo,
     tradeNo: order.value.tradeNo ?? `PAY_${order.value.bizNo}`,
     notifySeq: newNotifySeq(),
@@ -97,6 +119,28 @@ async function simulatePay(payStatus: 'SUCCESS' | 'FAILED') {
   }
 
   paying.value = false
+  await load()
+}
+
+/** 关闭订单。已支付返回 1741；结果未定进 CLOSING，须提示「处理中」而非「已关闭」 */
+async function doClose() {
+  if (!order.value || closing.value) return
+  closing.value = true
+  notice.value = null
+
+  const r = await closeOrder(order.value.bizNo)
+  if (r.kind === 'rejected') {
+    notice.value = { tone: 'error', text: ERROR_CODE_TEXT[r.code] ?? r.message }
+  } else if (r.kind === 'unknown') {
+    notice.value = {
+      tone: 'unknown',
+      text: `${r.message}。关单结果未确认，订单可能进入「关单中」，请刷新查看。`,
+    }
+  } else {
+    notice.value = { tone: 'ok', text: `关单已受理（${r.data.status}）` }
+  }
+
+  closing.value = false
   await load()
 }
 </script>
@@ -181,8 +225,15 @@ async function simulatePay(payStatus: 'SUCCESS' | 'FAILED') {
               模拟支付成功
             </button>
             <button :disabled="paying" @click="simulatePay('FAILED')">模拟支付失败</button>
+            <button
+              v-if="order.payStatus === 'WAIT_PAY'"
+              :disabled="closing"
+              @click="doClose"
+            >
+              关闭订单
+            </button>
             <span class="muted" style="font-size: 12px">
-              调用 POST /pay-callback，按 outTradeNo（= bizNo）定位主单
+              先取签名再发 POST /pay-callback —— V2 起验签，无 sign 返回 4731
             </span>
           </div>
         </div>
@@ -265,6 +316,56 @@ async function simulatePay(payStatus: 'SUCCESS' | 'FAILED') {
             <code>downstreamResult</code>（下游四分类 <code>RetStatus</code>，失败值
             <code>FAIL</code>）分列展示，刻意不合并 —— 合并会掩盖「本地记为失败、下游实际成功」
             这类差异，而那正是排查时要找的东西。
+          </p>
+        </div>
+      </div>
+
+      <!-- 可靠任务 -->
+      <div class="card" style="margin-top: 16px">
+        <div class="card-head">
+          可靠任务
+          <span class="sub">GET /convergence/{bizNo}</span>
+        </div>
+        <div class="card-body">
+          <div v-if="!convergence || !convergence.tasks.length" class="note">
+            暂无任务。V2 起履约由 <code>GRANT</code> 任务驱动 —— 支付成功后才会产生。
+          </div>
+          <div v-else class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>任务</th>
+                  <th>状态</th>
+                  <th>重试</th>
+                  <th>下次执行</th>
+                  <th>租约持有者</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in convergence.tasks" :key="t.opNo + t.taskType">
+                  <td>
+                    {{ TASK_TYPE_LABEL[t.taskType] ?? t.taskType }}
+                    <div class="sub-cell mono">{{ t.opNo }}</div>
+                  </td>
+                  <td>
+                    <StatusPill
+                      v-if="isKnownTaskStatus(t.status)"
+                      :display="TASK_STATUS_DISPLAY[t.status]"
+                      :raw="t.status"
+                    />
+                    <span v-else class="raw">{{ t.status }}</span>
+                  </td>
+                  <td class="mono">{{ t.retryCount ?? 0 }}</td>
+                  <td class="mono">{{ t.nextTime ?? '—' }}</td>
+                  <td class="mono">{{ t.leaseOwner ?? '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="note" style="margin-top: 13px">
+            履约<b>异步</b>：支付回调返回时发放线还是 <code>NOT_START</code>，由调度器抢占任务后推进。
+            重试按退避序列（短 1s→5s→30s，长 30s→2m→10m），耗尽仍未成功则转
+            <code>DEAD</code> 等人工介入 —— 死信不等于业务失败，下游可能已成功。
           </p>
         </div>
       </div>
@@ -406,6 +507,12 @@ async function simulatePay(payStatus: 'SUCCESS' | 'FAILED') {
 }
 .line2 {
   font-size: 11px;
+  color: var(--text-3);
+  margin-top: 2px;
+  word-break: break-all;
+}
+.sub-cell {
+  font-size: 10.5px;
   color: var(--text-3);
   margin-top: 2px;
   word-break: break-all;
