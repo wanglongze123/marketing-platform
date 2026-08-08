@@ -66,4 +66,21 @@ public interface RewardService {
      * 去重会把第二条真实通知当成重传丢弃。重复投递返回 {@code accepted=true} —— ACK 的语义是 「别再投了」，返回失败会让供应方一直重投。
      */
     ProviderCallbackResp providerCallback(ProviderCallbackReq req);
+
+    /**
+     * 批量按幂等号查发放结果，<b>专供对账拉取比对</b>（技术方案 §4.3、§6.8）。V3 PR-10 引入。
+     *
+     * <p><b>它存在的唯一理由是「禁止跨库 JOIN」</b>（§3.1）：对账要比对 {@code db_benefit} 的履约明细与 {@code db_reward}
+     * 的发放记录，而两库各用仅授权自身 schema 的账号，跨库 JOIN 在运行期直接 {@code access denied}。故比对方式是分批拉取 +
+     * 内存比对，本方法是那个「拉取」。
+     *
+     * <p><b>与 {@link #queryGrant} 的差别不只是批量</b>：那个是单笔查询，调用方拿它驱动一笔业务的收敛； 本方法是对账的数据源，返回的是「这批 {@code
+     * opNo} 在 reward 侧各是什么状态」，<b>查无的键不在结果里</b> —— 而「查无」正是对账第 3 项（发奖单下游无记录）要找的差异。
+     *
+     * <p>调用方须自行分批，单次入参不宜过大 —— 它会被拼进 {@code IN} 子句。
+     *
+     * @param opNos 发奖幂等号列表
+     * @return 各 {@code opNo} 的发放结果；<b>查无的键不出现在返回中</b>，调用方据此检出差异
+     */
+    java.util.Map<String, GrantRewardResp> batchQueryByOpNos(java.util.List<String> opNos);
 }

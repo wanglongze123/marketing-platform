@@ -39,6 +39,41 @@ public interface PlayOpRecordMapper extends BaseMapper<PlayOpRecord> {
             "SELECT op_no FROM play_op_record WHERE idempotent_key = #{idempotentKey}")
     String selectByIdempotentKey(@Param("idempotentKey") String idempotentKey);
 
+    /**
+     * 落一条人工处置审计记录（BR-C-27）。V3 PR-10。
+     *
+     * <p><b>{@code op_seq} 取外部工单号，不取空串</b>：人工处置对一单可发生多次（重试发奖不成再重试一次）， 每次都要留痕。取空串会让第二次撞 {@code
+     * uk_biz_op} 被当成重传吞掉 —— 而审计要能看到「处置过 几次、分别是谁」。
+     *
+     * <p><b>{@code operator} / {@code reason} 随记录一并落库</b>，不另开审计表：处置动作与它的操作人必须
+     * 在同一行，分表则存在「动作落了而审计没落」的窗口，那正是审计最不能出现的缺口。
+     *
+     * <p>幂等：同一工单号重复提交命中 {@code uk_biz_op}，{@code retry_count} 自增而不新增行 —— 客服连点 不会产生两条审计，但重试次数看得见。
+     */
+    @Update(
+            "INSERT INTO play_op_record (op_no, idempotent_key, play_biz_record_no, subject_id,"
+                    + " activity_id, op_type, op_seq, status, operator, reason, retry_count)"
+                    + " VALUES (#{opNo}, #{idempotentKey}, #{bizNo}, #{subjectId}, #{activityId},"
+                    + " 'MANUAL_REPAIR', #{opSeq}, #{status}, #{operator}, #{reason}, 0)"
+                    + " ON DUPLICATE KEY UPDATE retry_count = retry_count + 1,"
+                    + " operator = VALUES(operator), reason = VALUES(reason)")
+    int upsertManualRepair(
+            @Param("opNo") String opNo,
+            @Param("idempotentKey") String idempotentKey,
+            @Param("bizNo") String bizNo,
+            @Param("subjectId") String subjectId,
+            @Param("activityId") String activityId,
+            @Param("opSeq") String opSeq,
+            @Param("status") String status,
+            @Param("operator") String operator,
+            @Param("reason") String reason);
+
+    /** 某单某类操作的操作人，审计断言用。 */
+    @org.apache.ibatis.annotations.Select(
+            "SELECT operator FROM play_op_record WHERE play_biz_record_no = #{bizNo}"
+                    + " AND op_type = #{opType} LIMIT 1")
+    String selectOperator(@Param("bizNo") String bizNo, @Param("opType") String opType);
+
     /** 回写终态。查单类操作也走这里更新原记录，不新建行。 */
     @Update(
             "UPDATE play_op_record SET status = #{status}, downstream_result = #{downstreamResult},"

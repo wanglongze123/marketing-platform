@@ -1,0 +1,310 @@
+package com.mp.gateway.it;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.mp.api.benefit.dto.ReconcileItem;
+import com.mp.api.benefit.dto.ReconcileReport;
+import com.mp.api.mock.dto.FaultMode;
+import com.mp.common.enums.GrantStatus;
+import com.mp.common.enums.RefundStatus;
+import com.mp.common.enums.TaskType;
+import com.mp.mock.fault.FaultInjector;
+import com.mp.mock.fault.PayLedger;
+import com.mp.mock.fault.ProviderLedger;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.test.context.TestPropertySource;
+
+/**
+ * 对账与自动补偿（FR-C06、技术方案 §6.8），对应《分阶段方案》§6.5 退出标准 14、15、16。
+ *
+ * <p><b>{@code stale-seconds=0}</b>：生产取值须显著长于「发放 + 查单收敛」的正常耗时（§5.8 实测 153s），
+ * 否则一笔刚下单还没来得及履约的单会被判为差异、告警变噪音。测试压到 0 才能立刻构造出差异 —— <b>压的是判据的时间维度，不是判据本身</b>，谓词的其余部分与生产完全一致。
+ *
+ * <p><b>每条用例都断言「差异被检出」与「处置动作正确」两件事</b>：只断言检出的话，一个「扫出来但什么 都没做」的实现照样全绿；只断言处置的话，分不清是对账干的还是别的路径顺手做的。
+ */
+@TestPropertySource(properties = "mp.reconcile.stale-seconds=0")
+class ReconcileIT extends AbstractMySqlIT {
+
+    @Autowired private FaultInjector injector;
+    @Autowired private PayLedger payLedger;
+    @Autowired private ProviderLedger providerLedger;
+    @Autowired private com.mp.api.reward.service.RewardService rewardService;
+
+    @AfterEach
+    void reset() {
+        injector.reset();
+        providerLedger.clearFailingProducts();
+        providerLedger.clearDelays();
+    }
+
+    private String paidOrder(String tag) {
+        String bizNo = benefitOrderService.createTrade(newTradeReq(tag)).getBizNo();
+        payLedger.markPaid(bizNo);
+        benefitOrderService.payCallback(newPayCallback(bizNo, "T_" + tag, "N1", "SUCCESS"));
+        return bizNo;
+    }
+
+    private int taskCount(String bizNo, TaskType type) {
+        return count(
+                benefitJdbc,
+                "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                type.name());
+    }
+
+    // ------------------------------------------------------------------
+    // 标准 14：检出人为注入的差异并自动补偿
+    // ------------------------------------------------------------------
+
+    /**
+     * 标准 14 ①：<b>已收款未履约 → 检出并补建 {@code GRANT} 任务</b>。
+     *
+     * <p>手工把 {@code GRANT} 任务删掉，模拟「本地消息表那一条丢了」—— 这是对账要兜底的头号场景： 钱已收、履约没发起、且没有任何机制会再看它一眼。
+     *
+     * <p><b>断言补建的任务与原任务同键</b>：{@code op_no} 取 {@code bizNo + "_GRANT"}，与支付回调落的那条 一致。新造键会让同一单存在两条
+     * GRANT 任务，两个调度器各跑一次。
+     */
+    @Test
+    void detectsAndRepairsPaidNotGranted() {
+        String bizNo = paidOrder("rec_png");
+        // 制造差异：把履约任务删掉
+        benefitJdbc.update(
+                "DELETE FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.GRANT.name());
+        assertThat(taskCount(bizNo, TaskType.GRANT)).isZero();
+
+        ReconcileReport report = benefitOrderService.reconcile();
+
+        assertThat(report.diffOf(ReconcileItem.PAID_NOT_GRANTED)).isPositive();
+        assertThat(report.repairedOf(ReconcileItem.PAID_NOT_GRANTED)).isPositive();
+        assertThat(taskCount(bizNo, TaskType.GRANT)).as("须补建履约任务").isEqualTo(1);
+        assertThat(
+                        str(
+                                benefitJdbc,
+                                "SELECT op_no FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                                bizNo,
+                                TaskType.GRANT.name()))
+                .as("补建的任务须与原任务同键，否则同一单会有两条")
+                .isEqualTo(bizNo + "_GRANT");
+
+        // 补建后驱动一轮，单子真的被推到终态 —— 这才叫「自愈」
+        runScheduler();
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+    }
+
+    /**
+     * 标准 14 ②：<b>已关闭单仍占库存 → 检出并补建释放任务</b>。
+     *
+     * <p>手工把主单改成 {@code CLOSED} 而 {@code stock_status} 留在 {@code LOCKED}，模拟释放任务丢失。
+     * 这部分库存否则永远没人释放，可售余量永久少一份。
+     */
+    @Test
+    void detectsAndRepairsClosedHoldingStock() {
+        String bizNo = benefitOrderService.createTrade(newTradeReq("rec_chs")).getBizNo();
+        benefitJdbc.update(
+                "UPDATE play_biz_record SET pay_status = 'CLOSED' WHERE play_biz_record_no = ?",
+                bizNo);
+        benefitJdbc.update(
+                "DELETE FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.STOCK_RELEASE.name());
+
+        ReconcileReport report = benefitOrderService.reconcile();
+
+        assertThat(report.diffOf(ReconcileItem.CLOSED_HOLDING_STOCK)).isPositive();
+        assertThat(taskCount(bizNo, TaskType.STOCK_RELEASE)).as("须补建释放任务").isEqualTo(1);
+    }
+
+    /**
+     * 标准 14 ③：<b>关单中间态未收敛 → 检出并补建查单任务</b>（第 14 项）。
+     *
+     * <p>这一项是 §6.4「任何中间态都必须同时具备准入谓词的入边与对账的一行」中的那一行。缺了它，一笔 停在 {@code CLOSING} 的单前十三项无一覆盖 —— 第 1 项扫
+     * {@code PAY_SUCCESS}、第 9 项扫 {@code CLOSED}。
+     */
+    @Test
+    void detectsAndRepairsStuckClosing() {
+        String bizNo = benefitOrderService.createTrade(newTradeReq("rec_sc")).getBizNo();
+        injector.setPayMode(FaultMode.TIMEOUT_BEFORE_COMMIT);
+        benefitOrderService.closeOrder(bizNo, "");
+        injector.reset();
+        benefitJdbc.update(
+                "DELETE FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.QUERY_CLOSE.name());
+
+        ReconcileReport report = benefitOrderService.reconcile();
+
+        assertThat(report.diffOf(ReconcileItem.STUCK_CLOSING)).isPositive();
+        assertThat(taskCount(bizNo, TaskType.QUERY_CLOSE)).as("中间态必须有收敛出口").isEqualTo(1);
+    }
+
+    /**
+     * <b>修复后差异归零</b>——标准 14 的后半句。
+     *
+     * <p>只断言「检出并补建」不够：一个「每轮都报同一条差异」的实现同样能通过前面几条，而那意味着 补偿没有真的生效，告警会永远响。
+     */
+    @Test
+    void diffGoesToZeroAfterRepair() {
+        String bizNo = paidOrder("rec_zero");
+        benefitJdbc.update(
+                "DELETE FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.GRANT.name());
+
+        benefitOrderService.reconcile();
+        runScheduler();
+
+        // 单子已收敛，再跑一轮对账不应再把它算成差异
+        ReconcileReport second = benefitOrderService.reconcile();
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM play_biz_record WHERE play_biz_record_no = ?"
+                                        + " AND pay_status = 'PAY_SUCCESS'"
+                                        + " AND grant_status IN ('NOT_START','GRANTING','GRANT_UNKNOWN')"
+                                        + " AND refund_status = 'NONE'",
+                                bizNo))
+                .as("该单已不在第 1 项的扫描范围内")
+                .isZero();
+        assertThat(second).isNotNull();
+    }
+
+    // ------------------------------------------------------------------
+    // 标准 15：第 1 项的谓词是白名单，不误补已退款单
+    // ------------------------------------------------------------------
+
+    /**
+     * 标准 15：<b>一笔 {@code GRANT_FAILED} + {@code REFUND_SUCCESS} 的单不得被补建 {@code GRANT} 任务</b>。
+     *
+     * <p>谓词写成「排除 {@code GRANT_SUCCESS}」时，这笔已全额退款的失败单会被当作待履约补发一次 —— <b>钱退了、货也给了</b>。故谓词必须是白名单（{@code
+     * NOT_START} / {@code GRANTING} / {@code GRANT_UNKNOWN}），新增枚举时不会误放行。
+     *
+     * <p>本用例同时覆盖第二道：{@code refund_status <> 'NONE'} —— 一旦进入退款流程，该单不再是「待履约」。
+     */
+    @Test
+    void refundedFailedOrderIsNotRepaired() {
+        String bizNo = paidOrder("rec_wl");
+        benefitJdbc.update(
+                "DELETE FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.GRANT.name());
+        // 造一笔「发放失败且已全额退款」的单
+        benefitJdbc.update(
+                "UPDATE play_biz_record SET grant_status = 'GRANT_FAILED',"
+                        + " refund_status = 'REFUND_SUCCESS' WHERE play_biz_record_no = ?",
+                bizNo);
+
+        benefitOrderService.reconcile();
+
+        assertThat(taskCount(bizNo, TaskType.GRANT)).as("已退款的失败单不得被补发 —— 那是钱退了货也给了").isZero();
+    }
+
+    /** 白名单的另一半：{@code refund_status} 非 {@code NONE} 的单同样不补，哪怕发放态还在白名单里。 */
+    @Test
+    void orderInRefundFlowIsNotRepaired() {
+        String bizNo = paidOrder("rec_wl2");
+        benefitJdbc.update(
+                "DELETE FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.GRANT.name());
+        benefitJdbc.update(
+                "UPDATE play_biz_record SET refund_status = ? WHERE play_biz_record_no = ?",
+                RefundStatus.REVOKING.name(),
+                bizNo);
+
+        benefitOrderService.reconcile();
+
+        assertThat(taskCount(bizNo, TaskType.GRANT)).as("已进入退款流程的单不再是「待履约」").isZero();
+    }
+
+    // ------------------------------------------------------------------
+    // 标准 16：对账不跨库 JOIN
+    // ------------------------------------------------------------------
+
+    /**
+     * 标准 16：<b>跨库比对走 {@code batchQueryByOpNos}，不做 JOIN</b>。
+     *
+     * <p>正面断言该接口可用且返回正确：查得到的键在结果里，查无的键<b>不在</b> —— 后者正是对账第 3 项 要检出的差异，补占位行会把差异抹平。
+     *
+     * <p>反面由 {@code MultiDataSourceIT} 的既有用例承担（跨库查询运行期 {@code access denied}）：两库各用仅授权 自身 schema
+     * 的账号，JOIN 根本执行不了。<b>两条断言缺一不可</b> —— 只验「接口能用」的话，一个偷偷 用 root 连接做 JOIN 的实现同样通过。
+     */
+    @Test
+    void crossDbComparisonUsesBatchQuery() {
+        String bizNo = paidOrder("rec_xdb");
+        runScheduler();
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+
+        java.util.List<String> opNos =
+                benefitJdbc.queryForList(
+                        "SELECT DISTINCT grant_op_no FROM benefit_fulfillment_record"
+                                + " WHERE play_biz_record_no = ?",
+                        String.class,
+                        bizNo);
+        assertThat(opNos).hasSize(2);
+
+        java.util.List<String> probe = new java.util.ArrayList<>(opNos);
+        probe.add("NO_SUCH_OP_NO");
+        var result = rewardService.batchQueryByOpNos(probe);
+
+        assertThat(result.keySet()).as("查得到的键须在结果里").containsAll(opNos);
+        assertThat(result).as("查无的键不得出现 —— 那正是第 3 项要检出的差异").doesNotContainKey("NO_SUCH_OP_NO");
+    }
+
+    /** 空列表不得拼出 {@code IN ()} —— 那是 MySQL 语法错误，而「本批没有要比对的键」是正常情形。 */
+    @Test
+    void batchQueryHandlesEmptyInput() {
+        assertThat(rewardService.batchQueryByOpNos(java.util.List.of())).isEmpty();
+        assertThat(rewardService.batchQueryByOpNos(null)).isEmpty();
+    }
+
+    // ------------------------------------------------------------------
+    // 只告警的项：检出但不改数
+    // ------------------------------------------------------------------
+
+    /**
+     * <b>金额不一致只告警，不改单</b>（第 5 项）。
+     *
+     * <p>差异被检出，而 {@code pay_amount} 保持原值 —— 只断言检出的话，一个「顺手把金额改成应付额」的 实现同样能通过，而那会把一次错误固化成新的基线。
+     */
+    @Test
+    void amountMismatchIsReportedButNotFixed() {
+        String bizNo = paidOrder("rec_amt");
+        benefitJdbc.update(
+                "UPDATE play_biz_record SET pay_amount = 1 WHERE play_biz_record_no = ?", bizNo);
+
+        ReconcileReport report = benefitOrderService.reconcile();
+
+        assertThat(report.diffOf(ReconcileItem.AMOUNT_MISMATCH)).isPositive();
+        assertThat(report.repairedOf(ReconcileItem.AMOUNT_MISMATCH)).as("禁止自动改单").isZero();
+        assertThat(orderField("pay_amount", bizNo)).as("金额不得被对账改回去").isEqualTo("1");
+    }
+
+    /**
+     * <b>{@code pay_amount IS NULL} 不算金额差异</b>。
+     *
+     * <p>它是 {@code applyPaidAfterClosing} 有意留下的「实付未知」状态（关单收敛时支付方没说收了多少）， 不是金额错误 ——
+     * 不排除的话，每一笔走关单收敛的单都会报一次差异。
+     *
+     * <p>该状态在退款侧的正确处置是拒绝退款（{@code 1754}，PR-7/8 review 补），两处对同一状态的判断一致。
+     */
+    @Test
+    void nullPayAmountIsNotAmountMismatch() {
+        // 对账扫全表，别的用例留下的差异行也在里面 —— 故取增量而非绝对值。
+        // 与 RefundAdmissionIT 记的「账本计数器是全局的」同族：共享状态上的绝对值断言，
+        // 通过与否取决于用例执行顺序。首版即如此写，实测 expected 0 but was 1
+        int before = benefitOrderService.reconcile().diffOf(ReconcileItem.AMOUNT_MISMATCH);
+
+        String bizNo = paidOrder("rec_null_amt");
+        benefitJdbc.update(
+                "UPDATE play_biz_record SET pay_amount = NULL WHERE play_biz_record_no = ?", bizNo);
+
+        int after = benefitOrderService.reconcile().diffOf(ReconcileItem.AMOUNT_MISMATCH);
+
+        assertThat(after - before).as("实付未知是可表达的状态，不是金额错误 —— 不排除它则每笔关单收敛的单都报一次").isZero();
+    }
+}

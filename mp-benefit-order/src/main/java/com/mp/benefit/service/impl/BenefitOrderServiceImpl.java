@@ -11,10 +11,13 @@ import com.mp.api.benefit.dto.ConvergenceResp;
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.CreateTradeResp;
 import com.mp.api.benefit.dto.FulfillmentItem;
+import com.mp.api.benefit.dto.ManualRepairReq;
+import com.mp.api.benefit.dto.ManualRepairResp;
 import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.api.benefit.dto.PreConsultReq;
 import com.mp.api.benefit.dto.PreConsultResp;
 import com.mp.api.benefit.dto.QueryOrderResp;
+import com.mp.api.benefit.dto.ReconcileReport;
 import com.mp.api.benefit.dto.RevokeAdmitReq;
 import com.mp.api.benefit.dto.RevokeAdmitResp;
 import com.mp.api.benefit.service.BenefitOrderService;
@@ -37,6 +40,8 @@ import com.mp.benefit.entity.PlayBizRecord;
 import com.mp.benefit.entity.PlayOpRecord;
 import com.mp.benefit.lock.BizLock;
 import com.mp.benefit.lock.ContentionMetrics;
+import com.mp.benefit.reconcile.ManualRepairService;
+import com.mp.benefit.reconcile.ReconcileService;
 import com.mp.benefit.repository.BenefitFulfillmentRecordMapper;
 import com.mp.benefit.repository.BenefitItemMapper;
 import com.mp.benefit.repository.BenefitSkuMapper;
@@ -134,6 +139,8 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private final PayNotifySigner payNotifySigner;
     private final BizLock bizLock;
     private final ContentionMetrics contention;
+    private final ReconcileService reconcileService;
+    private final ManualRepairService manualRepairService;
     private final long tokenTtlSeconds;
 
     public BenefitOrderServiceImpl(
@@ -148,7 +155,11 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             PayNotifySigner payNotifySigner,
             BizLock bizLock,
             ContentionMetrics contention,
+            ReconcileService reconcileService,
+            ManualRepairService manualRepairService,
             @Value("${mp.consult-token.ttl-seconds}") long tokenTtlSeconds) {
+        this.reconcileService = reconcileService;
+        this.manualRepairService = manualRepairService;
         this.tx = tx;
         this.skuMapper = skuMapper;
         this.itemMapper = itemMapper;
@@ -1317,7 +1328,28 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     }
 
     // ------------------------------------------------------------------
-    // ⑥ 查询
+    // ⑥ 对账与人工处置（V3 PR-10）
+    // ------------------------------------------------------------------
+
+    /**
+     * 跑一轮对账（FR-C06）。编排在 {@link ReconcileService}，本方法只是玩法层的对外入口。
+     *
+     * <p><b>不加锁</b>：对账是旁路只读扫描 + 幂等补建，两个实例同时跑的后果只是补建两次同一条任务 —— 而 {@code enqueue} 命中 {@code
+     * uk_biz_type_op} 不产生第二条。为它加锁反而会让一个卡住的实例挡住其余。
+     */
+    @Override
+    public ReconcileReport reconcile() {
+        return reconcileService.reconcileOnce();
+    }
+
+    /** 人工处置（FR-C07）。实现在 {@link ManualRepairService}，前五类动作一律复用原幂等键。 */
+    @Override
+    public ManualRepairResp manualRepair(ManualRepairReq req) {
+        return manualRepairService.repair(req);
+    }
+
+    // ------------------------------------------------------------------
+    // ⑦ 查询
     // ------------------------------------------------------------------
 
     @Override
