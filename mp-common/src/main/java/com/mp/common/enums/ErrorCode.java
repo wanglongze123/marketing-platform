@@ -158,6 +158,19 @@ public final class ErrorCode {
      */
     public static final String PAY_NOTIFY_SIGN_INVALID = "4731";
 
+    /**
+     * 供应方通知验签失败（PRD FR-B06）。V3 PR-9 引入。
+     *
+     * <p>与 {@link #PAY_NOTIFY_SIGN_INVALID} 分开而非共用：两者是不同的信任边界、不同的密钥、不同的 对接方，告警与排查也各走各的 ——
+     * 共用一个码时「哪一侧的密钥配错了」要靠读日志上下文才能分辨。
+     *
+     * <p>误判代价特别值得记：一条伪造的成功通知会让发放记录进终态，而终态<b>不再被查单推进</b>（条件 更新限定 {@code
+     * PROCESSING}），于是这笔发放永远停在「已成功」，供应方那边其实什么都没有。它 不像重复发奖能被对账第 11 项数出来 —— 记录数是对的。
+     *
+     * <p>同 BR-B-12 的处置：未通过验签的通知不得更新任何业务状态，连记录都不留。
+     */
+    public static final String PROVIDER_NOTIFY_SIGN_INVALID = "4732";
+
     // ---- 5xxx 系统异常 ----
 
     /** 下游超时/未知，映射为 {@code RetStatus.UNKNOWN} */

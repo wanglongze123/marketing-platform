@@ -9,11 +9,17 @@ import com.mp.api.mock.service.MockProviderService;
 import com.mp.api.reward.dto.GrantItemResult;
 import com.mp.api.reward.dto.GrantRewardReq;
 import com.mp.api.reward.dto.GrantRewardResp;
+import com.mp.api.reward.dto.ProviderCallbackReq;
+import com.mp.api.reward.dto.ProviderCallbackResp;
 import com.mp.api.reward.dto.RevokeRewardReq;
 import com.mp.api.reward.dto.RevokeRewardResp;
 import com.mp.api.reward.dto.RewardItem;
 import com.mp.api.reward.service.RewardService;
+import com.mp.common.enums.ErrorCode;
 import com.mp.common.enums.RetStatus;
+import com.mp.common.event.GrantResultPublisher;
+import com.mp.common.event.RewardGrantResultEvent;
+import com.mp.common.security.ProviderNotifySigner;
 import com.mp.reward.entity.RewardGrantItem;
 import com.mp.reward.entity.RewardGrantRecord;
 import com.mp.reward.entity.RewardRevokeRecord;
@@ -51,12 +57,18 @@ public class RewardServiceImpl implements RewardService {
     private final RewardGrantRecordMapper recordMapper;
     private final RewardGrantItemMapper itemMapper;
     private final RewardRevokeRecordMapper revokeRecordMapper;
+    private final ProviderNotifySigner signer;
+    private final GrantResultPublisher publisher;
 
     public RewardServiceImpl(
             RewardTxService tx,
             RewardGrantRecordMapper recordMapper,
             RewardGrantItemMapper itemMapper,
-            RewardRevokeRecordMapper revokeRecordMapper) {
+            RewardRevokeRecordMapper revokeRecordMapper,
+            ProviderNotifySigner signer,
+            GrantResultPublisher publisher) {
+        this.signer = signer;
+        this.publisher = publisher;
         this.tx = tx;
         this.recordMapper = recordMapper;
         this.itemMapper = itemMapper;
@@ -188,6 +200,81 @@ public class RewardServiceImpl implements RewardService {
                 status,
                 usageStatus);
         return buildRevokeResp(status, usageStatus, providerOrderNo, errorCode);
+    }
+
+    /**
+     * 供应方异步通知（FR-B06）。V3 PR-9。
+     *
+     * <p>四步：验签 → 幂等落通知记录并推进发放态（同事务）→ 发事件 → ACK。
+     *
+     * <p><b>验签是第一件事，先于定位记录</b>：未验签就查库等于让任何人都能拿一个 {@code opNo} 探测 平台有没有这笔发放。与 {@code payCallback}
+     * 同一处置。
+     *
+     * <p><b>{@code UNKNOWN} 的通知直接拒绝</b>：供应方不会通知「我也不知道」——这类报文要么是构造的，
+     * 要么是对接错误。放行它会把发放记录推向一个它本来就在的状态，且发一条无意义的事件。
+     *
+     * <p><b>事件在事务提交之后发</b>：事务内发事件的话，消费侧可能在事务提交前就收到并回查 —— 读到 的是推进之前的旧状态。V3 是进程内同步投递，这个窗口尤其真实。
+     */
+    @Override
+    public ProviderCallbackResp providerCallback(ProviderCallbackReq req) {
+        String opNo = req.getOpNo();
+        String notifySeq = req.getNotifySeq();
+
+        if (!signer.verify(req.signFields(), req.getSign())) {
+            // 验签不过不 ACK：这条通知不可信，不能告诉供应方「收到了」。
+            // 且不留任何痕迹 —— 落库等于让伪造者能往平台写数据（BR-B-12 的同一条）
+            log.warn("providerCallback signature invalid, opNo={}, notifySeq={}", opNo, notifySeq);
+            return ProviderCallbackResp.rejected(ErrorCode.PROVIDER_NOTIFY_SIGN_INVALID);
+        }
+        if (opNo == null || opNo.isBlank() || notifySeq == null || notifySeq.isBlank()) {
+            // 两者都是幂等键的组成部分。缺任一则唯一索引失去意义 —— 空串能反复插入同一个值
+            log.warn("providerCallback missing key fields, opNo={}, notifySeq={}", opNo, notifySeq);
+            return ProviderCallbackResp.rejected(ErrorCode.INVALID_PARAM);
+        }
+        RetStatus result = req.getResult();
+        if (result != RetStatus.SUCCESS && result != RetStatus.FAIL) {
+            log.warn(
+                    "providerCallback carries non-terminal result {}, reject, opNo={}",
+                    result,
+                    opNo);
+            return ProviderCallbackResp.rejected(ErrorCode.INVALID_PARAM);
+        }
+
+        boolean advanced;
+        try {
+            advanced =
+                    tx.applyNotify(
+                            opNo, notifySeq, result, req.getProviderOrderNo(), req.getErrorCode());
+        } catch (DuplicateKeyException e) {
+            // 同一条通知重投：ACK 但不重复处理，也不再发事件。
+            // 返回 accepted=true —— ACK 的语义是「别再投了」，返回失败会让供应方一直重投
+            log.info(
+                    "providerCallback duplicated, ack without reprocessing, opNo={}, seq={}",
+                    opNo,
+                    notifySeq);
+            return ProviderCallbackResp.accepted(true);
+        }
+
+        // 事务已提交，此刻发事件。affected_rows=0（已被查单先收敛）同样发 ——
+        // 消费侧按 opNo 幂等，多一条事件只是多一次无副作用的回查；而漏发会让
+        // 「查单已收敛 reward 侧、玩法层却还没被通知」这一段只能等玩法层自己的查单
+        publisher.publish(
+                new RewardGrantResultEvent(
+                        opNo, receiverOf(opNo), result, req.getProviderOrderNo(), notifySeq));
+
+        log.info(
+                "providerCallback done, opNo={}, seq={}, result={}, advanced={}",
+                opNo,
+                notifySeq,
+                result,
+                advanced);
+        return ProviderCallbackResp.accepted(false);
+    }
+
+    /** 取收奖人，供事件体携带。记录不存在时返回 {@code null} —— 通知先于发放记录到达是可能的。 */
+    private String receiverOf(String opNo) {
+        RewardGrantRecord record = existingRecord(opNo);
+        return record == null ? null : record.getReceiverId();
     }
 
     private static RevokeRewardResp buildRevokeResp(

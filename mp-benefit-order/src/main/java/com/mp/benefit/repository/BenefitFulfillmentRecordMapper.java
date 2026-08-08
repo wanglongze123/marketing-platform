@@ -89,6 +89,20 @@ public interface BenefitFulfillmentRecordMapper extends BaseMapper<BenefitFulfil
             @Param("revokeNo") String revokeNo,
             @Param("usageStatus") String usageStatus);
 
+    /**
+     * 按发奖幂等号反查主单号。V3 PR-9：事件消费侧的定位入口。
+     *
+     * <p><b>事件体只带 {@code opNo}，不带 {@code bizNo}</b>（{@code RewardGrantResultEvent} 的注释）：带上
+     * 「这是哪个订单」会让 {@code reward} 知道玩法层的概念，依赖方向在数据结构上又倒回去了。故消费侧 自己反查 —— 这条 SQL 就是那次反查。
+     *
+     * <p>取 {@code LIMIT 1}：一个 {@code grantOpNo} 对应一次发放调用，同单同供应方的多个权益项共享它， 它们的 {@code
+     * play_biz_record_no} 必然相同。
+     */
+    @Select(
+            "SELECT play_biz_record_no FROM benefit_fulfillment_record"
+                    + " WHERE grant_op_no = #{grantOpNo} LIMIT 1")
+    String selectBizNoByGrantOpNo(@Param("grantOpNo") String grantOpNo);
+
     /** 该单已发放成功的明细，回收时逐条取原发奖单号。 */
     @Select(
             "SELECT * FROM benefit_fulfillment_record WHERE play_biz_record_no = #{bizNo}"

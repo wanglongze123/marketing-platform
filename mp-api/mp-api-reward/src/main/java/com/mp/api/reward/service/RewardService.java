@@ -2,6 +2,8 @@ package com.mp.api.reward.service;
 
 import com.mp.api.reward.dto.GrantRewardReq;
 import com.mp.api.reward.dto.GrantRewardResp;
+import com.mp.api.reward.dto.ProviderCallbackReq;
+import com.mp.api.reward.dto.ProviderCallbackResp;
 import com.mp.api.reward.dto.RevokeRewardReq;
 import com.mp.api.reward.dto.RevokeRewardResp;
 
@@ -48,4 +50,20 @@ public interface RewardService {
      * <p>返回 {@code UNKNOWN} 时调用方<b>不得推进退款</b>：回收结果未定即权益可能仍在外，此时退款 就是「退了钱权益还在」。
      */
     RevokeRewardResp revokeReward(RevokeRewardReq req);
+
+    /**
+     * 供应方异步通知的<b>唯一入口</b>（FR-B06、技术方案 §4.3）。V3 PR-9 引入。
+     *
+     * <p>验签 → 幂等落通知记录 → 推进发放记录 → 发 {@code RewardGrantResultEvent} 事件。
+     *
+     * <p><b>发事件而非同步 RPC 回调上游</b>：本方法在公共能力层，而需要知道结果的是玩法层。同步回调 即下层调上层，违反 §1.1 单向依赖；且 {@code reward}
+     * 被两个玩法共用，轮询要每个上游各写一套。
+     *
+     * <p><b>事件负责加速收敛，查单负责保证收敛</b>（§6.7）：消费侧的幂等与 {@code QUERY_GRANT} 任务 必须并存。不得因为「有了回调就不用查单了」而去掉查单
+     * —— 事件一丢即永久悬挂。
+     *
+     * <p><b>幂等按 {@code (opNo, notifySeq)} 两维判</b>：同一 {@code opNo} 会收到多条语义不同的通知，只按 {@code opNo}
+     * 去重会把第二条真实通知当成重传丢弃。重复投递返回 {@code accepted=true} —— ACK 的语义是 「别再投了」，返回失败会让供应方一直重投。
+     */
+    ProviderCallbackResp providerCallback(ProviderCallbackReq req);
 }

@@ -204,6 +204,21 @@ public interface FissionTaskMapper extends BaseMapper<FissionTask> {
     List<FissionTask> selectByBizNo(@Param("bizNo") String bizNo);
 
     /**
+     * 按发奖幂等号反查关系号。V3 PR-9：事件消费侧的定位入口。
+     *
+     * <p><b>事件体只带 {@code opNo}，不带 {@code relationId}</b>：带上就等于让 {@code reward} 知道「师徒关系」
+     * 是什么，依赖方向倒挂。故消费侧自己反查 —— 查单任务的 {@code op_no} 正是 {@code followerGrantNo}， 它与 {@code
+     * biz_no}（关系号）的对应关系就存在这张表里。
+     *
+     * <p><b>不限定任务状态</b>：查单任务可能已 {@code DONE}（事件晚于查单到达），而反查只是要一个 {@code relationId} ——
+     * 它不随任务状态改变。限定状态会让「事件到得晚」这一路查不到关系而静默丢弃。
+     */
+    @Select(
+            "SELECT biz_no FROM fission_task WHERE op_no = #{opNo}"
+                    + " AND task_type = 'QUERY_GRANT' LIMIT 1")
+    String selectRelationIdByGrantOpNo(@Param("opNo") String opNo);
+
+    /**
      * 按业务号与操作号把任务置 {@code DONE}，供确权后置的四写使用。
      *
      * <p><b>不带 fencing</b>：这不是调度器的写回，而是业务侧「该任务已无必要」的主动了结 —— 徒弟发奖当场成功，查单任务就没有对象了。调度器的写回一律带 {@code

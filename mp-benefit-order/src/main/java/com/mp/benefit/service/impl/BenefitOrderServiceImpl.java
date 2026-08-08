@@ -60,10 +60,18 @@ import com.mp.common.security.PayNotifySigner;
 import com.mp.common.util.BizNoGenerator;
 import com.mp.common.util.IdempotentKeys;
 import com.mp.common.util.ReqFields;
+import com.mp.common.web.TraceIdHolder;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.apache.dubbo.config.annotation.DubboService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -101,6 +109,14 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
 
     /** 单号碰撞重试次数。UUIDv7 连撞三次实际不可能，超出即视为库层异常而非碰撞 */
     private static final int BIZ_NO_RETRY = 3;
+
+    /**
+     * 履约扇出的整体超时（秒）。
+     *
+     * <p><b>必须显著短于任务租约（30 秒）</b>：扇出跑超租约时，任务会被另一实例正当接管并重跑 —— 于是同一笔发放有两个实例同时在途。下游按 opNo
+     * 幂等挡得住重复发放，但两边的状态回写会 互相覆盖，且 fencing 会把先完成那个的结果判掉。取 10 秒留出三倍余量。
+     */
+    private static final long FANOUT_TIMEOUT_SECONDS = 10;
 
     // V0/V1 单进程用 Spring 注入；V3 拆服务后改回 @DubboReference(protocol="tri")
     @Autowired private ActivityService activityService;
@@ -609,18 +625,18 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         // 组合权益跨多供应方时天然拆成 N 次调用、N 个幂等键
         Map<String, List<SnapshotItem>> groups = groupByProvider(order.getBenefitSnapshot());
 
-        // 逐供应方发放，记下未收敛的那些 —— 它们各自需要一条查单任务
+        // 虚拟线程扇出，记下未收敛的那些 —— 它们各自需要一条查单任务
         List<String> unresolvedOpNos = new ArrayList<>();
         boolean allSuccess = true;
         boolean anyUnresolved = false;
-        for (Map.Entry<String, List<SnapshotItem>> g : groups.entrySet()) {
-            RetStatus one = grantOneProvider(order, g.getKey(), g.getValue());
+        for (Map.Entry<String, RetStatus> e : fanOutGrant(order, groups).entrySet()) {
+            RetStatus one = e.getValue();
             if (one != RetStatus.SUCCESS) {
                 allSuccess = false;
             }
             if (one == RetStatus.UNKNOWN || one == RetStatus.PROCESSING) {
                 anyUnresolved = true;
-                unresolvedOpNos.add(IdempotentKeys.grantOpNo(bizNo, g.getKey()));
+                unresolvedOpNos.add(IdempotentKeys.grantOpNo(bizNo, e.getKey()));
             }
         }
 
@@ -642,6 +658,77 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             return RetStatus.UNKNOWN;
         }
         return allSuccess ? RetStatus.SUCCESS : RetStatus.FAIL;
+    }
+
+    /**
+     * 履约扇出：每个供应方一条虚拟线程并行调用（技术方案 §7.2、《开发规范》§6.5）。V3 PR-9。
+     *
+     * <p><b>禁止 fail-fast，这是本方法最重要的一条</b>。{@code StructuredTaskScope.ShutdownOnFailure} 或 {@code
+     * invokeAny} 的语义是「任一失败即取消其余」——用在发奖上意味着券发放失败时，正在飞行中的 月卡 RPC 被
+     * interrupt。<b>那笔调用可能已经到达供应方并成功执行</b>，而本地既没拿到结果也没写入 终态：权益已发出却无任何记录。后续按「核心权益失败 →
+     * 回收附加权益后退款」处置时，回收清单里 没有月卡 —— 退了钱、月卡还在用户手里，直接资损。
+     *
+     * <p>故用 {@code newVirtualThreadPerTaskExecutor} + {@code invokeAll}：<b>所有子任务都跑完</b>，失败项 各自落
+     * {@code UNKNOWN} 并挂查单任务，由收敛机制查明真实结果。
+     *
+     * <p><b>{@code invokeAll} 必须带超时</b>：不带的话一个卡死的供应方会让整个扇出无限期挂起，而调用方 是任务调度器，它的租约会先到期，任务被另一实例接管重跑 ——
+     * 于是同一笔发放有两个实例同时在途。
+     *
+     * <p><b>超时被 cancel 的项归 {@code UNKNOWN} 而非 {@code FAIL}</b>：{@code CancellationException} 说明的是
+     * 「本地放弃等待」，不是「供应方没做」—— 它可能已经执行成功。判 {@code FAIL} 就是替下游断言「没做」， 而这个断言没有依据。
+     *
+     * <p><b>不依赖 {@code StructuredTaskScope}</b>：它在 JDK 21 仍是 preview（JEP 453，需 {@code
+     * --enable-preview}），交付物不应依赖预览 API。
+     *
+     * @return 供应方 → 该组的四分类结果，顺序与入参一致
+     */
+    private Map<String, RetStatus> fanOutGrant(
+            PlayBizRecord order, Map<String, List<SnapshotItem>> groups) {
+        List<String> providers = new ArrayList<>(groups.keySet());
+        List<Callable<RetStatus>> jobs = new ArrayList<>(providers.size());
+        for (String provider : providers) {
+            // 每个 Callable 自带 traceId：虚拟线程不继承调用者的 ThreadLocal，
+            // 不显式传递则扇出的每一条日志都没有 traceId，而这正是最需要按链路排查的部分
+            String traceId = TraceIdHolder.get();
+            jobs.add(
+                    () -> {
+                        TraceIdHolder.set(traceId);
+                        try {
+                            return grantOneProvider(order, provider, groups.get(provider));
+                        } finally {
+                            TraceIdHolder.clear();
+                        }
+                    });
+        }
+
+        Map<String, RetStatus> results = new LinkedHashMap<>();
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<RetStatus>> futures =
+                    executor.invokeAll(jobs, FANOUT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            for (int i = 0; i < futures.size(); i++) {
+                String provider = providers.get(i);
+                try {
+                    results.put(provider, futures.get(i).get());
+                } catch (CancellationException | ExecutionException ex) {
+                    // 超时被取消，或子任务抛异常。两者都归 UNKNOWN —— 供应方可能已经执行成功
+                    log.warn(
+                            "grant fan-out unresolved, bizNo={}, provider={}",
+                            order.getPlayBizRecordNo(),
+                            provider,
+                            ex);
+                    results.put(provider, RetStatus.UNKNOWN);
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            // 恢复中断标志后按未定处置：已发出的调用由查单任务兜底，
+            // 而 finishGrant 会为每一个未定项落一条 QUERY_GRANT
+            log.warn("grant fan-out interrupted, bizNo={}", order.getPlayBizRecordNo(), e);
+            for (String provider : providers) {
+                results.putIfAbsent(provider, RetStatus.UNKNOWN);
+            }
+        }
+        return results;
     }
 
     /** 一个供应方一次调用，幂等键确定性派生。 */
