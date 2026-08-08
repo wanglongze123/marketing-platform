@@ -182,6 +182,17 @@ public interface BenefitTaskMapper extends BaseMapper<BenefitTask> {
                     + " #{missStreak}) WHERE id = #{id}")
     int setMissStreak(@Param("id") Long id, @Param("missStreak") int missStreak);
 
+    /**
+     * 该业务号下尚在途的查单任务数，供 {@code GRANT} 任务判断职责是否已移交。
+     *
+     * <p>只算 {@code PENDING} / {@code DOING}：{@code DONE} 表示上一轮查单已收敛完毕，{@code DEAD} 表示查单自己也放弃了 ——
+     * 两者都不构成「另有通路正在收敛」，此时 {@code GRANT} 任务仍须自行重试。
+     */
+    @Select(
+            "SELECT COUNT(*) FROM benefit_task WHERE biz_no = #{bizNo}"
+                    + " AND task_type = 'QUERY_GRANT' AND status IN ('PENDING', 'DOING')")
+    int countOpenQueryGrant(@Param("bizNo") String bizNo);
+
     /** 可观测端点用：按业务号取全部任务快照。 */
     @Select("SELECT * FROM benefit_task WHERE biz_no = #{bizNo} ORDER BY task_type, op_no")
     List<BenefitTask> selectByBizNo(@Param("bizNo") String bizNo);

@@ -11,6 +11,7 @@ import com.mp.benefit.task.BenefitTaskScheduler;
 import com.mp.benefit.task.TaskClaimService;
 import com.mp.benefit.task.TaskHandler;
 import com.mp.common.enums.GrantStatus;
+import com.mp.common.enums.PayStatus;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.enums.TaskStatus;
 import com.mp.common.enums.TaskType;
@@ -320,17 +321,41 @@ class ReliableTaskIT extends AbstractMySqlIT {
      *
      * <p>换成注入超时才是本用例真正要的形态：结果<b>未知</b>，每一轮重试都可能成功，故必须退避重试， 直到阈值才放弃。这也是死信本来的语义
      * ——「试到最后仍不知道」，而非「已知做不到」。
+     *
+     * <p><b>载体取 {@code QUERY_CLOSE} 而非 {@code GRANT}</b>：后者在落了查单任务之后即把职责移交出去、 自身终结（见 {@code
+     * GrantTaskHandler}），根本走不到重试至阈值那条路 —— 用它构造出的「死信」 恰恰是被判定为缺陷的那个现象。{@code QUERY_CLOSE}
+     * 是查单类，没有可移交的对象，下游持续 不可达时只能自己退避重试到阈值，正是死信语义的形态。
      */
     @Test
     void taskStopsRetryingOnceItReachesTheDeadLetterThreshold() {
-        // 下游持续超时：结果未知，每轮重试都可能成功，故应退避重试而非一次判死
-        injector.setProviderMode(FaultMode.TIMEOUT_BEFORE_COMMIT);
+        // 建单要调支付方下单，故先正常建单，再注入 —— 一上来就注入的话 createTrade 自己就抛了
+        String bizNo = benefitOrderService.createTrade(newTradeReq("deadQuery")).getBizNo();
 
-        String bizNo = benefitOrderService.createTrade(newTradeReq("deadGrant")).getBizNo();
-        String taskNo = "TK_IT_deadGrant";
-        taskMapper.enqueue(taskNo, bizNo, TaskType.GRANT.name(), bizNo + "_GRANT", 0, "{}");
+        // 支付方持续超时：关单结果未知，每一轮重试都可能拿到答案，故应退避重试而非一次判死
+        injector.setPayMode(FaultMode.TIMEOUT_BEFORE_COMMIT);
 
-        int maxRetry = TaskType.GRANT.getMaxRetry();
+        // 先把主单推进到 CLOSING —— reconcileClose 只对该状态做实事，其余状态视为「已被别的
+        // 路径收敛」直接返回 SUCCESS，任务一轮即 DONE，压不到重试分支
+        benefitOrderService.closeOrder(bizNo, "");
+        assertThat(
+                        str(
+                                benefitJdbc,
+                                "SELECT pay_status FROM play_biz_record WHERE"
+                                        + " play_biz_record_no = ?",
+                                bizNo))
+                .isEqualTo(PayStatus.CLOSING.name());
+
+        // 用 closeOrder 自己落的那条任务，不另行入队：op_no 同为 bizNo + "_QUERY_CLOSE"，
+        // 重复入队会命中 uk_biz_type_op 而保留原 task_no，后续按自造的号查库将一行也读不到
+        String taskNo =
+                str(
+                        benefitJdbc,
+                        "SELECT task_no FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                        bizNo,
+                        TaskType.QUERY_CLOSE.name());
+        assertThat(taskNo).as("关单受理应同事务落下查单任务").isNotNull();
+
+        int maxRetry = TaskType.QUERY_CLOSE.getMaxRetry();
         List<Long> pushes = new ArrayList<>();
         for (int round = 0; round < maxRetry; round++) {
             makeDue(taskNo);
