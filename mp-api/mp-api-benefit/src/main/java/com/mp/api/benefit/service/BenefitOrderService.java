@@ -3,10 +3,13 @@ package com.mp.api.benefit.service;
 import com.mp.api.benefit.dto.ConvergenceResp;
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.CreateTradeResp;
+import com.mp.api.benefit.dto.ManualRepairReq;
+import com.mp.api.benefit.dto.ManualRepairResp;
 import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.api.benefit.dto.PreConsultReq;
 import com.mp.api.benefit.dto.PreConsultResp;
 import com.mp.api.benefit.dto.QueryOrderResp;
+import com.mp.api.benefit.dto.ReconcileReport;
 import com.mp.api.benefit.dto.RevokeAdmitReq;
 import com.mp.api.benefit.dto.RevokeAdmitResp;
 import com.mp.common.enums.RetStatus;
@@ -114,6 +117,28 @@ public interface BenefitOrderService {
      * <p>由 {@code QUERY_REFUND} 任务驱动，<b>复用原退款单号</b>。
      */
     RetStatus reconcileRefund(String bizNo);
+
+    /**
+     * 跑一轮对账（FR-C06、技术方案 §6.8）。V3 PR-10 引入。
+     *
+     * <p><b>可自动补偿的项一律「补建任务」，不直接改业务状态</b>：补建任务把单子推回既有的收敛通路， 通路自带幂等闸；直接改状态则绕过全部闸门 ——
+     * 对账自己成了一条写入路径，而它是最少被测试的那条。
+     *
+     * <p><b>金额、库存计数、额度计数三类只告警不改数</b>：它们的正确值取决于历史，直接改会把一次错误 固化成新基线，此后对账再也看不出它错过。
+     *
+     * <p>由运维触发或定时任务驱动。V3 提供显式入口以便演示与测试。
+     */
+    ReconcileReport reconcile();
+
+    /**
+     * 人工处置（FR-C07、BR-C-27）。V3 PR-10 引入。
+     *
+     * <p><b>前五类动作一律复用原幂等键，不新造</b>：新造键即绕开 {@code uk_biz_op} 与下游的 {@code opNo} 幂等，等于给人工处置开一个可以重复发奖的后门
+     * —— 而人工处置是最容易被重复点击的入口。
+     *
+     * <p><b>{@code operator} / {@code reason} 必填</b>：不留操作人则人工干预与自动收敛在库里无从区分， 对账算不出真实的自动收敛率。
+     */
+    ManualRepairResp manualRepair(ManualRepairReq req);
 
     /**
      * 收敛回收 {@code UNKNOWN}：按原 {@code revokeNo} 重问供应方。

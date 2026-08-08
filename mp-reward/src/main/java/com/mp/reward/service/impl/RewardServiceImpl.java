@@ -271,6 +271,29 @@ public class RewardServiceImpl implements RewardService {
         return ProviderCallbackResp.accepted(false);
     }
 
+    /**
+     * 批量按幂等号查发放结果，供对账比对（§6.8）。V3 PR-10。
+     *
+     * <p><b>查无的键不放进返回</b>：对账第 3 项要找的正是「平台有履约明细而 reward 侧查无」的那些键， 补占位行会把差异抹平。
+     *
+     * <p><b>只查主表不查明细</b>：对账比的是「这笔发放在 reward 侧是什么状态」，逐项明细对它没有意义， 而按 {@code opNo} 批量拉明细会让返回集随权益项数膨胀
+     * —— 对账一次扫几百笔单，这个膨胀是实打实的。
+     */
+    @Override
+    public java.util.Map<String, GrantRewardResp> batchQueryByOpNos(java.util.List<String> opNos) {
+        if (opNos == null || opNos.isEmpty()) {
+            // 空列表会让 foreach 拼出 IN ()，MySQL 语法错误。在此拦下而非交给调用方 ——
+            // 「对账这一批没有要比对的键」是正常情形，不该要求每个调用点各判一次
+            return java.util.Map.of();
+        }
+        java.util.Map<String, GrantRewardResp> result = new java.util.LinkedHashMap<>();
+        for (RewardGrantRecord record : recordMapper.selectByOpNos(opNos)) {
+            result.put(
+                    record.getOpNo(), buildResp(RetStatus.valueOf(record.getResult()), List.of()));
+        }
+        return result;
+    }
+
     /** 取收奖人，供事件体携带。记录不存在时返回 {@code null} —— 通知先于发放记录到达是可能的。 */
     private String receiverOf(String opNo) {
         RewardGrantRecord record = existingRecord(opNo);
