@@ -15,13 +15,18 @@ import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.api.benefit.dto.PreConsultReq;
 import com.mp.api.benefit.dto.PreConsultResp;
 import com.mp.api.benefit.dto.QueryOrderResp;
+import com.mp.api.benefit.dto.RevokeAdmitReq;
+import com.mp.api.benefit.dto.RevokeAdmitResp;
 import com.mp.api.benefit.service.BenefitOrderService;
 import com.mp.api.mock.dto.PayCloseResp;
 import com.mp.api.mock.dto.PayCreateReq;
 import com.mp.api.mock.dto.PayCreateResp;
+import com.mp.api.mock.dto.PayRefundResp;
 import com.mp.api.mock.service.MockPayService;
 import com.mp.api.reward.dto.GrantRewardReq;
 import com.mp.api.reward.dto.GrantRewardResp;
+import com.mp.api.reward.dto.RevokeRewardReq;
+import com.mp.api.reward.dto.RevokeRewardResp;
 import com.mp.api.reward.dto.RewardItem;
 import com.mp.api.reward.service.RewardService;
 import com.mp.benefit.entity.BenefitFulfillmentRecord;
@@ -43,6 +48,7 @@ import com.mp.benefit.service.SnapshotItem;
 import com.mp.common.enums.ErrorCode;
 import com.mp.common.enums.GrantStatus;
 import com.mp.common.enums.ItemGrantStatus;
+import com.mp.common.enums.OpType;
 import com.mp.common.enums.PayStatus;
 import com.mp.common.enums.RefundStatus;
 import com.mp.common.enums.RetStatus;
@@ -706,7 +712,437 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     }
 
     // ------------------------------------------------------------------
-    // ④ 查询
+    // ④ 退款准入与权益回收（V3 PR-7）
+    // ------------------------------------------------------------------
+
+    /**
+     * 退款准入 + 权益回收（FR-B08、BR-B-30）。
+     *
+     * <p>五态分流见接口注释。<b>核心判据是「发放结果是否确定」，不是「是否成功」</b>。
+     *
+     * <p>组件序：同步使用态 → 五态准入 → 进 {@code REVOKING} → 调 reward 回收 → 按四分类分流。
+     */
+    @Override
+    public RevokeAdmitResp revokeAndAdmit(RevokeAdmitReq req) {
+        ReqFields.required(req.getBizNo(), "bizNo");
+        // refundReqNo 是两把幂等键的唯一来源，缺了它键会退化成 bizNo + "_V_null"，
+        // 同一单的第二次退款请求派生出同一把键 —— 唯一索引把它当成重传吞掉
+        ReqFields.required(req.getRefundReqNo(), "refundReqNo");
+
+        return bizLock.aroundRefund(req.getBizNo(), () -> doRevokeAndAdmit(req));
+    }
+
+    private RevokeAdmitResp doRevokeAndAdmit(RevokeAdmitReq req) {
+        String bizNo = req.getBizNo();
+        PlayBizRecord order = findByBizNo(bizNo);
+        if (order == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
+        }
+
+        // ① 未支付的单没有钱可退。放在最前 —— 它比发放态更基本
+        if (!PayStatus.PAY_SUCCESS.name().equals(order.getPayStatus())) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "订单未支付，无款可退: " + order.getPayStatus());
+        }
+
+        // ② 幂等命中：这一笔退款请求已受理过，返回原结果。
+        //
+        // 判据必须是「同一个 refundReqNo」，不能只看主单是否已在退款中。首版写成
+        // 「refund_status 已是 REFUNDING/REFUND_SUCCESS 就返回成功」，于是客服换个工单号
+        // 再点一次，会拿到 admitted=true —— 而那笔退款根本没发生。钱没多退（后续闸挡住了），
+        // 但调用方据此以为受理成功，工单被误标为已处理，用户的第二次诉求就此消失
+        String revokeNo = IdempotentKeys.revokeNo(bizNo, req.getRefundReqNo());
+        RefundStatus refundStatus = RefundStatus.valueOf(order.getRefundStatus());
+        if (refundStatus == RefundStatus.REFUND_SUCCESS || refundStatus == RefundStatus.REFUNDING) {
+            if (opRecordMapper.selectByIdempotentKey(revokeNo) != null) {
+                log.info("revokeAndAdmit idempotent hit, bizNo={}, revokeNo={}", bizNo, revokeNo);
+                return admitted(RetStatus.SUCCESS, revokeNo);
+            }
+            // 另一笔退款请求正在处理或已完成 —— 本单至多一笔有效退款（BR-B-31）
+            log.info(
+                    "revokeAndAdmit rejected, another refund in progress, bizNo={}, status={}",
+                    bizNo,
+                    refundStatus);
+            throw new BizException(ErrorCode.CONCURRENT_CONFLICT, "本单已有退款在处理中: " + refundStatus);
+        }
+
+        // ③ 五态准入判定（技术方案 §7.5）
+        GrantStatus grantStatus = GrantStatus.valueOf(order.getGrantStatus());
+        if (grantStatus == GrantStatus.GRANTING || grantStatus == GrantStatus.GRANT_UNKNOWN) {
+            // 结果未定：回收对象不明。等查单收敛后再判 —— 此刻既不能回收也不能退
+            log.info(
+                    "revokeAndAdmit rejected, grant not settled, bizNo={}, grant={}",
+                    bizNo,
+                    grantStatus);
+            throw new BizException(ErrorCode.GRANT_NOT_SETTLED, "发放结果未定，暂不受理退款: " + grantStatus);
+        }
+
+        // ④ 进 REVOKING + 落操作记录，同事务。三道闸的第一、二道在此
+        if (!tx.admitRefund(order, revokeNo, req.getOperator())) {
+            // 条件更新未命中：状态非法或并发已推进。回查当前态给出准确的拒绝原因
+            PlayBizRecord latest = findByBizNo(bizNo);
+            String current = latest == null ? "?" : latest.getRefundStatus();
+            log.info("revokeAndAdmit not admitted by state gate, bizNo={}, now={}", bizNo, current);
+            throw new BizException(ErrorCode.CONCURRENT_CONFLICT, "退款状态不允许受理: " + current);
+        }
+
+        // ⑤ NOT_START / GRANT_FAILED：无权益在外，不必回收。
+        //
+        // 这一支是准入表里最容易写错的地方：写成「未发放成功就不许退款」会把这两类单永久
+        // 锁死 —— 而「已支付未履约」正是对账要自动补偿的头号场景，退不了款则收敛率破防
+        if (grantStatus == GrantStatus.NOT_START || grantStatus == GrantStatus.GRANT_FAILED) {
+            tx.settleRevoke(bizNo, revokeNo, "NOT_GRANTED");
+            log.info("revokeAndAdmit no revoke needed, bizNo={}, grant={}", bizNo, grantStatus);
+            RevokeAdmitResp resp = admitted(RetStatus.SUCCESS, revokeNo);
+            resp.setRevokeRequired(false);
+            resp.setUsageStatus("NOT_GRANTED");
+            return resp;
+        }
+
+        // ⑥ GRANT_SUCCESS：先回收后退款
+        return revokeGranted(order, revokeNo, req.getRefundReqNo());
+    }
+
+    /**
+     * 回收已发放的权益，按四分类分流。
+     *
+     * <p><b>逐笔发奖各回收一次</b>：一单可能跨多个供应方、有多条明细，每条各有自己的 {@code grantOpNo}。 回收键在其后缀上再分一层 —— 与 {@code
+     * grantOpNo} 的「一次调用 = 一个供应方」粒度对齐。
+     *
+     * <p><b>汇总取最不确定的那一项</b>，与 {@code reward} 侧的 {@code summarize} 同一判据：只要有一项 未定，整笔回收就未收敛 —— 汇总成
+     * {@code SUCCESS} 会让退款在权益可能还在的情况下推进。
+     */
+    private RevokeAdmitResp revokeGranted(
+            PlayBizRecord order, String revokeNo, String refundReqNo) {
+        String bizNo = order.getPlayBizRecordNo();
+        List<BenefitFulfillmentRecord> granted = fulfillmentMapper.selectGranted(bizNo);
+        if (granted.isEmpty()) {
+            // grant_status 是 GRANT_SUCCESS 但没有成功明细 —— 数据不一致，交人工。
+            // 不静默当作「无需回收」：那会退掉一笔可能已发放的单
+            log.error("revokeAndAdmit found no granted item while GRANT_SUCCESS, bizNo={}", bizNo);
+            tx.unresolvedRevoke(bizNo, revokeNo, RetStatus.UNKNOWN);
+            return unresolved(revokeNo, null);
+        }
+
+        boolean anyUnresolved = false;
+        boolean anyFail = false;
+        String usageStatus = null;
+        for (BenefitFulfillmentRecord item : granted) {
+            RevokeRewardReq rr = new RevokeRewardReq();
+            // 每条明细一把回收键，粒度与 grantOpNo 对齐（一次发放调用 = 一次回收调用）。
+            //
+            // 由三段直接拼出，不接 revokeNo + grantOpNo 两把完整的键 —— 首版那样写，
+            // 实测 90+ 字符溢出 VARCHAR(64)，而插入异常被「异常一律 UNKNOWN」捕获，
+            // 表现与供应方超时完全一样：主单进 REVOKING、落 REVOKE 任务、回报结果未定，
+            // 而回收请求根本没发出去
+            rr.setRevokeNo(IdempotentKeys.revokeItemNo(bizNo, refundReqNo, item.getProviderType()));
+            rr.setBizOrderNo(bizNo);
+            rr.setOpNo(item.getGrantOpNo());
+            rr.setReceiverId(order.getUserId());
+
+            RetStatus one;
+            try {
+                RevokeRewardResp rs = rewardService.revokeReward(rr);
+                one = rs.getRetStatus();
+                if (rs.getUsageStatus() != null) {
+                    usageStatus = rs.getUsageStatus();
+                }
+            } catch (Exception e) {
+                // 异常映射 UNKNOWN 而非 FAIL：权益可能已被收走。判 FAIL 会让人工按
+                // 「权益还在」处置，而据此拒绝退款则用户既没权益也没钱
+                log.warn("revokeReward threw, treat as UNKNOWN, revokeNo={}", revokeNo, e);
+                one = RetStatus.UNKNOWN;
+            }
+
+            if (one == RetStatus.UNKNOWN || one == RetStatus.PROCESSING) {
+                anyUnresolved = true;
+            } else if (one == RetStatus.FAIL) {
+                anyFail = true;
+            }
+        }
+
+        if (anyUnresolved) {
+            // 未定：主单保持 REVOKING，落 REVOKE 任务由收敛处置，不推进退款
+            tx.unresolvedRevoke(bizNo, revokeNo, RetStatus.UNKNOWN);
+            log.info("revokeAndAdmit unresolved, keep REVOKING, bizNo={}", bizNo);
+            return unresolved(revokeNo, usageStatus);
+        }
+        if (anyFail) {
+            // 确定失败（多为已核销）：权益还在，不得退款。可人工重试重入
+            tx.failRevoke(bizNo, usageStatus);
+            log.info("revokeAndAdmit revoke failed, bizNo={}, usage={}", bizNo, usageStatus);
+            RevokeAdmitResp resp = new RevokeAdmitResp();
+            resp.setAdmitted(false);
+            resp.setRetStatus(RetStatus.FAIL);
+            resp.setReasonCode(
+                    "USED".equals(usageStatus) || "PARTIALLY_USED".equals(usageStatus)
+                            ? ErrorCode.BENEFIT_ALREADY_USED
+                            : ErrorCode.REVOKE_NOT_DONE);
+            resp.setRevokeNo(revokeNo);
+            resp.setUsageStatus(usageStatus);
+            resp.setRevokeRequired(true);
+            return resp;
+        }
+
+        // 全部回收成功：落回收单号与回收时间，主单停在 REVOKING 等 createRefund 推进
+        tx.settleRevoke(bizNo, revokeNo, usageStatus);
+        log.info("revokeAndAdmit revoked, bizNo={}, revokeNo={}", bizNo, revokeNo);
+        RevokeAdmitResp resp = admitted(RetStatus.SUCCESS, revokeNo);
+        resp.setUsageStatus(usageStatus);
+        resp.setRevokeRequired(true);
+        return resp;
+    }
+
+    private static RevokeAdmitResp admitted(RetStatus status, String revokeNo) {
+        RevokeAdmitResp resp = new RevokeAdmitResp();
+        resp.setAdmitted(true);
+        resp.setRetStatus(status);
+        resp.setRevokeNo(revokeNo);
+        return resp;
+    }
+
+    /**
+     * 回收结果未定：<b>准入通过但不得退款</b>。
+     *
+     * <p>{@code admitted=true} 与 {@code retStatus=UNKNOWN} 的组合表示「这单可以退，但现在还不能退」 —— 与 {@code
+     * admitted=false}（这单不能退）是两回事。调用方据此等待收敛而非提示用户失败。
+     */
+    private static RevokeAdmitResp unresolved(String revokeNo, String usageStatus) {
+        RevokeAdmitResp resp = new RevokeAdmitResp();
+        resp.setAdmitted(true);
+        resp.setRetStatus(RetStatus.UNKNOWN);
+        resp.setReasonCode(ErrorCode.REVOKE_NOT_DONE);
+        resp.setRevokeNo(revokeNo);
+        resp.setUsageStatus(usageStatus);
+        resp.setRevokeRequired(true);
+        return resp;
+    }
+
+    // ------------------------------------------------------------------
+    // ⑤ 退款执行与收敛（V3 PR-8）
+    // ------------------------------------------------------------------
+
+    /**
+     * 退款执行（FR-B08）。<b>必须在 {@code revokeAndAdmit} 之后</b>。
+     *
+     * <p>「先回收后退款」这条顺序由 {@code startRefund} 的前置态谓词强制：{@code REVOKING} 只能由 准入置入，绕过准入直接调本方法会命中 0
+     * 行（技术方案 §5.6，顺序不可颠倒）。
+     */
+    @Override
+    public RetStatus createRefund(String bizNo, String refundReqNo) {
+        ReqFields.required(bizNo, "bizNo");
+        ReqFields.required(refundReqNo, "refundReqNo");
+        return bizLock.aroundRefund(bizNo, () -> doCreateRefund(bizNo, refundReqNo));
+    }
+
+    private RetStatus doCreateRefund(String bizNo, String refundReqNo) {
+        PlayBizRecord order = findByBizNo(bizNo);
+        if (order == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
+        }
+
+        String refundNo = IdempotentKeys.refundNo(bizNo, refundReqNo);
+        RefundStatus current = RefundStatus.valueOf(order.getRefundStatus());
+        if (current == RefundStatus.REFUND_SUCCESS || current == RefundStatus.REFUNDING) {
+            // 幂等命中的判据是「同一个 refundReqNo」，不是「这单已在退款中」。
+            //
+            // 只看状态的话，客服换个工单号再点一次会拿到 SUCCESS —— 而那笔退款根本没发生。
+            // 钱不会多退（三道闸挡得住），但工单被误标为已处理，用户的第二次诉求就此消失
+            if (refundNo.equals(order.getRefundNo())) {
+                log.info("createRefund idempotent hit, bizNo={}, refundNo={}", bizNo, refundNo);
+                return current == RefundStatus.REFUND_SUCCESS
+                        ? RetStatus.SUCCESS
+                        : RetStatus.UNKNOWN;
+            }
+            // 另一笔退款请求已占用本单（BR-B-31 一单至多一笔有效退款）
+            log.info("createRefund rejected, another refund holds this order, bizNo={}", bizNo);
+            throw new BizException(
+                    ErrorCode.CONCURRENT_CONFLICT, "本单已有其他退款请求: " + order.getRefundNo());
+        }
+        if (current != RefundStatus.REVOKING) {
+            // 未经准入或回收未完成。REVOKE_FAILED / NONE 都落在这里 —— 前者权益还在，
+            // 后者根本没走过准入。两者都不允许退款
+            log.info("createRefund rejected, refund status={}, bizNo={}", current, bizNo);
+            throw new BizException(ErrorCode.REVOKE_NOT_DONE, "回收未完成，不得退款: " + current);
+        }
+
+        // 三道闸的第一、二道：条件更新挡状态非法与并发，uk_biz_op 挡「两个 refundNo 退两次」
+        if (!tx.startRefund(order, refundNo)) {
+            log.info("createRefund not admitted by state gate, bizNo={}", bizNo);
+            throw new BizException(ErrorCode.CONCURRENT_CONFLICT, "退款状态不允许受理");
+        }
+
+        return callPayRefund(order, refundNo);
+    }
+
+    /**
+     * 调支付方退款，按四分类分流。
+     *
+     * <p><b>异常映射 {@code UNKNOWN} 而非 {@code FAIL}</b>：钱可能已经退出去了。判 {@code FAIL} 会让人工 按「没退成」处置并重发 ——
+     * 那就是重复退款，而这条链路的目标正是「重复退款 = 0」。
+     */
+    private RetStatus callPayRefund(PlayBizRecord order, String refundNo) {
+        String bizNo = order.getPlayBizRecordNo();
+        RetStatus result;
+        try {
+            PayRefundResp resp = mockPayService.refund(bizNo, refundNo, order.getPayAmount());
+            result = resp.getRetStatus();
+        } catch (Exception e) {
+            log.warn("pay refund threw, treat as UNKNOWN, refundNo={}", refundNo, e);
+            result = RetStatus.UNKNOWN;
+        }
+
+        switch (result) {
+            case SUCCESS -> {
+                tx.settleRefund(bizNo);
+                log.info("createRefund done, bizNo={}, refundNo={}", bizNo, refundNo);
+            }
+            case FAIL -> {
+                tx.failRefund(bizNo);
+                log.warn("createRefund failed, bizNo={}, refundNo={}", bizNo, refundNo);
+            }
+            default -> {
+                // UNKNOWN / PROCESSING：主单保持 REFUNDING，落查单任务由收敛处置。
+                // 不重发 —— 重发一笔可能已成功的退款就是重复退款
+                tx.unresolvedRefund(bizNo, refundNo, result);
+                log.info("createRefund unresolved, keep REFUNDING, bizNo={}", bizNo);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 收敛退款 {@code UNKNOWN}：按原 {@code refundNo} 查单。
+     *
+     * <p><b>查单而非重发</b>：这是「重复退款 = 0」与「该退必退」能同时成立的唯一形态 —— 查单是读 操作，无论问多少次都不会多退一分钱。
+     */
+    @Override
+    public RetStatus reconcileRefund(String bizNo) {
+        PlayBizRecord order = findByBizNo(bizNo);
+        if (order == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
+        }
+        String refundNo = order.getRefundNo();
+        if (refundNo == null) {
+            // 没有退款单号却在收敛退款 —— 数据不一致，交人工而非猜一个号
+            log.error("reconcileRefund found no refundNo, bizNo={}", bizNo);
+            return RetStatus.UNKNOWN;
+        }
+
+        RetStatus result;
+        try {
+            result = mockPayService.queryRefund(refundNo).getRetStatus();
+        } catch (Exception e) {
+            log.warn("query refund threw, treat as UNKNOWN, refundNo={}", refundNo, e);
+            result = RetStatus.UNKNOWN;
+        }
+
+        switch (result) {
+            case SUCCESS -> {
+                tx.settleRefund(bizNo);
+                log.info("reconcileRefund converged to SUCCESS, bizNo={}", bizNo);
+            }
+            case FAIL -> {
+                tx.failRefund(bizNo);
+                log.info("reconcileRefund converged to FAIL, bizNo={}", bizNo);
+            }
+            default -> log.info("reconcileRefund unresolved, keep querying, bizNo={}", bizNo);
+        }
+        return result;
+    }
+
+    /**
+     * 收敛回收 {@code UNKNOWN}：按原 {@code revokeNo} 重问供应方。
+     *
+     * <p><b>收敛为成功后主单停在 {@code REVOKING}，不自动发起退款</b>：回收与退款是两个独立的决定，
+     * 由调用方（或人工处置）显式推进。自动串起来会让一次回收收敛顺带把钱退出去 —— 而此刻可能 已有别的处置在进行。
+     */
+    @Override
+    public RetStatus reconcileRevoke(String bizNo) {
+        PlayBizRecord order = findByBizNo(bizNo);
+        if (order == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
+        }
+        if (!RefundStatus.REVOKING.name().equals(order.getRefundStatus())) {
+            // 已被别的路径收敛（人工处置、同步链路）。返回 SUCCESS 让任务了结 ——
+            // 它要做的事已经有人做了，继续重试没有对象
+            log.info(
+                    "reconcileRevoke nothing to do, status={}, bizNo={}",
+                    order.getRefundStatus(),
+                    bizNo);
+            return RetStatus.SUCCESS;
+        }
+
+        List<BenefitFulfillmentRecord> granted = fulfillmentMapper.selectGranted(bizNo);
+        String revokeNo = null;
+        boolean anyUnresolved = false;
+        boolean anyFail = false;
+        String usageStatus = null;
+
+        for (BenefitFulfillmentRecord item : granted) {
+            // 回收单号由明细上的 revoke_no 取；未落则说明该项尚未回收成功
+            String base = item.getRevokeNo();
+            if (base != null) {
+                revokeNo = base;
+                continue;
+            }
+            // 该项仍未收敛：以原键重问。原键由准入时的 revokeNo 派生，此处从操作记录取
+            PlayOpRecord op =
+                    opRecordMapper.selectOne(
+                            Wrappers.<PlayOpRecord>lambdaQuery()
+                                    .eq(PlayOpRecord::getPlayBizRecordNo, bizNo)
+                                    .eq(PlayOpRecord::getOpType, OpType.REVOKE_BENEFIT.name()));
+            if (op == null) {
+                log.error("reconcileRevoke found no revoke op record, bizNo={}", bizNo);
+                return RetStatus.UNKNOWN;
+            }
+            revokeNo = op.getOpNo();
+
+            RevokeRewardReq rr = new RevokeRewardReq();
+            // 复用与同步链路完全相同的键：收敛的前提是「以原键重问」，派生规则若与
+            // 发起侧不一致，下游会把它当成一次新的回收 —— 那就是二次回收
+            rr.setRevokeNo(
+                    IdempotentKeys.revokeItemNo(
+                            bizNo,
+                            IdempotentKeys.refundReqNoOfRevoke(revokeNo, bizNo),
+                            item.getProviderType()));
+            rr.setBizOrderNo(bizNo);
+            rr.setOpNo(item.getGrantOpNo());
+            rr.setReceiverId(order.getUserId());
+
+            RetStatus one;
+            try {
+                RevokeRewardResp rs = rewardService.revokeReward(rr);
+                one = rs.getRetStatus();
+                if (rs.getUsageStatus() != null) {
+                    usageStatus = rs.getUsageStatus();
+                }
+            } catch (Exception e) {
+                log.warn("reconcileRevoke call threw, treat as UNKNOWN, bizNo={}", bizNo, e);
+                one = RetStatus.UNKNOWN;
+            }
+            if (one == RetStatus.UNKNOWN || one == RetStatus.PROCESSING) {
+                anyUnresolved = true;
+            } else if (one == RetStatus.FAIL) {
+                anyFail = true;
+            }
+        }
+
+        if (anyUnresolved) {
+            log.info("reconcileRevoke still unresolved, bizNo={}", bizNo);
+            return RetStatus.UNKNOWN;
+        }
+        if (anyFail) {
+            tx.failRevoke(bizNo, usageStatus);
+            log.info("reconcileRevoke converged to FAIL, bizNo={}", bizNo);
+            return RetStatus.SUCCESS;
+        }
+        tx.settleRevoke(bizNo, revokeNo, usageStatus);
+        log.info("reconcileRevoke converged to SUCCESS, bizNo={}", bizNo);
+        return RetStatus.SUCCESS;
+    }
+
+    // ------------------------------------------------------------------
+    // ⑥ 查询
     // ------------------------------------------------------------------
 
     @Override

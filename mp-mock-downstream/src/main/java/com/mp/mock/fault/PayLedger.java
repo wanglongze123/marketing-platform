@@ -61,7 +61,54 @@ public class PayLedger {
         return states.get(outTradeNo);
     }
 
+    // ---- 退款（V3 PR-8） ----
+
+    /** 退款账本，键为 {@code refundNo}。与支付单状态分开 —— 一笔支付对应至多一笔退款，但键不同 */
+    private final Map<String, String> refundOrderNoByRefundNo = new ConcurrentHashMap<>();
+
+    /** 每个 {@code refundNo} 收到过几次退款请求 */
+    private final Map<String, Integer> refundAttemptsByRefundNo = new ConcurrentHashMap<>();
+
+    private final java.util.concurrent.atomic.AtomicLong refundSeq =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** 记一次退款请求的到达，无论本次是否记账。与 {@code ProviderLedger.recordGrantAttempt} 同一用途。 */
+    public void recordRefundAttempt(String refundNo) {
+        refundAttemptsByRefundNo.merge(refundNo, 1, Integer::sum);
+    }
+
+    public int refundAttempts(String refundNo) {
+        return refundAttemptsByRefundNo.getOrDefault(refundNo, 0);
+    }
+
+    /**
+     * 记退款账。<b>同一 {@code refundNo} 重复调用返回首次的单号，不二次退款</b>。
+     *
+     * <p>{@code computeIfAbsent} 语义等价于唯一索引 —— 这是「重复退款 = 0」在下游侧的最终判据。
+     * 平台侧的三道闸都在平台自己的库里，只能证明平台没重复受理；<b>钱有没有退两次，只有支付方数得准</b>。
+     */
+    public String recordRefund(String refundNo) {
+        return refundOrderNoByRefundNo.computeIfAbsent(
+                refundNo, k -> "RFD" + refundSeq.incrementAndGet() + "_" + k);
+    }
+
+    /** 查退款账。返回 {@code null} 表示查无 —— 调用方须据此返回 {@code UNKNOWN} 而非 {@code FAIL}。 */
+    public String findRefund(String refundNo) {
+        return refundOrderNoByRefundNo.get(refundNo);
+    }
+
+    public boolean containsRefund(String refundNo) {
+        return refundOrderNoByRefundNo.containsKey(refundNo);
+    }
+
+    /** 退款账本条目数。测试断言「一笔单只退了一次」的下游侧口径。 */
+    public int refundSize() {
+        return refundOrderNoByRefundNo.size();
+    }
+
     public void clear() {
         states.clear();
+        refundOrderNoByRefundNo.clear();
+        refundAttemptsByRefundNo.clear();
     }
 }

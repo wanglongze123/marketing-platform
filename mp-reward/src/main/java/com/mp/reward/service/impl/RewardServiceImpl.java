@@ -3,17 +3,23 @@ package com.mp.reward.service.impl;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.mp.api.mock.dto.ProviderGrantReq;
 import com.mp.api.mock.dto.ProviderGrantResp;
+import com.mp.api.mock.dto.ProviderRevokeReq;
+import com.mp.api.mock.dto.ProviderRevokeResp;
 import com.mp.api.mock.service.MockProviderService;
 import com.mp.api.reward.dto.GrantItemResult;
 import com.mp.api.reward.dto.GrantRewardReq;
 import com.mp.api.reward.dto.GrantRewardResp;
+import com.mp.api.reward.dto.RevokeRewardReq;
+import com.mp.api.reward.dto.RevokeRewardResp;
 import com.mp.api.reward.dto.RewardItem;
 import com.mp.api.reward.service.RewardService;
 import com.mp.common.enums.RetStatus;
 import com.mp.reward.entity.RewardGrantItem;
 import com.mp.reward.entity.RewardGrantRecord;
+import com.mp.reward.entity.RewardRevokeRecord;
 import com.mp.reward.repository.RewardGrantItemMapper;
 import com.mp.reward.repository.RewardGrantRecordMapper;
+import com.mp.reward.repository.RewardRevokeRecordMapper;
 import com.mp.reward.service.RewardTxService;
 import java.util.ArrayList;
 import java.util.List;
@@ -44,14 +50,17 @@ public class RewardServiceImpl implements RewardService {
     private final RewardTxService tx;
     private final RewardGrantRecordMapper recordMapper;
     private final RewardGrantItemMapper itemMapper;
+    private final RewardRevokeRecordMapper revokeRecordMapper;
 
     public RewardServiceImpl(
             RewardTxService tx,
             RewardGrantRecordMapper recordMapper,
-            RewardGrantItemMapper itemMapper) {
+            RewardGrantItemMapper itemMapper,
+            RewardRevokeRecordMapper revokeRecordMapper) {
         this.tx = tx;
         this.recordMapper = recordMapper;
         this.itemMapper = itemMapper;
+        this.revokeRecordMapper = revokeRecordMapper;
     }
 
     /**
@@ -102,6 +111,93 @@ public class RewardServiceImpl implements RewardService {
         RetStatus summary = summarize(results);
         writeBackSummary(opNo, summary, record.getBizOrderNo(), results.size());
         return buildResp(summary, results);
+    }
+
+    /**
+     * 回收已发放的权益（BR-B-30）。V3 PR-7。
+     *
+     * <p>三段式与 {@link #grantReward} 同构：① 落 {@code PROCESSING} ② 事务外调下游 ③ 回写终态。 幂等出口在 ①，由 {@code
+     * uk_revoke_no} 兜底而非「先查后插」。
+     *
+     * <p><b>「仅当未使用才回收」不在本方法判断</b>：平台先查 {@code usageStatus} 再决定要不要调用， 在两步之间存在窗口 ——
+     * 查到未使用、用户随即核销、平台再回收，于是券已花掉而平台以为回收成功、 退了钱。判定与动作必须由持有该券的供应方原子完成，本方法只转发它回传的 {@code usageStatus}。
+     *
+     * <p><b>异常映射 {@code UNKNOWN} 而非 {@code FAIL}</b>：与发奖同理，异常可能发生在 RPC 发出之后。 判 {@code FAIL}
+     * 会让调用方以为「权益还在」而拒绝退款 —— 而权益可能已被收走，用户既没权益 也没退款。
+     */
+    @Override
+    public RevokeRewardResp revokeReward(RevokeRewardReq req) {
+        String revokeNo = req.getRevokeNo();
+
+        // ① 落中间态。冲突即已受理过，走幂等出口
+        try {
+            tx.createRevokeProcessing(req);
+        } catch (DuplicateKeyException e) {
+            RewardRevokeRecord existing = revokeRecordMapper.selectByRevokeNo(revokeNo);
+            if (existing != null && !RetStatus.PROCESSING.name().equals(existing.getResult())) {
+                // 已收敛：返回原结果，这是幂等的正常出口。不打 ERROR、不告警
+                log.info("revokeReward duplicated, return existing result, revokeNo={}", revokeNo);
+                return buildRevokeResp(
+                        RetStatus.valueOf(existing.getResult()),
+                        existing.getUsageStatus(),
+                        existing.getProviderOrderNo(),
+                        existing.getErrorCode());
+            }
+            // 仍是 PROCESSING：原调用可能未到达下游，以原 revokeNo 重发。
+            // 下游按 revokeNo 幂等，若原调用其实已到达，重发返回首次结果，不二次回收
+            log.info("revokeReward re-dispatched with original revokeNo, revokeNo={}", revokeNo);
+        }
+
+        // ② 事务外调下游
+        RetStatus status;
+        String usageStatus = null;
+        String providerOrderNo = null;
+        String errorCode = null;
+        try {
+            ProviderRevokeReq downReq = new ProviderRevokeReq();
+            downReq.setRevokeNo(revokeNo);
+            downReq.setGrantOpNo(req.getOpNo());
+            downReq.setReceiverId(req.getReceiverId());
+            ProviderRevokeResp downResp = mockProviderService.revoke(downReq);
+            status = downResp.getRetStatus();
+            usageStatus = downResp.getUsageStatus();
+            providerOrderNo = downResp.getProviderOrderNo();
+            errorCode = downResp.getErrorCode();
+        } catch (Exception e) {
+            log.warn("provider revoke failed, treat as UNKNOWN, revokeNo={}", revokeNo, e);
+            status = RetStatus.UNKNOWN;
+        }
+
+        // ③ 回写终态。UNKNOWN / PROCESSING 不回写，记录保持 PROCESSING 等收敛
+        if (status != RetStatus.UNKNOWN && status != RetStatus.PROCESSING) {
+            int rows = tx.finishRevoke(revokeNo, status, usageStatus, providerOrderNo, errorCode);
+            if (rows == 0) {
+                log.info("revokeReward already settled by another path, revokeNo={}", revokeNo);
+            }
+        } else {
+            log.info(
+                    "revokeReward unresolved, keep PROCESSING, revokeNo={}, result={}",
+                    revokeNo,
+                    status);
+        }
+
+        log.info(
+                "revokeReward done, revokeNo={}, grantOpNo={}, result={}, usage={}",
+                revokeNo,
+                req.getOpNo(),
+                status,
+                usageStatus);
+        return buildRevokeResp(status, usageStatus, providerOrderNo, errorCode);
+    }
+
+    private static RevokeRewardResp buildRevokeResp(
+            RetStatus status, String usageStatus, String providerOrderNo, String errorCode) {
+        RevokeRewardResp resp = new RevokeRewardResp();
+        resp.setRetStatus(status);
+        resp.setUsageStatus(usageStatus);
+        resp.setProviderOrderNo(providerOrderNo);
+        resp.setErrorCode(errorCode);
+        return resp;
     }
 
     /**

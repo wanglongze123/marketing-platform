@@ -7,6 +7,8 @@ import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.api.benefit.dto.PreConsultReq;
 import com.mp.api.benefit.dto.PreConsultResp;
 import com.mp.api.benefit.dto.QueryOrderResp;
+import com.mp.api.benefit.dto.RevokeAdmitReq;
+import com.mp.api.benefit.dto.RevokeAdmitResp;
 import com.mp.common.enums.RetStatus;
 
 /** 权益售卖（玩法层）。方法名对应 play_op_record 的操作类型。 */
@@ -66,6 +68,60 @@ public interface BenefitOrderService {
      * 三条路径走同一段代码，幂等只需证明一次。重入时三处走 upsert，不抛 DuplicateKeyException。
      */
     RetStatus grantBenefit(String bizNo);
+
+    /**
+     * 退款准入 + 权益回收（FR-B08、BR-B-30）。V3 PR-7 引入。
+     *
+     * <p><b>准入判据是「发放结果是否确定」，不是「是否成功」</b>（技术方案 §7.5）：
+     *
+     * <table>
+     *   <tr><th>grant 状态</th><th>处置</th><th>依据</th></tr>
+     *   <tr><td>{@code NOT_START}</td><td>直接退，无需回收</td><td>权益从未发放</td></tr>
+     *   <tr><td>{@code GRANT_FAILED}</td><td>直接退，无需回收</td><td>发放已确定失败，无权益在外</td></tr>
+     *   <tr><td>{@code GRANT_SUCCESS}</td><td><b>先回收再退</b></td><td>BR-B-30</td></tr>
+     *   <tr><td>{@code GRANTING}</td><td>拒绝 {@code 1751}</td><td>结果未定，回收对象不明</td></tr>
+     *   <tr><td>{@code GRANT_UNKNOWN}</td><td>拒绝 {@code 1751}</td><td>BR-B-29 未知态不退款</td></tr>
+     * </table>
+     *
+     * <p><b>不能写成「grant 未成功就不允许退款」</b> —— 那会把 {@code NOT_START} 与 {@code GRANT_FAILED}
+     * 这两类最需要退款的单永久锁死，而「已支付未履约」正是对账要自动补偿的头号场景，退不了款 则收敛率必然破防。
+     *
+     * <p>回收 {@code UNKNOWN} 时准入通过但<b>不得推进退款</b>：权益可能已被收走也可能没有，此时 退款要么「退了钱权益还在」，要么用户既没权益也没钱。
+     */
+    RevokeAdmitResp revokeAndAdmit(RevokeAdmitReq req);
+
+    /**
+     * 退款执行（FR-B08）。V3 PR-8 引入。<b>必须在 {@link #revokeAndAdmit} 之后调用</b>。
+     *
+     * <p>顺序不可颠倒（技术方案 §5.6）：先退款后回收会让「回收失败」发生在钱已经退出去之后 —— 那时权益还在用户手里，且没有任何机制能把钱要回来。
+     *
+     * <p><b>前置校验主单必须处于 {@code REVOKING}</b>：该状态只能由 {@code revokeAndAdmit} 置入，故它
+     * 本身就是「准入已通过且回收已完成」的凭据。绕过准入直接调本方法会被这道谓词挡下。
+     *
+     * <p>重复退款由三道闸拦截，{@code refundNo} 只是最弱的一道：主单条件更新挡状态非法与并发、 {@code uk_biz_op(bizNo,
+     * 'CREATE_REFUND', '')} 挡「两个不同 {@code refundNo} 退两次」（客服 连点）、{@code refundNo} 唯一挡同键重传。
+     *
+     * <p>退款走 {@code UNKNOWN} 收敛：结果未定时落 {@code QUERY_REFUND} 任务，<b>不重发</b> —— 重发一笔 可能已成功的退款就是重复退款。
+     *
+     * @param refundReqNo 上游退款请求号，须与准入时一致 —— 两把幂等键由它派生
+     * @return 退款本身的四分类结果
+     */
+    RetStatus createRefund(String bizNo, String refundReqNo);
+
+    /**
+     * 收敛退款 {@code UNKNOWN}：按原 {@code refundNo} 查单，推进到终态。
+     *
+     * <p>由 {@code QUERY_REFUND} 任务驱动，<b>复用原退款单号</b>。
+     */
+    RetStatus reconcileRefund(String bizNo);
+
+    /**
+     * 收敛回收 {@code UNKNOWN}：按原 {@code revokeNo} 重问供应方。
+     *
+     * <p>由 {@code REVOKE} 任务驱动。收敛为成功后主单停在 {@code REVOKING}，等 {@link #createRefund} 推进 ——
+     * 回收任务不自动发起退款，那是两个独立的决定。
+     */
+    RetStatus reconcileRevoke(String bizNo);
 
     /** 订单查询：三子状态 + 履约明细。 */
     QueryOrderResp queryOrder(String bizNo);

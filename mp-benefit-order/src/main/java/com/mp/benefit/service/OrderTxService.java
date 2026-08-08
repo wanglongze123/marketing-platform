@@ -541,6 +541,176 @@ public class OrderTxService {
      * §3.4 的口径表里 —— 退款要回补库存（商品可以再卖给别人）， 但不返还额度（否则「买了再退」能刷回额度，限购形同虚设）。留在 {@code LOCKED} 恰好表达「这一份
      * 额度已被这一单占用且不会归还」。
      */
+    // ---- 退款准入与回收（V3 PR-7） ----
+
+    /**
+     * 准入通过，进入 {@code REVOKING}，同事务落 {@code REVOKE_BENEFIT} 操作记录。
+     *
+     * <p><b>状态推进与操作记录同事务</b>：两者分开则「已进 {@code REVOKING} 但没有操作记录」成为可能， 而对账正是按操作记录判断「这单的退款走到哪一步了」——
+     * 缺了它，这单在对账看来从未发起过退款。
+     *
+     * <p>前置态含 {@code REVOKE_FAILED}：回收失败后人工重试要能重新进入，否则那笔单永远退不了款， 只能改库。
+     *
+     * @return {@code false} 表示条件更新未命中 —— 状态非法或并发已推进，这是三道闸的第一道
+     */
+    @BenefitTx
+    public boolean admitRefund(PlayBizRecord order, String revokeNo, String operator) {
+        String bizNo = order.getPlayBizRecordNo();
+        int rows =
+                bizRecordMapper.advanceRefundStatusFrom(
+                        bizNo,
+                        List.of(RefundStatus.NONE.name(), RefundStatus.REVOKE_FAILED.name()),
+                        RefundStatus.REVOKING.name());
+        if (rows == 0) {
+            return false;
+        }
+
+        // op_seq 恒为空串：一单至多一次回收操作（OpType.REVOKE_BENEFIT.atMostOnce）。
+        // 这道 uk_biz_op 是三道闸的第二道 —— 客服连点生成两个不同的 refundReqNo 时，
+        // 两把幂等键都是新的、唯一索引不冲突，只有这条单据级约束拦得住
+        opRecordMapper.upsert(
+                revokeNo,
+                revokeNo,
+                bizNo,
+                order.getUserId(),
+                order.getActivityId(),
+                OpType.REVOKE_BENEFIT.name(),
+                "",
+                OpStatus.PROCESSING.name());
+        return true;
+    }
+
+    /**
+     * 回收成功：落回收单号与回收时间到履约明细，回写操作记录终态。
+     *
+     * <p><b>{@code revoke_time} 由库时钟取</b>，与 {@code createRefund} 的操作记录时间同源 —— 两端出自
+     * 不同时钟时，「先回收后退款」这条顺序在审计时可能反过来（BR-B-34）。
+     *
+     * <p>主单退款态<b>停在 {@code REVOKING}</b>，不在此推进：下一步是 {@code createRefund} 把它推到 {@code
+     * REFUNDING}。此处若提前推进，一笔回收成功但退款尚未发起的单看起来像已在退款中。
+     */
+    @BenefitTx
+    public void settleRevoke(String bizNo, String revokeNo, String usageStatus) {
+        fulfillmentMapper.markRevoked(bizNo, revokeNo, usageStatus);
+        opRecordMapper.finish(
+                bizNo,
+                OpType.REVOKE_BENEFIT.name(),
+                "",
+                OpStatus.SUCCESS.name(),
+                RetStatus.SUCCESS.name());
+    }
+
+    /**
+     * 回收确定失败：主单退 {@code REVOKE_FAILED}，操作记录置失败。
+     *
+     * <p><b>不推进退款</b>：权益还在用户手里，退款即为资损。该状态可由人工重试重入 —— 故它是 {@code admitRefund} 的合法前置态之一。
+     */
+    @BenefitTx
+    public void failRevoke(String bizNo, String usageStatus) {
+        bizRecordMapper.advanceRefundStatus(
+                bizNo, RefundStatus.REVOKING.name(), RefundStatus.REVOKE_FAILED.name());
+        opRecordMapper.finish(
+                bizNo,
+                OpType.REVOKE_BENEFIT.name(),
+                "",
+                OpStatus.FAILED.name(),
+                RetStatus.FAIL.name());
+    }
+
+    /**
+     * 回收结果未定：操作记录置未知态，<b>主单保持 {@code REVOKING}</b>，同事务落 {@code REVOKE} 任务。
+     *
+     * <p><b>不置 {@code REVOKE_FAILED}</b>：那是「确定失败」的位置，而此刻权益可能已被收走。判失败
+     * 会让人工按「权益还在」处置，可能导致二次回收；更糟的是若据此拒绝退款，用户既没权益也没钱。
+     *
+     * <p>任务与状态同事务落库，理由与 {@code finishGrant} 一字不差：置未定态却没落任务，这笔单 就永远停在中间态 —— 没有任何机制会再看它一眼。
+     */
+    @BenefitTx
+    public void unresolvedRevoke(String bizNo, String revokeNo, RetStatus downstream) {
+        opRecordMapper.finish(
+                bizNo,
+                OpType.REVOKE_BENEFIT.name(),
+                "",
+                OpStatus.UNKNOWN.name(),
+                downstream.name());
+        taskMapper.enqueue(
+                BizNoGenerator.taskNo(), bizNo, TaskType.REVOKE.name(), revokeNo, 0, "{}");
+    }
+
+    // ---- 退款执行（V3 PR-8） ----
+
+    /**
+     * 退款受理：{@code REVOKING → REFUNDING}，落退款单号与操作记录，<b>同事务</b>。
+     *
+     * <p><b>前置态限定 {@code REVOKING}</b>：该状态只能由 {@code revokeAndAdmit} 置入 —— 它本身就是
+     * 「准入已通过且回收已完成」的凭据。这是「先回收后退款」不可颠倒的机器化形式：绕过准入直接 调退款，会在这道谓词上命中 0 行。
+     *
+     * <p>{@code uk_biz_op(bizNo, 'CREATE_REFUND', '')} 是三道闸的第二道，挡「两个不同 {@code refundNo} 退两次」——
+     * 客服连点生成两个新的请求号时，两把幂等键都不冲突，只有这条单据级约束拦得住。
+     *
+     * @return {@code false} 表示状态非法或并发已推进
+     */
+    @BenefitTx
+    public boolean startRefund(PlayBizRecord order, String refundNo) {
+        String bizNo = order.getPlayBizRecordNo();
+        int rows =
+                bizRecordMapper.advanceRefundStatus(
+                        bizNo, RefundStatus.REVOKING.name(), RefundStatus.REFUNDING.name());
+        if (rows == 0) {
+            return false;
+        }
+        bizRecordMapper.fillRefundNo(bizNo, refundNo);
+        opRecordMapper.upsert(
+                refundNo,
+                refundNo,
+                bizNo,
+                order.getUserId(),
+                order.getActivityId(),
+                OpType.CREATE_REFUND.name(),
+                "",
+                OpStatus.PROCESSING.name());
+        return true;
+    }
+
+    /** 退款成功：主单进终态，操作记录置成功。 */
+    @BenefitTx
+    public void settleRefund(String bizNo) {
+        bizRecordMapper.advanceRefundStatus(
+                bizNo, RefundStatus.REFUNDING.name(), RefundStatus.REFUND_SUCCESS.name());
+        opRecordMapper.finish(
+                bizNo,
+                OpType.CREATE_REFUND.name(),
+                "",
+                OpStatus.SUCCESS.name(),
+                RetStatus.SUCCESS.name());
+    }
+
+    /** 退款确定失败：主单进 {@code REFUND_FAILED}，可人工重试。 */
+    @BenefitTx
+    public void failRefund(String bizNo) {
+        bizRecordMapper.advanceRefundStatus(
+                bizNo, RefundStatus.REFUNDING.name(), RefundStatus.REFUND_FAILED.name());
+        opRecordMapper.finish(
+                bizNo,
+                OpType.CREATE_REFUND.name(),
+                "",
+                OpStatus.FAILED.name(),
+                RetStatus.FAIL.name());
+    }
+
+    /**
+     * 退款结果未定：操作记录置未知态，<b>主单保持 {@code REFUNDING}</b>，同事务落 {@code QUERY_REFUND} 任务。
+     *
+     * <p><b>不置 {@code REFUND_FAILED}</b>：那是「确定失败」的位置，而此刻钱可能已经退出去了。判失败 会让人工按「没退成」处置并重发 —— 那就是重复退款。
+     */
+    @BenefitTx
+    public void unresolvedRefund(String bizNo, String refundNo, RetStatus downstream) {
+        opRecordMapper.finish(
+                bizNo, OpType.CREATE_REFUND.name(), "", OpStatus.UNKNOWN.name(), downstream.name());
+        taskMapper.enqueue(
+                BizNoGenerator.taskNo(), bizNo, TaskType.QUERY_REFUND.name(), refundNo, 0, "{}");
+    }
+
     @BenefitTx
     public RetStatus consumeStock(PlayBizRecord order) {
         String bizNo = order.getPlayBizRecordNo();

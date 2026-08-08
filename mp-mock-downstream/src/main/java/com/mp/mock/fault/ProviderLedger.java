@@ -23,6 +23,15 @@ public class ProviderLedger {
     private final Map<String, Integer> grantAttemptsByOpNo = new ConcurrentHashMap<>();
     private final AtomicLong seq = new AtomicLong();
 
+    /** 已发放权益的使用态，键为发放 {@code opNo}。默认 {@code UNUSED} */
+    private final Map<String, String> usageByGrantOpNo = new ConcurrentHashMap<>();
+
+    /** 回收账本，键为 {@code revokeNo}。与发放账本分开 —— 两者是不同的键空间 */
+    private final Map<String, String> revokeOrderNoByRevokeNo = new ConcurrentHashMap<>();
+
+    /** 每个 {@code revokeNo} 收到过几次回收请求 */
+    private final Map<String, Integer> revokeAttemptsByRevokeNo = new ConcurrentHashMap<>();
+
     /**
      * 记账。同一 {@code opNo} 重复调用返回首次的单号，不新发。
      *
@@ -62,8 +71,76 @@ public class ProviderLedger {
         return orderNoByOpNo.size();
     }
 
+    // ---- 回收（V3 PR-7） ----
+
+    /** 测试布置：把某笔已发放的权益标为已使用，用于验「已核销不可回收」。 */
+    public void markUsage(String grantOpNo, String usageStatus) {
+        usageByGrantOpNo.put(grantOpNo, usageStatus);
+    }
+
+    /** 该笔发放当前的使用态，未标注即 {@code UNUSED}。 */
+    public String usageOf(String grantOpNo) {
+        return usageByGrantOpNo.getOrDefault(grantOpNo, "UNUSED");
+    }
+
+    /** 记一次回收请求的到达，无论本次是否记账。与 {@link #recordGrantAttempt} 同一用途。 */
+    public void recordRevokeAttempt(String revokeNo) {
+        revokeAttemptsByRevokeNo.merge(revokeNo, 1, Integer::sum);
+    }
+
+    public int revokeAttempts(String revokeNo) {
+        return revokeAttemptsByRevokeNo.getOrDefault(revokeNo, 0);
+    }
+
+    /**
+     * <b>原子回收</b>：仅当该笔发放未被使用时才回收成功，并把使用态置为 {@code REVOKED}。
+     *
+     * <p>「判定 + 动作」在一次 {@code compute} 内完成，这是 BR-B-30 要的原子性 —— 平台侧「先查 usageStatus
+     * 再决定要不要回收」在两步之间存在窗口：查到 {@code UNUSED}、用户随即核销、 平台再发起回收，于是券已用掉而平台以为回收成功、退了钱。
+     *
+     * <p>幂等由 {@code revokeNo} 承载：同一回收单号重复调用返回首次的单号，不二次回收。
+     *
+     * @return 回收单号；{@code null} 表示该权益不可回收（已使用/已过期）
+     */
+    public String revokeIfUnused(String revokeNo, String grantOpNo) {
+        String existing = revokeOrderNoByRevokeNo.get(revokeNo);
+        if (existing != null) {
+            // 幂等命中：已回收过，返回首次的单号
+            return existing;
+        }
+        String[] issued = new String[1];
+        usageByGrantOpNo.compute(
+                grantOpNo,
+                (k, usage) -> {
+                    String current = usage == null ? "UNUSED" : usage;
+                    if ("UNUSED".equals(current)) {
+                        issued[0] = "RVK" + seq.incrementAndGet() + "_" + revokeNo;
+                        return "REVOKED";
+                    }
+                    // 已使用 / 已过期 / 已回收：保持原状态，回收失败
+                    return current;
+                });
+        if (issued[0] != null) {
+            revokeOrderNoByRevokeNo.put(revokeNo, issued[0]);
+        }
+        return issued[0];
+    }
+
+    /** 该 {@code revokeNo} 是否已回收成功。测试断言「无重复回收」的下游侧口径。 */
+    public boolean containsRevoke(String revokeNo) {
+        return revokeOrderNoByRevokeNo.containsKey(revokeNo);
+    }
+
+    /** 回收账本条目数。 */
+    public int revokeSize() {
+        return revokeOrderNoByRevokeNo.size();
+    }
+
     public void clear() {
         orderNoByOpNo.clear();
         grantAttemptsByOpNo.clear();
+        usageByGrantOpNo.clear();
+        revokeOrderNoByRevokeNo.clear();
+        revokeAttemptsByRevokeNo.clear();
     }
 }

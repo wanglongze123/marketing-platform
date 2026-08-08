@@ -3,6 +3,7 @@ package com.mp.api.mock.service;
 import com.mp.api.mock.dto.PayCloseResp;
 import com.mp.api.mock.dto.PayCreateReq;
 import com.mp.api.mock.dto.PayCreateResp;
+import com.mp.api.mock.dto.PayRefundResp;
 
 /**
  * mock 支付。
@@ -24,4 +25,24 @@ public interface MockPayService {
      * <p>幂等：同一 {@code outTradeNo} 重复调用返回同一结果。关单是对终态的确认，不是一次性动作。
      */
     PayCloseResp closePay(String outTradeNo);
+
+    /**
+     * 退款。V3 PR-8 引入。
+     *
+     * <p>幂等：同一 {@code refundNo} 重复调用返回首次的退款单号，<b>不二次退款</b>。这是「重复退款 = 0」 在下游侧的最终判据 ——
+     * 平台的三道闸都在平台自己的库里，只能证明平台没重复受理；钱有没有退 两次，只有支付方数得准（《分阶段方案》§5.3 的同一条判断）。
+     *
+     * <p><b>与关单共用 {@code payMode} 注入</b>，不另设开关：退款与关单是同一个支付方，它挂了两个 方法一起挂。
+     *
+     * @param refundNo 退款幂等键，由上游退款请求号派生
+     */
+    PayRefundResp refund(String outTradeNo, String refundNo, long amount);
+
+    /**
+     * 按原退款单号查单，供 {@code UNKNOWN} 收敛。
+     *
+     * <p><b>查无返回 {@code UNKNOWN} 而非 {@code FAIL}</b>：查无可能只是提交在途，判失败会让平台重发 ——
+     * 而重发一笔可能已成功的退款就是重复退款。与发放侧查单同一处置。
+     */
+    PayRefundResp queryRefund(String refundNo);
 }
