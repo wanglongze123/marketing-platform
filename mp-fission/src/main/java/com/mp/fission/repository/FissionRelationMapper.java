@@ -65,6 +65,21 @@ public interface FissionRelationMapper extends BaseMapper<FissionRelation> {
             @Param("toStatus") String toStatus);
 
     /**
+     * 按 {@code (groupId, followerId)} 推进状态，条件更新。
+     *
+     * <p>建联用它而非先查后判：先查后判在并发下两个线程都读到 {@code INVITED}，各推进一次 —— 而条件更新让第二次命中 0 行（BR-F-13）。
+     */
+    @Update(
+            "UPDATE fission_relation SET status = #{toStatus}"
+                    + " WHERE group_id = #{groupId} AND follower_id = #{followerId}"
+                    + " AND status = #{fromStatus} AND active_flag = 'ACTIVE'")
+    int advanceStatusByGroupFollower(
+            @Param("groupId") String groupId,
+            @Param("followerId") String followerId,
+            @Param("fromStatus") String fromStatus,
+            @Param("toStatus") String toStatus);
+
+    /**
      * {@code INVITED → CONNECTED/JOINED} 时回填上游业务号。
      *
      * <p>{@code AND out_biz_no = ''} 使重复回填不覆盖已有值：上游用两个不同业务号并发调用时， 只有第一个落进去 —— 与「{@code out_biz_no}
