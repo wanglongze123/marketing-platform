@@ -107,17 +107,26 @@ public interface ReconcileMapper {
     int countOversoldRows();
 
     /**
-     * 第 6 项 b：库存消耗数与成交单据数比对。
+     * 第 6 项 b：库存消耗<b>份数</b>与成交单据的份数比对。
      *
-     * <p>口径按 §3.4 的表：{@code consumed} 对应「已支付且未退款成功」的单数。退款要回补库存，故已 {@code REFUND_SUCCESS} 的单不计入。
+     * <p>口径按 §3.4 的表：{@code consumed} 对应「已支付且未退款成功」的单。退款要回补库存，故已 {@code REFUND_SUCCESS} 的单不计入。
+     *
+     * <p><b>取 {@code SUM(quantity)} 而非 {@code COUNT(*)}</b>（PR-10 review 补）：{@code consumed} 按份数累加
+     * （{@code consumed = consumed + qty}），与单数不是同一个量纲。一笔 {@code quantity=3} 的单会让 {@code consumed=3}
+     * 而单数为 1 —— 每轮对账报一次假差异。
+     *
+     * <p><b>它此前不报错，只因为 {@code doCreateTrade} 有一道 {@code quantity=1} 的守卫</b>；而 {@code quantity} 在
+     * DDL、DTO、库存 SQL 里全都按份数设计：守卫一放开（多份购买是常规需求），这一项立刻开始刷 假告警 —— 而<b>假告警会让资损哨兵失效</b>，那正是 §6.8 要避免的。
+     *
+     * <p>{@code SUM} 在无匹配行时返回 {@code NULL}，故用 {@code COALESCE} 归零。
      *
      * <p><b>不自动改数，只告警</b>：库存差异可由「补建释放任务」自愈（任务自带幂等闸），而直接改 {@code consumed} 会把一次错误固化成新的基线。
      */
     @Select(
-            "SELECT COUNT(*) FROM play_biz_record"
+            "SELECT COALESCE(SUM(quantity), 0) FROM play_biz_record"
                     + " WHERE sku_id = #{skuId} AND pay_status = 'PAY_SUCCESS'"
                     + " AND refund_status <> 'REFUND_SUCCESS'")
-    int countConsumedOrders(@Param("skuId") String skuId);
+    int sumConsumedQuantity(@Param("skuId") String skuId);
 
     /**
      * 第 9 项：已关闭的单仍占着库存。
@@ -154,19 +163,53 @@ public interface ReconcileMapper {
      * <p>与第 6 项是同一类兜底的两个计数器：那项管库存，本项管额度。<b>凡是有一个共享计数器、又要按单 增减的地方，就要有一条对账项</b> —— V2
      * 之前只有前者，理由曾是「额度由库存那道闸一并保证」，而该 假设不成立：两者「是否占用过」并不同步（不限购的 SKU 不扣额度）。
      *
+     * <p><b>同样取 {@code SUM(quantity)}</b>（PR-10 review 补）：{@code used_qty} 与 {@code consumed} 一样按份数
+     * 累加，与单数不同量纲。两处是同一个错，故一并修 —— 它们本就是「同一类兜底的两个计数器」。
+     *
      * <p><b>差异一律不自动改 {@code used_qty}</b>：它与库存不同 —— 库存差异可由补建释放任务自愈，而额度
      * 的正确值取决于历史上哪些单占用过，直接改数会把一次错误固化成新基线。
      */
     @Select(
-            "SELECT COUNT(*) FROM play_biz_record"
+            "SELECT COALESCE(SUM(quantity), 0) FROM play_biz_record"
                     + " WHERE user_id = #{userId} AND activity_id = #{activityId}"
                     + " AND sku_id = #{skuId} AND quota_status = 'LOCKED'")
-    int countQuotaHoldingOrders(
+    int sumQuotaHoldingQuantity(
             @Param("userId") String userId,
             @Param("activityId") String activityId,
             @Param("skuId") String skuId);
 
-    /** 第 3、11 项要比对的发奖幂等号：本单已发起过的全部发放调用。 */
+    /**
+     * 第 3 项：<b>已发放成功的单</b>，供逐 {@code opNo} 与 reward 侧比对（PR-10 review 补）。
+     *
+     * <p><b>首版复用了 {@code scanPaidNotGranted}，那是错的</b>：那条扫的是 {@code grant_status IN
+     * ('NOT_START','GRANTING','GRANT_UNKNOWN')} —— <b>还没发完</b>的单。而本项要找的是「平台记着
+     * 已发成功、下游却查无」，两个集合几乎不相交，于是这一项近乎空转：它只在单子还没发完时去比对下游， 而那种单本来就没有发奖记录，查无是正常的、不是差异。
+     *
+     * <p>实测确认：造一笔正常发放成功的单，删掉 {@code reward_grant_record} 与 {@code reward_grant_item}， 跑对账，本项检出 0 条。
+     *
+     * <p>故谓词取 {@code grant_status = 'GRANT_SUCCESS'} —— 只有平台声称「已发成功」的单，下游查无才 构成差异。
+     */
+    @Select(
+            "SELECT play_biz_record_no FROM play_biz_record"
+                    + " WHERE pay_status = 'PAY_SUCCESS' AND grant_status = 'GRANT_SUCCESS'"
+                    + " AND update_time < DATE_SUB(NOW(3), INTERVAL #{staleSeconds} SECOND)"
+                    + " LIMIT #{limit}")
+    List<String> scanGrantedOrders(
+            @Param("staleSeconds") int staleSeconds, @Param("limit") int limit);
+
+    /**
+     * 某单已发放成功的明细对应的发奖幂等号。第 3 项据它逐笔比对下游。
+     *
+     * <p><b>限定 {@code grant_status = 'SUCCESS'}</b>：失败或未定的明细在下游查无是正常的，不构成差异。 与 {@link
+     * #selectGrantOpNos} 的差别正在这道谓词 —— 那个取全部，供人工处置与证据导出使用。
+     */
+    @Select(
+            "SELECT DISTINCT grant_op_no FROM benefit_fulfillment_record"
+                    + " WHERE play_biz_record_no = #{bizNo} AND grant_status = 'SUCCESS'"
+                    + " AND grant_op_no IS NOT NULL")
+    List<String> selectSucceededGrantOpNos(@Param("bizNo") String bizNo);
+
+    /** 第 11 项与人工处置要比对的发奖幂等号：本单已发起过的全部发放调用，不限状态。 */
     @Select(
             "SELECT DISTINCT grant_op_no FROM benefit_fulfillment_record"
                     + " WHERE play_biz_record_no = #{bizNo} AND grant_op_no IS NOT NULL")

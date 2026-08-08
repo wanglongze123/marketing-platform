@@ -270,10 +270,12 @@ public class ReconcileService {
      * 尚未提交的窗口（不该补）。自动补发在第二种情况下就是重复发放，而这一项的检出量本就极低， 人工核一遍的成本远低于误补的代价。
      */
     private Outcome checkGrantMissingDownstream() {
-        List<String> bizNos = reconcileMapper.scanPaidNotGranted(staleSeconds, SCAN_LIMIT);
+        // 扫「已发放成功」的单，不是「还没发完」的单 —— 首版复用 scanPaidNotGranted 是错的，
+        // 那个集合里的单本来就没有发奖记录，查无是正常的、不构成差异（PR-10 review 修）
+        List<String> bizNos = reconcileMapper.scanGrantedOrders(staleSeconds, SCAN_LIMIT);
         int diff = 0;
         for (String bizNo : bizNos) {
-            List<String> opNos = reconcileMapper.selectGrantOpNos(bizNo);
+            List<String> opNos = reconcileMapper.selectSucceededGrantOpNos(bizNo);
             for (int i = 0; i < opNos.size(); i += BATCH_SIZE) {
                 List<String> batch = opNos.subList(i, Math.min(i + BATCH_SIZE, opNos.size()));
                 Map<String, GrantRewardResp> downstream = rewardService.batchQueryByOpNos(batch);
@@ -318,13 +320,13 @@ public class ReconcileService {
             if (consumed == null) {
                 continue;
             }
-            int orders = reconcileMapper.countConsumedOrders(skuId);
-            if (consumed != orders) {
+            int orderedQty = reconcileMapper.sumConsumedQuantity(skuId);
+            if (consumed != orderedQty) {
                 log.error(
-                        "reconcile found stock/order mismatch, skuId={}, consumed={}, orders={}",
+                        "reconcile found stock/order mismatch, skuId={}, consumed={}, ordered={}",
                         skuId,
                         consumed,
-                        orders);
+                        orderedQty);
                 diff++;
             }
         }
@@ -342,7 +344,7 @@ public class ReconcileService {
         for (var row : reconcileMapper.selectQuotaRows(SCAN_LIMIT)) {
             int used = row.getUsedQty() == null ? 0 : row.getUsedQty();
             int holding =
-                    reconcileMapper.countQuotaHoldingOrders(
+                    reconcileMapper.sumQuotaHoldingQuantity(
                             row.getUserId(), row.getActivityId(), row.getSkuId());
             if (used != holding) {
                 log.error(
