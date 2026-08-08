@@ -352,9 +352,127 @@ class FaultInjectionIT extends AbstractMySqlIT {
                 .as("复活是新一轮发起，不继承上一轮的重试进度")
                 .isZero();
 
-        // 恢复后经由复活的查单任务收敛，且全程只发放一次
+        // 恢复后经由复活的查单任务收敛，且全程只发放一次。
+        //
+        // 需要四轮而非一轮：TIMEOUT_BEFORE_COMMIT 全程未记账，恢复注入后下游账本仍是空的，
+        // 故查单照常「查无」—— 要再攒满 3 次才落重发，第 4 轮那条重发才真正把奖发出去。
+        // 这条路径就是 §5.3 定的收敛通路，重发的唯一触发条件是连续查无达阈值
         injector.setProviderMode(FaultMode.SUCCESS);
+        for (int round = 1; round <= 4; round++) {
+            makeAllDue(bizNo);
+            runScheduler();
+        }
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+        assertNoDuplicateGrant(bizNo, List.of(opNoA, bizNo + "_G_PROVIDER_B"));
+    }
+
+    /**
+     * 职责移交：{@code grantBenefit} 落了查单任务后，{@code GRANT} 任务就此了结，不再重试至死信。
+     *
+     * <p>两条任务原本各自独立地收敛同一件事而互不知情：{@code GRANT} 的 5 次短退避先于查单的 10 次跑完，进 {@code DEAD}；此后查单收敛、主单转 {@code
+     * GRANT_SUCCESS}，而那条死信留在表里。 死信本是「重试至阈值仍未收敛，等人工处置」的入口，被已自行收敛的单填满就失去了作用。
+     *
+     * <p><b>断言分两半，缺一不可</b>：任务终态为 {@code DONE}（而非 {@code DEAD} 或反复 {@code PENDING}）， 且 {@code
+     * grantBenefit} 只被调用一次 —— 只断言前者的话，「重试若干轮后恰好收敛」同样能得到 {@code DONE}，而每一轮都白调了一次下游全部供应方。调用次数以下游账本的
+     * {@code queryCount} 为准，不看日志。
+     *
+     * <p>主单仍停在 {@code GRANT_UNKNOWN}：任务的终态描述任务自身的执行结果，不是下游发放的结果。 二者若混为一谈，就会为了「让状态好看」而把未知谎报成成功。
+     */
+    @Test
+    void grantTaskEndsAfterHandingOffToQueryInsteadOfRetryingToDead() {
+        injector.setProviderMode(FaultMode.TIMEOUT_AFTER_COMMIT);
+
+        String bizNo = payFor("handoff");
+        runScheduler();
+
+        String grantTaskOpNo = bizNo + "_GRANT";
+        assertThat(taskStatus(bizNo, TaskType.GRANT, grantTaskOpNo))
+                .as("已落查单任务即职责移交完毕，本任务应终结而非等待重试")
+                .isEqualTo(TaskStatus.DONE.name());
+        assertThat(
+                        num(
+                                benefitJdbc,
+                                "SELECT retry_count FROM benefit_task WHERE biz_no = ? AND"
+                                        + " task_type = ? AND op_no = ?",
+                                bizNo,
+                                TaskType.GRANT.name(),
+                                grantTaskOpNo))
+                .as("移交而非失败，不该计入重试")
+                .isZero();
+
+        // 主单仍是未知态：任务完结不等于发放已确认，收敛归查单任务
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_UNKNOWN.name());
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ? AND task_type ="
+                                        + " ? AND status = ?",
+                                bizNo,
+                                TaskType.QUERY_GRANT.name(),
+                                TaskStatus.PENDING.name()))
+                .as("收敛通路必须还在")
+                .isEqualTo(2);
+
+        // 反复驱动到期任务：修复前 GRANT 会在此期间重试 5 轮进 DEAD，每轮重调下游全部供应方
+        for (int round = 1; round <= 6; round++) {
+            makeAllDue(bizNo);
+            runScheduler();
+        }
+
+        assertThat(taskStatus(bizNo, TaskType.GRANT, grantTaskOpNo))
+                .as("已终结的任务不该被重新领取，更不该进死信")
+                .isEqualTo(TaskStatus.DONE.name());
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+
+        // 履约只发起过一次：下游收到的发放请求各一次，其余都是查单
+        for (String opNo : List.of(bizNo + "_G_PROVIDER_A", bizNo + "_G_PROVIDER_B")) {
+            assertThat(ledger.grantAttempts(opNo)).as("%s 只应被发起一次履约，重试是白跑的下游调用", opNo).isEqualTo(1);
+        }
+        assertNoDuplicateGrant(bizNo, List.of(bizNo + "_G_PROVIDER_A", bizNo + "_G_PROVIDER_B"));
+    }
+
+    /**
+     * 查单任务已终结时，{@code GRANT} 任务仍须自行重试 —— 「移交」的前提是真有人接手。
+     *
+     * <p>{@code countOpenQueryGrant} 只算 {@code PENDING} / {@code DOING} 而不算 {@code DONE} / {@code
+     * DEAD}，正是为这一情形：把终态也算作「有人接手」，则重发的 {@code GRANT} 会在首轮 直接被判为已移交并置 {@code DONE}，而上一轮那条查单任务早已结束 ——
+     * 主单永停 {@code GRANT_UNKNOWN}，两条通路都不再看它。
+     *
+     * <p>构造方式即重发链路本身：连续查无满 3 次后查单任务置 {@code DONE} 并落重发 {@code GRANT}， 此刻该单没有任何在途查单任务。
+     */
+    @Test
+    void grantTaskKeepsRetryingWhenNoQueryTaskIsOpen() {
+        injector.setProviderMode(FaultMode.TIMEOUT_BEFORE_COMMIT);
+
+        String bizNo = payFor("noHandoff");
+        runScheduler();
+
+        String opNoA = bizNo + "_G_PROVIDER_A";
+
+        // 连续查无三次达阈值：查单任务置 DONE，落重发 GRANT
         for (int round = 1; round <= 3; round++) {
+            makeAllDue(bizNo);
+            runScheduler();
+        }
+        assertThat(taskStatus(bizNo, TaskType.QUERY_GRANT, opNoA))
+                .isEqualTo(TaskStatus.DONE.name());
+
+        // 执行重发。注入仍未恢复，故 finishGrant 会再落一条 QUERY_GRANT ——
+        // 判据取的是执行「之后」的状态，此时查单任务已复活，重发任务据此移交
+        makeAllDue(bizNo);
+        runScheduler();
+
+        assertThat(taskStatus(bizNo, TaskType.QUERY_GRANT, opNoA))
+                .as("重发后仍未收敛，查单任务须复活，否则无人再看这一单")
+                .isEqualTo(TaskStatus.PENDING.name());
+        assertThat(taskStatus(bizNo, TaskType.GRANT, opNoA))
+                .as("查单已复活接手，重发任务随之终结")
+                .isEqualTo(TaskStatus.DONE.name());
+
+        // 恢复后由复活的查单任务收敛，全程只发放一次。
+        // 四轮 = 再攒满 3 次查无 + 第 4 轮执行重发（理由同上一个用例）
+        injector.setProviderMode(FaultMode.SUCCESS);
+        for (int round = 1; round <= 4; round++) {
             makeAllDue(bizNo);
             runScheduler();
         }

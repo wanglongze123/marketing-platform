@@ -38,6 +38,10 @@ public class MockProviderServiceImpl implements MockProviderService {
         String opNo = req.getOpNo();
         FaultMode mode = injector.providerMode();
 
+        // 先记到达再分流：所有模式都算，包括抛超时的那两个 —— 请求确实到达了下游。
+        // 这与账本是两个数：账本记「发了几次」，本计数记「平台发起了几次」，幂等生效时二者背离
+        ledger.recordGrantAttempt(opNo);
+
         switch (mode) {
             case TIMEOUT_AFTER_COMMIT -> {
                 // 关键场景：下游已执行成功，但调用方收不到结果。

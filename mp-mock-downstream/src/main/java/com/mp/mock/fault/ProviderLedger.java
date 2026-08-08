@@ -20,6 +20,7 @@ import org.springframework.stereotype.Component;
 public class ProviderLedger {
 
     private final Map<String, String> orderNoByOpNo = new ConcurrentHashMap<>();
+    private final Map<String, Integer> grantAttemptsByOpNo = new ConcurrentHashMap<>();
     private final AtomicLong seq = new AtomicLong();
 
     /**
@@ -29,6 +30,21 @@ public class ProviderLedger {
      */
     public String record(String opNo) {
         return orderNoByOpNo.computeIfAbsent(opNo, k -> "PRV" + seq.incrementAndGet() + "_" + k);
+    }
+
+    /**
+     * 记一次发放请求的到达，无论本次是否记账。
+     *
+     * <p>与 {@link #record} 分开：后者是「发了几次」，本计数是「平台发起了几次」。二者在幂等 生效时必然背离 —— 重复发起被 {@code putIfAbsent}
+     * 挡下，账本仍是一条。**正因如此，只看账本 条数无法发现「白跑的下游调用」**：重试对不对，要看发起次数。
+     */
+    public void recordGrantAttempt(String opNo) {
+        grantAttemptsByOpNo.merge(opNo, 1, Integer::sum);
+    }
+
+    /** 该 {@code opNo} 收到过几次发放请求。测试断言「没有多余的重试」。 */
+    public int grantAttempts(String opNo) {
+        return grantAttemptsByOpNo.getOrDefault(opNo, 0);
     }
 
     /** 查账。返回 null 表示查无 —— 调用方须据此返回 {@code UNKNOWN} 而非 {@code FAIL}。 */
@@ -48,5 +64,6 @@ public class ProviderLedger {
 
     public void clear() {
         orderNoByOpNo.clear();
+        grantAttemptsByOpNo.clear();
     }
 }
