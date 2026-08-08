@@ -85,5 +85,20 @@ public final class IdempotentKeys {
         return followerGrantNo.substring(0, followerGrantNo.length() - 3);
     }
 
+    /**
+     * 过期治理任务的操作号。<b>无下游单号的任务用确定性本地键填充</b>（技术方案 §3.3）。
+     *
+     * <p>不留空：{@code fission_task.op_no} 声明为 {@code NOT NULL DEFAULT ''} 正是因为 MySQL 唯一索引 不对 {@code
+     * NULL} 去重 —— 允许为空则同一分片可无限重复入队，{@code uk_biz_type_op} 不起作用。
+     *
+     * <p>取 {@code bizNo + "_EXPIRE"} 而非空串：两者都能被唯一键去重，但日志与任务表里 {@code op_no}
+     * 一栏为空时，读的人无从判断是「这类任务不需要」还是「有人忘了填」。
+     *
+     * @param shardBizNo 分片键，形如 {@code EXPIRE_SHARD_0_OF_1}
+     */
+    public static String expireOpNo(String shardBizNo) {
+        return shardBizNo + "_EXPIRE";
+    }
+
     // V3 后续补：refundNo、revokeNo
 }

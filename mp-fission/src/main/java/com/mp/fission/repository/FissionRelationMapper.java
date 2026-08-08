@@ -157,4 +157,71 @@ public interface FissionRelationMapper extends BaseMapper<FissionRelation> {
             @Param("groupId") String groupId,
             @Param("cursor") long cursor,
             @Param("limit") int limit);
+
+    /**
+     * 过期治理的批量语句（FR-F09）：分片 + 排除在途 + 释放唯一性，<b>三者缺一不可</b>。
+     *
+     * <p><b>释放 {@code active_flag} 是这条语句里最容易漏的一半</b>：只置 {@code status='EXPIRED'} 的话，该行 仍占着 {@code
+     * (group_id, follower_id, 'ACTIVE')}，该师徒下一轮分享插入时唯一键冲突 —— 而分享
+     * 的「先插后判」把冲突当幂等命中，静默返回那条已过期的关系。用户点了分享看似成功，实际什么 也没发生（技术方案 §3.3）。
+     *
+     * <p><b>{@code granting_until} 的两个分支各自必要</b>：{@code IS NULL} 表示不在发奖流程（BR-F-26 的正面）； {@code <
+     * NOW(3)} 是超时兜底 —— 发奖进程崩溃后标记若永不失效，这行关系既不推进也不被治理， 永生（技术方案 §3.3）。<b>只写前一个分支即为漏兜底</b>，且它不会有任何用例变红
+     * —— 崩溃场景 本就少见，而缺失的表现是「几行数据一直在」，不是报错。
+     *
+     * <p><b>不加 {@code ORDER BY}</b>：{@code expire_time <} 是范围条件，其后的 {@code id} 已无法用于索引 排序，加了只引入
+     * filesort，而批量过期不需要有序。
+     *
+     * <p><b>不用游标</b>：{@code UPDATE} 不返回被更新行的 {@code id}，游标无从推进；而更新后这些行的 {@code status} 已变为 {@code
+     * EXPIRED}，自动离开 {@code WHERE} 集合，循环 {@code LIMIT} 到 {@code affected_rows < limit} 即可，天然不会重复扫描。
+     *
+     * <p>{@code NOW(3)} 取库时钟：与写入 {@code expire_time} 的那一端同源。应用侧传时刻则单机时区错配 即整体偏移，多实例下是实例间漂移。
+     */
+    @Update(
+            "UPDATE fission_relation SET status = 'EXPIRED', active_flag = relation_id"
+                    + " WHERE status IN ('INVITED', 'CONNECTED', 'JOINED')"
+                    + " AND expire_time < NOW(3)"
+                    + " AND (granting_until IS NULL OR granting_until < NOW(3))"
+                    + " AND id BETWEEN #{fromId} AND #{toId}"
+                    + " LIMIT #{limit}")
+    int expireBatch(
+            @Param("fromId") long fromId, @Param("toId") long toId, @Param("limit") int limit);
+
+    /**
+     * 全表 {@code id} 边界，供分片区间计算。
+     *
+     * <p>两个聚合放一条 SQL：分两次查会在两次之间插入新行，算出的区间以旧 {@code MAX} 为界而 {@code MIN} 已是新值 ——
+     * 虽然末片上界取的是无穷大、不会漏，但两个数出自不同时刻这件事本身 会让分片划分不可复现，排查时对不上账。
+     *
+     * <p>空表返回一行两个 {@code NULL}，故用包装类型接。
+     */
+    @Select("SELECT MIN(id) AS minId, MAX(id) AS maxId FROM fission_relation")
+    IdRange selectIdRange();
+
+    /** {@link #selectIdRange} 的返回。空表时两字段均为 {@code null}。 */
+    class IdRange {
+        private Long minId;
+        private Long maxId;
+
+        public Long getMinId() {
+            return minId;
+        }
+
+        public void setMinId(Long minId) {
+            this.minId = minId;
+        }
+
+        public Long getMaxId() {
+            return maxId;
+        }
+
+        public void setMaxId(Long maxId) {
+            this.maxId = maxId;
+        }
+
+        /** 空表：没有任何行可治理。 */
+        public boolean isEmpty() {
+            return minId == null || maxId == null;
+        }
+    }
 }

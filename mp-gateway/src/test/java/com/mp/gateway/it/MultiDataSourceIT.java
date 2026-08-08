@@ -47,7 +47,7 @@ class MultiDataSourceIT extends AbstractMySqlIT {
                 "2103",
                 "2190");
         assertHistoryOwnedBy(rewardJdbc, "db_reward", "0201", "1201", "1202", "1203");
-        assertHistoryOwnedBy(fissionJdbc, "db_fission", "3301", "3302", "3303", "3304");
+        assertHistoryOwnedBy(fissionJdbc, "db_fission", "3301", "3302", "3303", "3304", "3305");
 
         assertThat(businessTables(activityJdbc, "db_activity"))
                 .containsExactlyInAnyOrder(
