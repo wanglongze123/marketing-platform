@@ -47,8 +47,7 @@ class MultiDataSourceIT extends AbstractMySqlIT {
                 "2103",
                 "2190");
         assertHistoryOwnedBy(rewardJdbc, "db_reward", "0201", "1201", "1202", "1203");
-        // 裂变 V3 才填充，此处只要求历史表已建 —— 迁移目录为空时 Flyway 仍会建它
-        assertThat(businessTables(fissionJdbc, "db_fission")).isEmpty();
+        assertHistoryOwnedBy(fissionJdbc, "db_fission", "3301", "3302", "3303", "3304");
 
         assertThat(businessTables(activityJdbc, "db_activity"))
                 .containsExactlyInAnyOrder(
@@ -70,6 +69,9 @@ class MultiDataSourceIT extends AbstractMySqlIT {
         // smoke_record 由 V1203 删除，不应残留
         assertThat(businessTables(rewardJdbc, "db_reward"))
                 .containsExactlyInAnyOrder("reward_grant_record", "reward_grant_item");
+        assertThat(businessTables(fissionJdbc, "db_fission"))
+                .containsExactlyInAnyOrder(
+                        "fission_group", "fission_relation", "fission_op_record", "fission_task");
     }
 
     /**
