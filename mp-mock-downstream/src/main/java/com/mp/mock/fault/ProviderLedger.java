@@ -33,6 +33,59 @@ public class ProviderLedger {
     private final Map<String, Integer> revokeAttemptsByRevokeNo = new ConcurrentHashMap<>();
 
     /**
+     * 按商品号定向失败的集合。V3 PR-9 引入，供退出标准第 19 条使用。
+     *
+     * <p><b>为什么需要它，而不是复用全局的 {@code FaultInjector}</b>：第 19 条要验的是「一组供应方失败时 其余组照常完成」——
+     * 全局注入会让所有组一起失败，那种场景下 fail-fast 与逐个失败的表现完全一样， 用例分辨不出两种实现。必须能让 A 组失败而 B 组成功。
+     *
+     * <p>粒度取商品号而非供应方类型：{@code ProviderGrantReq} 携带的是 {@code providerProductId}，mock 这一侧
+     * 看不到「供应方类型」—— 那是平台的分组概念。
+     */
+    private final Map<String, Boolean> failingProducts = new ConcurrentHashMap<>();
+
+    /** 让该商品的发放一律返回失败。测试布置用，与全局注入正交。 */
+    public void failProduct(String providerProductId) {
+        failingProducts.put(providerProductId, Boolean.TRUE);
+    }
+
+    /** 该商品是否被定向标记为失败。 */
+    public boolean isFailingProduct(String providerProductId) {
+        return providerProductId != null && failingProducts.containsKey(providerProductId);
+    }
+
+    /** 清空定向失败设置。 */
+    public void clearFailingProducts() {
+        failingProducts.clear();
+    }
+
+    /**
+     * 按商品号定向延迟的毫秒数。V3 PR-9 引入，供退出标准第 19 条使用。
+     *
+     * <p><b>为什么非有它不可</b>：第 19 条要验「一组失败不得取消其余组」，而 mock 全部瞬时返回时， <b>fail-fast 与逐个跑完的结果完全一样</b> ——
+     * 取消发出去的时候，其余组早就跑完了。注入自查实测 确认：把扇出改成 fail-fast 后 10 条用例全绿，那条约束根本不可观测。
+     *
+     * <p>必须让一组慢到「取消真的能打断它」，才能分辨两种实现。这与 PR-6 的「数据量不足一页」是同一 族的遮蔽 —— 那里靠加数据破除，这里靠加耗时。
+     */
+    private final Map<String, Long> delayMillisByProduct = new ConcurrentHashMap<>();
+
+    /** 让该商品的发放阻塞指定毫秒。测试布置用，模拟一个慢供应方。 */
+    public void delayProduct(String providerProductId, long millis) {
+        delayMillisByProduct.put(providerProductId, millis);
+    }
+
+    /** 该商品被布置的延迟，未布置即 0。 */
+    public long delayOf(String providerProductId) {
+        return providerProductId == null
+                ? 0L
+                : delayMillisByProduct.getOrDefault(providerProductId, 0L);
+    }
+
+    /** 清空定向延迟设置。 */
+    public void clearDelays() {
+        delayMillisByProduct.clear();
+    }
+
+    /**
      * 记账。同一 {@code opNo} 重复调用返回首次的单号，不新发。
      *
      * @return 供应方发放单号
@@ -142,5 +195,7 @@ public class ProviderLedger {
         usageByGrantOpNo.clear();
         revokeOrderNoByRevokeNo.clear();
         revokeAttemptsByRevokeNo.clear();
+        failingProducts.clear();
+        delayMillisByProduct.clear();
     }
 }

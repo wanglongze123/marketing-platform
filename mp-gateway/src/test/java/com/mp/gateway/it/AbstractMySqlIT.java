@@ -94,6 +94,8 @@ abstract class AbstractMySqlIT {
         registry.add("mp.consult-token.ttl-seconds", () -> "900");
         // 支付通知密钥与凭证密钥取不同值 —— 同值时把两者用反不会有任何用例变红
         registry.add("mp.pay-notify.secret", () -> "it-pay-notify-secret");
+        // 供应方通知密钥再与前两把取不同值 —— 三把同值时把它们用反不会有任何用例变红
+        registry.add("mp.provider-notify.secret", () -> "it-provider-notify-secret");
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
 

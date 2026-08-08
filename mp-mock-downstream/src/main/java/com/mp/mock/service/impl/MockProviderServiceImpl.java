@@ -44,6 +44,32 @@ public class MockProviderServiceImpl implements MockProviderService {
         // 这与账本是两个数：账本记「发了几次」，本计数记「平台发起了几次」，幂等生效时二者背离
         ledger.recordGrantAttempt(opNo);
 
+        // 定向延迟：模拟一个慢供应方。它使「fail-fast 取消其余组」可被观察 ——
+        // 全部瞬时返回时，取消发出去的时候其余组早已跑完，两种实现的结果一模一样
+        long delay = ledger.delayOf(req.getProviderProductId());
+        if (delay > 0) {
+            try {
+                Thread.sleep(delay);
+            } catch (InterruptedException e) {
+                // 被扇出取消：恢复中断标志并抛出 —— 平台侧据此判 UNKNOWN。
+                // 真实供应方不会「被调用方取消」，这里是 mock 对 fail-fast 的可观察点
+                Thread.currentThread().interrupt();
+                log.warn("mock provider grant interrupted while delayed, opNo={}", opNo);
+                throw new IllegalStateException("模拟慢供应方被中断: " + opNo);
+            }
+        }
+
+        // 定向失败：它是「这个商品发不出来」，与「整个供应方挂了」不是一回事。退出标准第 19 条
+        // （一组失败其余组照常完成）需要前者 —— 全局注入会让所有组一起失败，那种场景下
+        // fail-fast 与逐个失败的表现完全一样，用例分辨不出两种实现
+        if (ledger.isFailingProduct(req.getProviderProductId())) {
+            log.info(
+                    "mock provider rejected by product-level injection, opNo={}, product={}",
+                    opNo,
+                    req.getProviderProductId());
+            return resp(RetStatus.FAIL, null, ErrorCode.INVALID_PARAM);
+        }
+
         switch (mode) {
             case TIMEOUT_AFTER_COMMIT -> {
                 // 关键场景：下游已执行成功，但调用方收不到结果。
