@@ -255,6 +255,95 @@ class ReconcileIT extends AbstractMySqlIT {
         assertThat(result).as("查无的键不得出现 —— 那正是第 3 项要检出的差异").doesNotContainKey("NO_SUCH_OP_NO");
     }
 
+    /**
+     * <b>第 3 项须扫「已发放成功」的单，不是「还没发完」的单</b>（PR-10 review 补）。
+     *
+     * <p>首版复用了 {@code scanPaidNotGranted}，那扫的是 {@code grant_status IN
+     * ('NOT_START','GRANTING','GRANT_UNKNOWN')} —— <b>还没发完</b>的单；而本项要找的是「平台记着已发成功、
+     * 下游却查无」。两个集合几乎不相交，于是这一项<b>近乎空转</b>：它只在单子还没发完时去比对下游，而 那种单本来就没有发奖记录，查无是正常的。
+     *
+     * <p>实测确认过：造一笔正常发放成功的单、删掉 reward 侧记录，跑对账检出 0 条。
+     *
+     * <p><b>这类缺陷注入自查发现不了</b>：注入是「破坏实现看用例红不红」，而此处实现与用例一起错 —— 用例根本没覆盖第 3 项。只能靠拿代码与方案 §6.8 的判据逐条对读。
+     */
+    @Test
+    void detectsGrantSucceededButMissingDownstream() {
+        String bizNo = paidOrder("rec_i3");
+        runScheduler();
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+
+        int before = benefitOrderService.reconcile().diffOf(ReconcileItem.GRANT_MISSING_DOWNSTREAM);
+
+        // 造「平台有成功明细、reward 侧查无」：删掉下游记录，模拟数据丢失或人为误删
+        java.util.List<String> opNos =
+                benefitJdbc.queryForList(
+                        "SELECT DISTINCT grant_op_no FROM benefit_fulfillment_record"
+                                + " WHERE play_biz_record_no = ? AND grant_status = 'SUCCESS'",
+                        String.class,
+                        bizNo);
+        assertThat(opNos).hasSize(2);
+        for (String opNo : opNos) {
+            rewardJdbc.update("DELETE FROM reward_grant_item WHERE op_no = ?", opNo);
+            rewardJdbc.update("DELETE FROM reward_grant_record WHERE op_no = ?", opNo);
+        }
+
+        int after = benefitOrderService.reconcile().diffOf(ReconcileItem.GRANT_MISSING_DOWNSTREAM);
+
+        assertThat(after - before).as("平台记着已发成功而下游查无，正是第 3 项要检出的差异").isEqualTo(opNos.size());
+    }
+
+    /**
+     * <b>发放失败的明细在下游查无不算差异</b>——第 3 项的反方向。
+     *
+     * <p>缺了它，一个「扫全部明细而不限 {@code grant_status='SUCCESS'}」的实现照样通过上一条 —— 而那会 把每一笔发放失败的单都报成差异，告警随即变噪音。
+     */
+    @Test
+    void failedGrantMissingDownstreamIsNotADiff() {
+        providerLedger.failProduct("PROD_A_001");
+        providerLedger.failProduct("PROD_B_001");
+        String bizNo = paidOrder("rec_i3_fail");
+        runScheduler();
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_FAILED.name());
+
+        int before = benefitOrderService.reconcile().diffOf(ReconcileItem.GRANT_MISSING_DOWNSTREAM);
+        int after = benefitOrderService.reconcile().diffOf(ReconcileItem.GRANT_MISSING_DOWNSTREAM);
+
+        assertThat(after - before).as("发放失败的单在下游查无是正常的，不构成差异").isZero();
+    }
+
+    /**
+     * <b>库存与额度的比对取份数，不取单数</b>（PR-10 review 补）。
+     *
+     * <p>{@code consumed} 与 {@code used_qty} 都按份数累加（{@code consumed = consumed + qty}），而首版拿它们 与
+     * {@code COUNT(*)} 比 —— 一笔 {@code quantity=3} 的单会让 {@code consumed=3} 而单数为 1，每轮对账报一次
+     * 假差异，<b>而假告警会让资损哨兵失效</b>。
+     *
+     * <p><b>这条约束当前被 {@code doCreateTrade} 的 {@code quantity=1} 守卫遮着</b>：正常链路造不出 {@code quantity>1}
+     * 的单，两种口径的结果恒等。故本用例<b>直接改库</b>把份数改成 3，绕过那道守卫 —— 与 PR-7/8 「绕过服务层直调事务方法」是同一处置，都是让被外层遮蔽的内层约束变得可观测。
+     *
+     * <p><b>这不是今天的缺陷，是一颗埋着的雷</b>：{@code quantity} 在 DDL、DTO、库存 SQL 里全都按份数设计，
+     * 守卫一放开（多份购买是常规需求）这两项立刻开始刷假告警。
+     */
+    @Test
+    void stockAndQuotaCompareByQuantityNotOrderCount() {
+        String bizNo = paidOrder("rec_qty");
+        runScheduler();
+
+        int before = benefitOrderService.reconcile().diffOf(ReconcileItem.STOCK_MISMATCH);
+
+        // 直接改库造出 quantity=3 的单，并把库存与额度按份数同步推进 ——
+        // 模拟「守卫放开后多份购买」的正常状态：三者口径一致，不应报差异
+        benefitJdbc.update(
+                "UPDATE play_biz_record SET quantity = 3 WHERE play_biz_record_no = ?", bizNo);
+        benefitJdbc.update(
+                "UPDATE marketing_stock SET consumed = consumed + 2 WHERE stock_key = ?",
+                "sku:" + SKU_ID);
+
+        int after = benefitOrderService.reconcile().diffOf(ReconcileItem.STOCK_MISMATCH);
+
+        assertThat(after - before).as("份数与单数是两个量纲：按单数比会把一笔 quantity=3 的正常单报成差异").isZero();
+    }
+
     /** 空列表不得拼出 {@code IN ()} —— 那是 MySQL 语法错误，而「本批没有要比对的键」是正常情形。 */
     @Test
     void batchQueryHandlesEmptyInput() {
