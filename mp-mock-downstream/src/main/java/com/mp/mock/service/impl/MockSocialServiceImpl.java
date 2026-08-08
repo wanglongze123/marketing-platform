@@ -31,6 +31,9 @@ public class MockSocialServiceImpl implements MockSocialService {
 
     @Override
     public List<String> recallFriends(String userId, int cursor, int pageSize) {
+        // 先记到达再分流：抛不可用的那次也算 —— 请求确实发出了。与 ProviderLedger
+        // 对发起次数与账本分开计数是同一处置
+        store.recordRecallCall(userId);
         if (store.isRecallDown()) {
             // 不返回空列表：空列表与「这个人没有好友」不可区分，端上会显示一个看起来
             // 正常的空页面，而故障无人察觉

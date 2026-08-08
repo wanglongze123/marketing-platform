@@ -343,6 +343,173 @@ class FriendFilterIT extends AbstractMySqlIT {
     }
 
     // ------------------------------------------------------------------
+    // 召回分页（FR-F03）
+    // ------------------------------------------------------------------
+    //
+    // 本节由 PR-6 合入后的复审补入：注入「只召回第一页」「不去重」「去掉页数上限」
+    // 三处，此前的 20 条用例全部保持绿色 —— 因为每条用例的好友数都在 10 以内，
+    // 而一页是 200，分页整段从未被执行过。
+    //
+    // 这与 PR-5 的「约束在单分片下不可观测」同类：代码正确，但没有任何用例能区分
+    // 它在与不在。区别是那处要构造特殊入参才可观测，此处只要把数据量提到一页以上。
+
+    /** 一页的大小，与 {@code FissionServiceImpl.RECALL_PAGE_SIZE} 一致 */
+    private static final int PAGE_SIZE = 200;
+
+    /**
+     * <b>候选集跨页时，后续页的好友必须也被拉到</b>。
+     *
+     * <p>注入「只召回第一页」时此前全部用例仍绿 —— 判据必须是「第 2 页的人在不在结果里」， 而这要求候选集真的超过一页。用 {@code PAGE_SIZE + 50}
+     * 人：跨一次页边界，且末页不满。
+     */
+    @Test
+    void recallPagesThroughUntilLastPartialPage() {
+        String sponsorId = "U_sp_page";
+        String groupId = fissionService.openGroup(ACT, sponsorId);
+        int total = PAGE_SIZE + 50;
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < total; i++) {
+            ids.add(sponsorId + "_p" + i);
+        }
+        social.putFriends(sponsorId, ids);
+
+        FriendFilterResp resp = getFriends(groupId, sponsorId);
+
+        assertThat(resp.getCandidateCount()).as("跨页的好友须全部拉到").isEqualTo(total);
+        assertThat(resp.getPassed()).as("第 2 页的人须在结果里").contains(ids.get(total - 1));
+        assertThat(social.recallCallCount(sponsorId)).as("末页不满一页即停止翻页，不再多问一次拿空页").isEqualTo(2);
+    }
+
+    /**
+     * <b>末页恰好满一页时要多问一次</b>，否则无从知道后面还有没有。
+     *
+     * <p>与上一条构成边界的两侧：{@code batch.size() < PAGE_SIZE} 这个提前退出条件，在「恰好整除」 时不成立 —— 若写成 {@code
+     * <=}，最后一页会被丢弃。
+     */
+    @Test
+    void recallAsksOneMorePageWhenLastPageIsExactlyFull() {
+        String sponsorId = "U_sp_page_exact";
+        String groupId = fissionService.openGroup(ACT, sponsorId);
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < PAGE_SIZE; i++) {
+            ids.add(sponsorId + "_e" + i);
+        }
+        social.putFriends(sponsorId, ids);
+
+        FriendFilterResp resp = getFriends(groupId, sponsorId);
+
+        assertThat(resp.getCandidateCount()).isEqualTo(PAGE_SIZE);
+        assertThat(social.recallCallCount(sponsorId)).as("恰好一页时须再问一次才能确认没有下一页").isEqualTo(2);
+    }
+
+    /**
+     * <b>跨页重复的好友只算一次</b>（分页期间名单变动是召回侧的常态）。
+     *
+     * <p>去重放在召回而非过滤链：过滤链的入参契约是「一批互不相同的候选人」，让它自己去重等于 把上游的毛病带进下游。
+     *
+     * <p>失败形态是同一个人被重复过滤、重复计数 —— 而 {@code passed} 里出现两个相同 id 时，端上 会显示两个一样的头像。
+     */
+    @Test
+    void duplicatesAcrossPagesAreCountedOnce() {
+        String sponsorId = "U_sp_page_dup";
+        String groupId = fissionService.openGroup(ACT, sponsorId);
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < PAGE_SIZE; i++) {
+            ids.add(sponsorId + "_d" + i);
+        }
+        // 第 2 页重复第 1 页的前 10 个，另有 5 个新人
+        for (int i = 0; i < 10; i++) {
+            ids.add(sponsorId + "_d" + i);
+        }
+        for (int i = 0; i < 5; i++) {
+            ids.add(sponsorId + "_new" + i);
+        }
+        social.putFriends(sponsorId, ids);
+
+        FriendFilterResp resp = getFriends(groupId, sponsorId);
+
+        assertThat(resp.getCandidateCount())
+                .as("重复的 10 个只算一次：200 + 5 = 205")
+                .isEqualTo(PAGE_SIZE + 5);
+        assertThat(resp.getPassed()).doesNotHaveDuplicates();
+    }
+
+    /**
+     * <b>页数上限生效</b>（FR-F04 前置条件「候选集大小在受控上限内」）。
+     *
+     * <p>超限抛 {@code 4001} 而非静默截断：截断后调用方拿到的是一份不完整的名单，而它看起来 与完整名单没有区别。
+     */
+    @Test
+    void maxPagesBeyondLimitIsRejected() {
+        String sponsorId = "U_sp_page_limit";
+        String groupId = fissionService.openGroup(ACT, sponsorId);
+        GetFriendsReq req = new GetFriendsReq();
+        req.setGroupId(groupId);
+        req.setSponsorId(sponsorId);
+        req.setMaxPages(51);
+
+        assertThatThrownBy(() -> fissionService.getFriends(req))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.INVALID_PARAM);
+    }
+
+    /**
+     * {@code maxPages} 限制实际拉取的页数，<b>不是只做参数校验</b>。
+     *
+     * <p>传 1 时只问一页 —— 校验通过但循环不受它约束的实现，会把三页全拉回来。
+     */
+    @Test
+    void maxPagesCapsHowManyPagesAreActuallyFetched() {
+        String sponsorId = "U_sp_page_cap";
+        String groupId = fissionService.openGroup(ACT, sponsorId);
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < PAGE_SIZE * 3; i++) {
+            ids.add(sponsorId + "_c" + i);
+        }
+        social.putFriends(sponsorId, ids);
+
+        GetFriendsReq req = new GetFriendsReq();
+        req.setGroupId(groupId);
+        req.setSponsorId(sponsorId);
+        req.setMaxPages(1);
+        FriendFilterResp resp = fissionService.getFriends(req);
+
+        assertThat(social.recallCallCount(sponsorId)).as("maxPages=1 时只问一页").isEqualTo(1);
+        assertThat(resp.getCandidateCount()).isEqualTo(PAGE_SIZE);
+    }
+
+    /**
+     * <b>翻页途中失败同样抛 {@code 5603}，不返回已拉到的半份名单</b>。
+     *
+     * <p>半份名单与完整名单在调用方看来没有区别 —— 用户会以为自己的好友就这些，而运营看到的是 一次「成功」的召回。这与首页就失败是同一处置：召回要么给出完整候选集，要么明确报错。
+     */
+    @Test
+    void failureOnLaterPageAlsoRaisesRecallError() {
+        String sponsorId = "U_sp_page_midfail";
+        String groupId = fissionService.openGroup(ACT, sponsorId);
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < PAGE_SIZE * 2; i++) {
+            ids.add(sponsorId + "_m" + i);
+        }
+        social.putFriends(sponsorId, ids);
+
+        // 第一页正常拉回，随后置为不可用 —— 模拟翻页途中下游挂掉
+        GetFriendsReq warmUp = new GetFriendsReq();
+        warmUp.setGroupId(groupId);
+        warmUp.setSponsorId(sponsorId);
+        warmUp.setMaxPages(1);
+        assertThat(fissionService.getFriends(warmUp).getCandidateCount()).isEqualTo(PAGE_SIZE);
+
+        social.setRecallDown(true);
+        assertThatThrownBy(() -> getFriends(groupId, sponsorId))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .as("拉到一半失败须报错，不得返回半份名单")
+                .isEqualTo(ErrorCode.FRIEND_RECALL_UNAVAILABLE);
+    }
+
+    // ------------------------------------------------------------------
     // BR-F-12：分享侧独立把关
     // ------------------------------------------------------------------
 
