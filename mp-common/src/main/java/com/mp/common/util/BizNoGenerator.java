@@ -36,6 +36,16 @@ public final class BizNoGenerator {
         return gen("FR");
     }
 
+    /** 活动操作单号，落 {@code activity_op_record.op_no}（V3）。 */
+    public static String activityOpNo() {
+        return gen("AO");
+    }
+
+    /** 活动业务号，落 {@code marketing_activity.activity_id}（V3）。 */
+    public static String activityId() {
+        return gen("ACT");
+    }
+
     private static String gen(String prefix) {
         return prefix + UuidCreator.getTimeOrderedEpoch().toString().replace("-", "");
     }

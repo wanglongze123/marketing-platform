@@ -1,26 +1,28 @@
-package com.mp.activity.entity;
+package com.mp.api.activity.dto;
 
-import com.baomidou.mybatisplus.annotation.IdType;
-import com.baomidou.mybatisplus.annotation.TableId;
-import com.baomidou.mybatisplus.annotation.TableName;
-import java.time.LocalDateTime;
+/**
+ * 创建活动（FR-C01）。建为 {@code DRAFT}，配置此时可以不完整 —— 完整性由发布校验把关。
+ *
+ * <p><b>草稿允许不完整是有意的</b>：运营分多次填配置是常态，建单时就要求齐全等于逼人一次填完， 或者逼人先填假值再改。校验点放在发布，那才是「这份配置要开始对用户生效」的时刻。
+ */
+public class CreateActivityReq {
 
-/** 活动主表。V1 由 seed SQL 初始化只读，V3 补齐创建、发布与状态变更。 */
-@TableName("marketing_activity")
-public class MarketingActivity {
+    /** 幂等键，由调用方生成。同键重复提交返回原活动，不新建 */
+    private String clientReqNo;
 
-    @TableId(type = IdType.AUTO)
-    private Long id;
-
-    private String activityId;
     private String name;
-    private String playType;
-    private String scene;
-    private String status;
-    private LocalDateTime startTime;
-    private LocalDateTime endTime;
 
-    /** JSON 数组，空表示不限。V3 资格决策据此判定 */
+    /** {@code FISSION} / {@code BENEFIT_SELL} */
+    private String playType;
+
+    /** 场景路由 */
+    private String scene;
+
+    private String startTime;
+
+    private String endTime;
+
+    /** JSON 数组，空表示不限 */
     private String cityScope;
 
     private String channelScope;
@@ -29,34 +31,21 @@ public class MarketingActivity {
 
     private String riskRule;
 
-    /** 草稿态玩法私有配置，发布时快照进版本表 */
+    /** 玩法私有配置，发布时快照进版本表 */
     private String playConfig;
 
-    /** 草稿态奖励/价格/退款规则，发布时快照进版本表 */
+    /** 奖励/价格/有效期/退款规则，发布时快照进版本表 */
     private String rewardConfig;
 
-    /** 当前发布配置版本。下单时冻结进主单 */
-    private Integer curVersion;
-
-    /** 最近一次创建/发布/状态变更的操作人（BR-C-27） */
+    /** 操作人，落审计（BR-C-27） */
     private String operator;
 
-    private Integer deleted;
-
-    public Long getId() {
-        return id;
+    public String getClientReqNo() {
+        return clientReqNo;
     }
 
-    public void setId(Long id) {
-        this.id = id;
-    }
-
-    public String getActivityId() {
-        return activityId;
-    }
-
-    public void setActivityId(String activityId) {
-        this.activityId = activityId;
+    public void setClientReqNo(String clientReqNo) {
+        this.clientReqNo = clientReqNo;
     }
 
     public String getName() {
@@ -83,27 +72,19 @@ public class MarketingActivity {
         this.scene = scene;
     }
 
-    public String getStatus() {
-        return status;
-    }
-
-    public void setStatus(String status) {
-        this.status = status;
-    }
-
-    public LocalDateTime getStartTime() {
+    public String getStartTime() {
         return startTime;
     }
 
-    public void setStartTime(LocalDateTime startTime) {
+    public void setStartTime(String startTime) {
         this.startTime = startTime;
     }
 
-    public LocalDateTime getEndTime() {
+    public String getEndTime() {
         return endTime;
     }
 
-    public void setEndTime(LocalDateTime endTime) {
+    public void setEndTime(String endTime) {
         this.endTime = endTime;
     }
 
@@ -155,27 +136,11 @@ public class MarketingActivity {
         this.rewardConfig = rewardConfig;
     }
 
-    public Integer getCurVersion() {
-        return curVersion;
-    }
-
-    public void setCurVersion(Integer curVersion) {
-        this.curVersion = curVersion;
-    }
-
     public String getOperator() {
         return operator;
     }
 
     public void setOperator(String operator) {
         this.operator = operator;
-    }
-
-    public Integer getDeleted() {
-        return deleted;
-    }
-
-    public void setDeleted(Integer deleted) {
-        this.deleted = deleted;
     }
 }

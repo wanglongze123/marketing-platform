@@ -23,7 +23,16 @@ class MultiDataSourceIT extends AbstractMySqlIT {
      */
     @Test
     void eachSchemaOwnsItsOwnMigrationHistoryAndTables() {
-        assertHistoryOwnedBy(activityJdbc, "db_activity", "1001", "1090");
+        assertHistoryOwnedBy(
+                activityJdbc,
+                "db_activity",
+                "1001",
+                "1090",
+                "3001",
+                "3002",
+                "3003",
+                "3004",
+                "3090");
         assertHistoryOwnedBy(
                 benefitJdbc,
                 "db_benefit",
@@ -42,7 +51,11 @@ class MultiDataSourceIT extends AbstractMySqlIT {
         assertThat(businessTables(fissionJdbc, "db_fission")).isEmpty();
 
         assertThat(businessTables(activityJdbc, "db_activity"))
-                .containsExactlyInAnyOrder("marketing_activity");
+                .containsExactlyInAnyOrder(
+                        "marketing_activity",
+                        "activity_config_version",
+                        "activity_op_record",
+                        "activity_task");
         assertThat(businessTables(benefitJdbc, "db_benefit"))
                 .containsExactlyInAnyOrder(
                         "benefit_sku",
