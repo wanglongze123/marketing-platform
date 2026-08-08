@@ -19,6 +19,14 @@ public final class ErrorCode {
 
     // ---- 1xxx 业务规则拒绝 ----
 
+    /**
+     * 不符合资格，附 {@code reasonCode}（PRD FR-C02）。V3 PR-1 引入。
+     *
+     * <p>与 {@link #QUALIFY_CONTEXT_ERROR} 严格分开：本码表示「确定不符合条件」，前端照常展示、
+     * 用户不必重试；后者是依赖故障，重试可能通过（BR-C-07）。
+     */
+    public static final String NOT_QUALIFIED = "1201";
+
     /** 价格不一致：凭证成交价 ≠ 服务端重算价。V2 引入比价后使用 */
     public static final String PRICE_MISMATCH = "1711";
 
@@ -43,6 +51,19 @@ public final class ErrorCode {
     /** 必填参数缺失或取值非法 */
     public static final String INVALID_PARAM = "4001";
 
+    /**
+     * 活动发布校验不通过（PRD FR-C01、BR-C-04）。V3 PR-1 引入。
+     *
+     * <p>归 4xxx 而非 1xxx：配置不完整是<b>提交内容本身不合格</b>，与「规则判定你不能参与」不同。 重试同一份配置结果不变，运营须先改配置。
+     */
+    public static final String PUBLISH_CHECK_FAILED = "4101";
+
+    /** 活动有效期非法：{@code endTime <= startTime}，或超出上限。V3 PR-1 引入 */
+    public static final String INVALID_ACTIVITY_PERIOD = "4102";
+
+    /** 活动状态迁移非法（PRD §4.1 的流转表）。V3 PR-1 引入 */
+    public static final String INVALID_STATUS_TRANSITION = "4103";
+
     /** 凭证签名非法或已过期。V2 引入 */
     public static final String INVALID_TOKEN = "4003";
 
@@ -59,6 +80,14 @@ public final class ErrorCode {
 
     /** 下游超时/未知，映射为 {@code RetStatus.UNKNOWN} */
     public static final String DOWNSTREAM_UNKNOWN = "5001";
+
+    /**
+     * 资格决策的上下文构建依赖异常（PRD FR-C02）。V3 PR-1 引入。
+     *
+     * <p>与 {@link #NOT_QUALIFIED} 是同一个接口的两类结果，<b>不可合并</b>：风控依赖挂掉时若返回 {@code
+     * 1201}，全部用户会被告知「你不符合条件」—— 业务上是误判，排查时也看不出系统故障。
+     */
+    public static final String QUALIFY_CONTEXT_ERROR = "5201";
 
     /**
      * 同一业务对象正在被并发处理，请稍后重试。V2 PR-7 引入。
