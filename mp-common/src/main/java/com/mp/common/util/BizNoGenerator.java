@@ -36,6 +36,11 @@ public final class BizNoGenerator {
         return gen("FR");
     }
 
+    /** 裂变组号，落 {@code fission_group.group_id}（V3）。 */
+    public static String fissionGroupNo() {
+        return gen("FG");
+    }
+
     /** 活动操作单号，落 {@code activity_op_record.op_no}（V3）。 */
     public static String activityOpNo() {
         return gen("AO");

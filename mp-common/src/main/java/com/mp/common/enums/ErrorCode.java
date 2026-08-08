@@ -27,6 +27,16 @@ public final class ErrorCode {
      */
     public static final String NOT_QUALIFIED = "1201";
 
+    /**
+     * 无可参与活动（PRD FR-F01、BR-F-01）。V3 PR-2 引入。
+     *
+     * <p>归 1xxx 且<b>不作为异常抛出</b>：这是正常的业务结果 —— 用户今天确实没有可参与的活动。 与 {@code 5601}（候选检索异常）分开，后者是系统故障。
+     */
+    public static final String NO_AVAILABLE_ACTIVITY = "1601";
+
+    /** 已存在进行中轮次，不得重复开启（PRD FR-F02、BR-F-04）。V3 PR-2 引入 */
+    public static final String GROUP_ALREADY_RUNNING = "1602";
+
     /** 价格不一致：凭证成交价 ≠ 服务端重算价。V2 引入比价后使用 */
     public static final String PRICE_MISMATCH = "1711";
 
@@ -64,6 +74,9 @@ public final class ErrorCode {
     /** 活动状态迁移非法（PRD §4.1 的流转表）。V3 PR-1 引入 */
     public static final String INVALID_STATUS_TRANSITION = "4103";
 
+    /** 轮次有效期超上限（PRD FR-F02）。V3 PR-2 引入 */
+    public static final String GROUP_PERIOD_TOO_LONG = "4602";
+
     /** 凭证签名非法或已过期。V2 引入 */
     public static final String INVALID_TOKEN = "4003";
 
@@ -88,6 +101,14 @@ public final class ErrorCode {
      * 1201}，全部用户会被告知「你不符合条件」—— 业务上是误判，排查时也看不出系统故障。
      */
     public static final String QUALIFY_CONTEXT_ERROR = "5201";
+
+    /**
+     * 裂变候选活动检索异常（PRD FR-F01）。V3 PR-2 引入。
+     *
+     * <p>与 {@link #NO_AVAILABLE_ACTIVITY} 严格分开：那条是「确实没有活动」，本条是「查不出来」。 合并会让检索依赖故障时全部师傅收到「今天没活动」——
+     * 与资格决策的 1201/5201 是同一条分界线。
+     */
+    public static final String FISSION_QUERY_ERROR = "5601";
 
     /**
      * 同一业务对象正在被并发处理，请稍后重试。V2 PR-7 引入。
