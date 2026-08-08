@@ -29,6 +29,16 @@ public interface PlayOpRecordMapper extends BaseMapper<PlayOpRecord> {
             @Param("opSeq") String opSeq,
             @Param("status") String status);
 
+    /**
+     * 按幂等键回查，用于区分「同一次请求的重传」与「另一次请求」。V3 PR-7 引入。
+     *
+     * <p><b>这两件事必须分开</b>：退款准入若只看主单 {@code refund_status} 是否已在退款中，客服换个 工单号再点一次会拿到「受理成功」——
+     * 而那笔退款根本没发生。钱不会多退（后续闸挡得住）， 但调用方据此把工单标为已处理，用户的第二次诉求就此消失。
+     */
+    @org.apache.ibatis.annotations.Select(
+            "SELECT op_no FROM play_op_record WHERE idempotent_key = #{idempotentKey}")
+    String selectByIdempotentKey(@Param("idempotentKey") String idempotentKey);
+
     /** 回写终态。查单类操作也走这里更新原记录，不新建行。 */
     @Update(
             "UPDATE play_op_record SET status = #{status}, downstream_result = #{downstreamResult},"

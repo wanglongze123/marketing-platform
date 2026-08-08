@@ -2,6 +2,8 @@ package com.mp.api.reward.service;
 
 import com.mp.api.reward.dto.GrantRewardReq;
 import com.mp.api.reward.dto.GrantRewardResp;
+import com.mp.api.reward.dto.RevokeRewardReq;
+import com.mp.api.reward.dto.RevokeRewardResp;
 
 /**
  * 统一发奖（公共能力层）。唯一对接奖励供应方的出口，玩法层不直接对接供应方。
@@ -33,4 +35,17 @@ public interface RewardService {
      * @return 仍未定则返回 {@code UNKNOWN} 或 {@code PROCESSING}，调用方据此按各自的退避序列继续
      */
     GrantRewardResp reconcileGrant(String opNo);
+
+    /**
+     * 回收已发放的权益（BR-B-30）。V3 PR-7 引入。
+     *
+     * <p>同 {@code revokeNo} 重复调用返回同结果，由 {@code reward_revoke_record.uk_revoke_no} 保证。
+     * <b>回收键与发奖键不复用</b>（BR-C-11）—— 复用会让回收撞上 {@code uk_op_no} 被当成发奖重传吞掉： 权益实际没回收，而调用方拿到「成功」。
+     *
+     * <p><b>「仅当未使用才回收」由供应方原子判定</b>，平台不先查再回收：查完到回收之间用户可以把券 花掉，于是券已核销而平台以为回收成功、退了钱。返回的 {@code
+     * usageStatus} 是最终依据。
+     *
+     * <p>返回 {@code UNKNOWN} 时调用方<b>不得推进退款</b>：回收结果未定即权益可能仍在外，此时退款 就是「退了钱权益还在」。
+     */
+    RevokeRewardResp revokeReward(RevokeRewardReq req);
 }

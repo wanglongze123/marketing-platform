@@ -1,12 +1,15 @@
 package com.mp.reward.service;
 
 import com.mp.api.reward.dto.GrantRewardReq;
+import com.mp.api.reward.dto.RevokeRewardReq;
 import com.mp.common.enums.RetStatus;
 import com.mp.reward.config.RewardTx;
 import com.mp.reward.entity.RewardGrantItem;
 import com.mp.reward.entity.RewardGrantRecord;
+import com.mp.reward.entity.RewardRevokeRecord;
 import com.mp.reward.repository.RewardGrantItemMapper;
 import com.mp.reward.repository.RewardGrantRecordMapper;
+import com.mp.reward.repository.RewardRevokeRecordMapper;
 import org.springframework.stereotype.Service;
 
 /**
@@ -22,10 +25,15 @@ public class RewardTxService {
 
     private final RewardGrantRecordMapper recordMapper;
     private final RewardGrantItemMapper itemMapper;
+    private final RewardRevokeRecordMapper revokeRecordMapper;
 
-    public RewardTxService(RewardGrantRecordMapper recordMapper, RewardGrantItemMapper itemMapper) {
+    public RewardTxService(
+            RewardGrantRecordMapper recordMapper,
+            RewardGrantItemMapper itemMapper,
+            RewardRevokeRecordMapper revokeRecordMapper) {
         this.recordMapper = recordMapper;
         this.itemMapper = itemMapper;
+        this.revokeRecordMapper = revokeRecordMapper;
     }
 
     /**
@@ -81,5 +89,41 @@ public class RewardTxService {
     @RewardTx
     public int finish(String opNo, RetStatus summary) {
         return recordMapper.finishIfProcessing(opNo, summary.name());
+    }
+
+    // ---- 回收（V3 PR-7），三段式与发奖同构 ----
+
+    /**
+     * 回收 ①：落 {@code PROCESSING} 中间态。冲突由调用方捕获后走幂等出口。
+     *
+     * <p>与发奖的 {@link #createProcessing} 是同一处置，理由也相同：若等结果回来才插记录，回收 RPC 发出后崩溃将没有任何痕迹 ——
+     * 而权益可能已经被收走了。此时用户既没有权益也没有退款， 且平台无从知道回收发生过。
+     */
+    @RewardTx
+    public RewardRevokeRecord createRevokeProcessing(RevokeRewardReq req) {
+        RewardRevokeRecord record = new RewardRevokeRecord();
+        record.setRevokeNo(req.getRevokeNo());
+        record.setBizOrderNo(req.getBizOrderNo());
+        record.setOpNo(req.getOpNo());
+        record.setReceiverId(req.getReceiverId());
+        record.setResult(RetStatus.PROCESSING.name());
+        revokeRecordMapper.insert(record);
+        return record;
+    }
+
+    /**
+     * 回收 ③：回写终态与供应方回传的使用态。
+     *
+     * <p>{@code UNKNOWN} 不在此处回写 —— 与发奖同理，它是中间态，保持 {@code PROCESSING} 等收敛。
+     */
+    @RewardTx
+    public int finishRevoke(
+            String revokeNo,
+            RetStatus result,
+            String usageStatus,
+            String providerOrderNo,
+            String errorCode) {
+        return revokeRecordMapper.finishIfProcessing(
+                revokeNo, result.name(), usageStatus, providerOrderNo, errorCode);
     }
 }

@@ -457,9 +457,7 @@ class ShapeFreezeTest {
                 String src = Files.readString(p, StandardCharsets.UTF_8);
                 int idx = src.indexOf("catch (Exception");
                 while (idx >= 0) {
-                    // 取 catch 块起始后的一段，检查其中没有把结果判为失败
-                    String block = src.substring(idx, Math.min(src.length(), idx + 400));
-                    assertThat(block)
+                    assertThat(catchBlockOf(src, idx))
                             .as("%s 的 catch (Exception) 不得把结果判为失败，应为 UNKNOWN 或原样抛出", p)
                             .doesNotContain("RetStatus.FAIL")
                             .doesNotContain("OpStatus.FAILED");
@@ -469,6 +467,38 @@ class ShapeFreezeTest {
         } catch (IOException e) {
             throw new IllegalStateException("扫描源码失败", e);
         }
+    }
+
+    /**
+     * 截取 {@code catch} 块的<b>实际范围</b>：从它的 {@code &#123;} 起到配对的 {@code &#125;} 止。
+     *
+     * <p>原实现取「起始后固定 400 字符」，而 catch 块通常只有两三行 —— 于是窗口越过块尾，把<b>紧随其后 的正常代码</b>一并纳入检查。V3 PR-8
+     * 实测撞上：{@code reconcileRevoke} 的 catch 块正确地映射为 {@code UNKNOWN}，但其后的四分类汇总里有一句 {@code else if
+     * (one == RetStatus.FAIL)}，落在 400 字符窗口内，本检查随即报错。
+     *
+     * <p><b>这是误报，不是真问题</b>，但放着不管的代价是：下一个人会倾向于「把汇总逻辑挪远一点」 来讨好检查器，或者干脆放宽断言 ——
+     * 两种做法都让这道防线变弱。故修检查器而非改业务代码。
+     *
+     * <p>括号配对不考虑字符串字面量与注释中的花括号：catch 块里出现它们的概率极低，且真出现时 只会让截取范围偏大（回到原有的误报形态），不会漏检。
+     */
+    private static String catchBlockOf(String src, int catchIdx) {
+        int open = src.indexOf('{', catchIdx);
+        if (open < 0) {
+            return src.substring(catchIdx, Math.min(src.length(), catchIdx + 400));
+        }
+        int depth = 0;
+        for (int i = open; i < src.length(); i++) {
+            char c = src.charAt(i);
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return src.substring(catchIdx, i + 1);
+                }
+            }
+        }
+        return src.substring(catchIdx);
     }
 
     /**

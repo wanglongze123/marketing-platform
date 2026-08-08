@@ -46,7 +46,7 @@ class MultiDataSourceIT extends AbstractMySqlIT {
                 "2102",
                 "2103",
                 "2190");
-        assertHistoryOwnedBy(rewardJdbc, "db_reward", "0201", "1201", "1202", "1203");
+        assertHistoryOwnedBy(rewardJdbc, "db_reward", "0201", "1201", "1202", "1203", "3201");
         assertHistoryOwnedBy(fissionJdbc, "db_fission", "3301", "3302", "3303", "3304", "3305");
 
         assertThat(businessTables(activityJdbc, "db_activity"))
@@ -68,7 +68,8 @@ class MultiDataSourceIT extends AbstractMySqlIT {
                         "user_purchase_quota");
         // smoke_record 由 V1203 删除，不应残留
         assertThat(businessTables(rewardJdbc, "db_reward"))
-                .containsExactlyInAnyOrder("reward_grant_record", "reward_grant_item");
+                .containsExactlyInAnyOrder(
+                        "reward_grant_record", "reward_grant_item", "reward_revoke_record");
         assertThat(businessTables(fissionJdbc, "db_fission"))
                 .containsExactlyInAnyOrder(
                         "fission_group", "fission_relation", "fission_op_record", "fission_task");

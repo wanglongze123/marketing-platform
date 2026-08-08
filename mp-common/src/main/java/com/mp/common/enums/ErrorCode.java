@@ -64,6 +64,35 @@ public final class ErrorCode {
      */
     public static final String RELATION_NOT_JOINED = "1617";
 
+    /**
+     * 发放结果未定，拒绝退款（PRD BR-B-29）。V3 PR-7 引入。
+     *
+     * <p>对应 {@code GRANTING} / {@code GRANT_UNKNOWN} 两态：<b>回收对象不明</b> —— 权益可能已发出、
+     * 可能没有，此时退款要么退了钱权益还在，要么回收一笔不存在的发放。等查单收敛后再判。
+     *
+     * <p><b>这条不能扩大成「未发放成功就不许退款」</b>：那会把 {@code NOT_START}（从未履约）与 {@code
+     * GRANT_FAILED}（履约失败）这两类最需要退款的单永久锁死 —— 而「已支付未履约」正是对账 要自动补偿的头号场景，退不了款则收敛率必然破防（技术方案 §7.5）。
+     *
+     * <p>分界线是<b>「结果是否确定」</b>，不是「是否成功」。
+     */
+    public static final String GRANT_NOT_SETTLED = "1751";
+
+    /**
+     * 权益已核销或已过期，不可回收（PRD BR-B-30）。V3 PR-7 引入。
+     *
+     * <p>归 1xxx：这是<b>确定的</b>业务拒绝，重试拿到同一答案。判 5xxx 会让回收任务一直重试到死信， 而券确实已经花掉了 —— 重试多少次都收不回来。
+     *
+     * <p>由供应方原子判定并回传（平台的前置查询只作准入初筛）。此时退款走人工处置，不自动推进。
+     */
+    public static final String BENEFIT_ALREADY_USED = "1752";
+
+    /**
+     * 回收未成功，不得推进退款（PRD BR-B-30）。V3 PR-7 引入。
+     *
+     * <p>包含两种情形：回收确定失败、回收结果未定。<b>两者都不允许退款</b> —— 前者权益还在，后者 不知道权益在不在，而「退了钱权益还在」是这条链路要防的核心资损。
+     */
+    public static final String REVOKE_NOT_DONE = "1753";
+
     /** 价格不一致：凭证成交价 ≠ 服务端重算价。V2 引入比价后使用 */
     public static final String PRICE_MISMATCH = "1711";
 

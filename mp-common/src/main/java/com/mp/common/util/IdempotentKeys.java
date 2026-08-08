@@ -100,5 +100,60 @@ public final class IdempotentKeys {
         return shardBizNo + "_EXPIRE";
     }
 
-    // V3 后续补：refundNo、revokeNo
+    /**
+     * 权益回收。<b>与退款同源派生自上游退款请求号</b>，一退一收成对，便于审计先后（技术方案 §4.1）。
+     *
+     * <p><b>来源必须是上游请求号，不能是内部计数器</b>：内部计数器在重试时会递增，产生新键、绕过 唯一索引 —— 那正是「同一订单两个 revokeNo 回收两次」的成因。
+     *
+     * <p>与 {@link #grantOpNo} 不复用（BR-C-11）：复用会让回收撞上 {@code reward_grant_record.uk_op_no}， 被当成发奖重传吞掉
+     * —— 权益实际没回收，而调用方拿到「成功」。
+     *
+     * @param refundReqNo 上游退款请求号，重试保持不变
+     */
+    public static String revokeNo(String bizNo, String refundReqNo) {
+        return bizNo + "_V_" + refundReqNo;
+    }
+
+    /**
+     * 单个供应方的回收键。<b>粒度与 {@link #grantOpNo} 对齐</b>：一次发放调用对应一次回收调用。
+     *
+     * <p><b>由三个来源直接拼出，不拼接 {@code revokeNo} 与 {@code grantOpNo} 两把完整的键</b>。后者是 首版写法，实测在 {@code
+     * VARCHAR(64)} 上溢出：{@code revokeNo} 约 40 字符、{@code grantOpNo} 约 50 字符，接起来 90+ 字符直接触发 {@code
+     * Data too long}。
+     *
+     * <p><b>该失效的形态特别隐蔽</b>：插入异常被回收链路按「异常一律映射 UNKNOWN」捕获，于是主单进 {@code REVOKING}、落一条 {@code REVOKE}
+     * 任务、对上游回报「结果未定」—— 看起来与供应方超时 一模一样，而实际上回收请求根本没发出去，重试多少次都是同一个结果。
+     *
+     * <p>教训是<b>幂等键的长度是它的一部分契约</b>：键由拼接构成时，每加一段都要回头核对列宽，而列宽 定在 DDL 里、拼接写在工具类里，两处不会互相提醒。
+     *
+     * @param providerType 供应方类型，与 {@code grantOpNo} 的第二维同源
+     */
+    public static String revokeItemNo(String bizNo, String refundReqNo, String providerType) {
+        return bizNo + "_V_" + refundReqNo + "_" + providerType;
+    }
+
+    /**
+     * 由回收键反推上游退款请求号。
+     *
+     * <p>收敛链路手上只有主单与 {@code revokeNo}（从操作记录取），而重问下游需要按同一规则派生出 每个供应方的回收键。三者同源，去掉前缀即可反推 ——
+     * <b>反推而非另存一份</b>：多存一份就多一处 可能与键规则漂移的副本，而<b>漂移的后果是二次回收</b>：下游按新键当成一次新的回收请求。
+     *
+     * <p>与 {@link #outFlowNoOfFollowerGrant} 是同一处置。
+     */
+    public static String refundReqNoOfRevoke(String revokeNo, String bizNo) {
+        String prefix = bizNo + "_V_";
+        if (revokeNo == null || !revokeNo.startsWith(prefix)) {
+            throw new IllegalArgumentException("非该单的回收键: " + revokeNo);
+        }
+        return revokeNo.substring(prefix.length());
+    }
+
+    /**
+     * 退款。与回收同源、后缀不同。
+     *
+     * <p>两者<b>必须是不同的键</b>：同键会让退款被回收记录的唯一索引挡下 —— 钱退不出去且不报错。
+     */
+    public static String refundNo(String bizNo, String refundReqNo) {
+        return bizNo + "_R_" + refundReqNo;
+    }
 }
