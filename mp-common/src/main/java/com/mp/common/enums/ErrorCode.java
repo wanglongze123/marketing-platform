@@ -37,6 +37,16 @@ public final class ErrorCode {
     /** 已存在进行中轮次，不得重复开启（PRD FR-F02、BR-F-04）。V3 PR-2 引入 */
     public static final String GROUP_ALREADY_RUNNING = "1602";
 
+    /** 裂变组已终结，不能再往里拉人。V3 PR-3 引入 */
+    public static final String GROUP_NOT_RUNNING = "1603";
+
+    /**
+     * 师徒为同一人（PRD FR-F06）。V3 PR-3 引入。
+     *
+     * <p>这条是刷奖的第一道门：自己邀请自己即可无限触发双向发奖。分享与加入两处都要判 —— 只判其中一处时，另一条路径照样进得来。
+     */
+    public static final String SPONSOR_IS_FOLLOWER = "1614";
+
     /** 价格不一致：凭证成交价 ≠ 服务端重算价。V2 引入比价后使用 */
     public static final String PRICE_MISMATCH = "1711";
 

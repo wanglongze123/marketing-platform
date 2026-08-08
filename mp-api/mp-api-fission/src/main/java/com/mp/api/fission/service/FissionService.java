@@ -1,6 +1,9 @@
 package com.mp.api.fission.service;
 
+import com.mp.api.fission.dto.FollowerJoinReq;
 import com.mp.api.fission.dto.GroupQueryResp;
+import com.mp.api.fission.dto.ShareInviteReq;
+import com.mp.api.fission.dto.ShareInviteResp;
 import com.mp.api.fission.dto.SponsorQueryReq;
 import com.mp.api.fission.dto.SponsorQueryResp;
 
@@ -37,4 +40,31 @@ public interface FissionService {
      * 提前放开会返回一个恒为空的字段，调用方无从判断是「没有」还是「没实现」。
      */
     GroupQueryResp queryGroup(String activityId, String sponsorId, boolean includeHistory);
+
+    /**
+     * 分享：为每个被分享对象创建 {@code INVITED} 关系（FR-F05 能力一）。
+     *
+     * <p>重复分享不重复创建（BR-F-11）—— 由 {@code uk_group_follower_active} 保证，撞键即视为 已邀请过，不作为错误。
+     */
+    ShareInviteResp shareInvite(ShareInviteReq req);
+
+    /**
+     * 建联：{@code INVITED → CONNECTED}（FR-F05 能力二）。
+     *
+     * <p>重复点击不重复推进（BR-F-13）：条件更新 {@code WHERE status='INVITED'}，第二次命中 0 行。
+     *
+     * @return 是否发生了推进；{@code false} 表示重复点击或关系不在 {@code INVITED}
+     */
+    boolean followerConnect(String groupId, String followerId);
+
+    /**
+     * 徒弟加入：推进至 {@code JOINED} 并回填 {@code outBizNo}（FR-F06）。
+     *
+     * <p>不存在关系时直建 {@code JOINED} —— 二维码/口令分享的徒弟没有事先建立的 {@code INVITED}。
+     *
+     * <p>师徒同人拒绝（{@code 1614}）；同一徒弟并发加入只产生一条关系（BR-F-16），由 {@code uk_group_follower_active} 兜底。
+     *
+     * @return 关系号
+     */
+    String followerJoin(FollowerJoinReq req);
 }

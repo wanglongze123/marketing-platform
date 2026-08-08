@@ -1,8 +1,12 @@
 package com.mp.fission.service;
 
+import com.mp.common.enums.OpStatus;
 import com.mp.common.enums.RelationStatus;
+import com.mp.common.util.BizNoGenerator;
 import com.mp.fission.config.FissionTx;
+import com.mp.fission.entity.FissionRelation;
 import com.mp.fission.repository.FissionGroupMapper;
+import com.mp.fission.repository.FissionOpRecordMapper;
 import com.mp.fission.repository.FissionRelationMapper;
 import org.springframework.stereotype.Service;
 
@@ -19,10 +23,15 @@ public class FissionTxService {
 
     private final FissionGroupMapper groupMapper;
     private final FissionRelationMapper relationMapper;
+    private final FissionOpRecordMapper opRecordMapper;
 
-    public FissionTxService(FissionGroupMapper groupMapper, FissionRelationMapper relationMapper) {
+    public FissionTxService(
+            FissionGroupMapper groupMapper,
+            FissionRelationMapper relationMapper,
+            FissionOpRecordMapper opRecordMapper) {
         this.groupMapper = groupMapper;
         this.relationMapper = relationMapper;
+        this.opRecordMapper = opRecordMapper;
     }
 
     /**
@@ -41,6 +50,100 @@ public class FissionTxService {
             long ttlSeconds) {
         groupMapper.insertRunning(
                 groupId, activityId, sponsorId, roundNo, targetCount, configVersion, ttlSeconds);
+    }
+
+    /**
+     * 分享：建一条 {@code INVITED} 关系。
+     *
+     * <p>撞 {@code uk_group_follower_active} 抛出，由调用方按「已邀请过」处置（BR-F-11）—— 不在此
+     * catch：吞掉的话调用方无从区分「新建了」与「早就有了」，而端上要靠这个区分标记头像。
+     */
+    @FissionTx
+    public void createInvitedRelation(
+            String groupId,
+            String activityId,
+            String sponsorId,
+            String followerId,
+            String shareMethod,
+            String expireTime) {
+        relationMapper.insertActive(
+                BizNoGenerator.fissionRelationNo(),
+                groupId,
+                activityId,
+                sponsorId,
+                followerId,
+                "",
+                RelationStatus.INVITED.name(),
+                shareMethod,
+                expireTime);
+    }
+
+    /**
+     * 徒弟加入：推进或直建关系 + 落操作记录，<b>同事务</b>。
+     *
+     * <p>分成两个事务会让「关系已 {@code JOINED} 但没有操作记录」成为可能 —— 而后续的完成操作要 靠操作记录判幂等，缺了它同一次加入可以被重复受理。
+     *
+     * <p>已有 {@code INVITED}/{@code CONNECTED} 时走条件更新回填 {@code outBizNo}；无关系时直建 {@code
+     * JOINED}（二维码/口令分享的徒弟没有事先建立的邀请）。
+     *
+     * @return 关系号；{@code null} 表示条件更新未命中（并发已推进）
+     */
+    @FissionTx
+    public String joinRelation(
+            String groupId,
+            String activityId,
+            String sponsorId,
+            String followerId,
+            String outBizNo,
+            String outFlowNo,
+            String expireTime) {
+        FissionRelation existing = relationMapper.selectActive(groupId, followerId);
+
+        String relationId;
+        if (existing == null) {
+            // 直建 JOINED。撞 uk_group_follower_active 由调用方按并发处置
+            relationId = BizNoGenerator.fissionRelationNo();
+            relationMapper.insertActive(
+                    relationId,
+                    groupId,
+                    activityId,
+                    sponsorId,
+                    followerId,
+                    outBizNo,
+                    RelationStatus.JOINED.name(),
+                    null,
+                    expireTime);
+        } else {
+            relationId = existing.getRelationId();
+            RelationStatus from = RelationStatus.valueOf(existing.getStatus());
+            if (from == RelationStatus.JOINED) {
+                // 已加入：幂等命中，不重复推进也不报错
+                return relationId;
+            }
+            int rows =
+                    relationMapper.fillOutBizNoAndAdvance(
+                            groupId,
+                            followerId,
+                            outBizNo,
+                            from.name(),
+                            RelationStatus.JOINED.name());
+            if (rows == 0) {
+                // 条件更新未命中：并发已推进，交由调用方回查
+                return null;
+            }
+        }
+
+        opRecordMapper.insert(
+                BizNoGenerator.fissionOpNo(),
+                outFlowNo,
+                outBizNo,
+                activityId,
+                followerId,
+                "FOLLOWER_JOIN",
+                "",
+                OpStatus.SUCCESS.name(),
+                null);
+        return relationId;
     }
 
     /**

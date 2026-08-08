@@ -4,15 +4,22 @@ import com.mp.api.activity.dto.ActivityConfResp;
 import com.mp.api.activity.dto.QualifyReq;
 import com.mp.api.activity.dto.QualifyResp;
 import com.mp.api.activity.service.ActivityService;
+import com.mp.api.fission.dto.FollowerJoinReq;
 import com.mp.api.fission.dto.GroupQueryResp;
+import com.mp.api.fission.dto.ShareInviteReq;
+import com.mp.api.fission.dto.ShareInviteResp;
 import com.mp.api.fission.dto.SponsorQueryReq;
 import com.mp.api.fission.dto.SponsorQueryResp;
 import com.mp.api.fission.service.FissionService;
 import com.mp.common.enums.ErrorCode;
+import com.mp.common.enums.RelationStatus;
 import com.mp.common.exception.BizException;
 import com.mp.common.util.BizNoGenerator;
 import com.mp.fission.entity.FissionGroup;
+import com.mp.fission.entity.FissionRelation;
 import com.mp.fission.repository.FissionGroupMapper;
+import com.mp.fission.repository.FissionOpRecordMapper;
+import com.mp.fission.repository.FissionRelationMapper;
 import com.mp.fission.service.FissionTxService;
 import java.util.ArrayList;
 import java.util.List;
@@ -54,10 +61,18 @@ public class FissionServiceImpl implements FissionService {
     @Autowired private ActivityService activityService;
 
     private final FissionGroupMapper groupMapper;
+    private final FissionRelationMapper relationMapper;
+    private final FissionOpRecordMapper opRecordMapper;
     private final FissionTxService tx;
 
-    public FissionServiceImpl(FissionGroupMapper groupMapper, FissionTxService tx) {
+    public FissionServiceImpl(
+            FissionGroupMapper groupMapper,
+            FissionRelationMapper relationMapper,
+            FissionOpRecordMapper opRecordMapper,
+            FissionTxService tx) {
         this.groupMapper = groupMapper;
+        this.relationMapper = relationMapper;
+        this.opRecordMapper = opRecordMapper;
         this.tx = tx;
     }
 
@@ -214,8 +229,159 @@ public class FissionServiceImpl implements FissionService {
     }
 
     // ------------------------------------------------------------------
+    // ④ 分享
+    // ------------------------------------------------------------------
+
+    @Override
+    public ShareInviteResp shareInvite(ShareInviteReq req) {
+        requireText(req.getGroupId(), "groupId");
+        requireText(req.getSponsorId(), "sponsorId");
+        if (req.getFollowerIds() == null || req.getFollowerIds().isEmpty()) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "followerIds 不能为空");
+        }
+
+        FissionGroup group = requireRunningGroup(req.getGroupId());
+
+        List<String> invited = new ArrayList<>();
+        List<String> already = new ArrayList<>();
+
+        for (String followerId : req.getFollowerIds()) {
+            if (followerId == null || followerId.isBlank()) {
+                continue;
+            }
+            // 师徒非同人：分享给自己不成立
+            if (followerId.equals(req.getSponsorId())) {
+                throw new BizException(ErrorCode.SPONSOR_IS_FOLLOWER, "师徒不能为同一人");
+            }
+
+            try {
+                tx.createInvitedRelation(
+                        req.getGroupId(),
+                        group.getActivityId(),
+                        req.getSponsorId(),
+                        followerId,
+                        req.getShareMethod(),
+                        relationExpireOf(group));
+                invited.add(followerId);
+            } catch (DuplicateKeyException e) {
+                // 撞 uk_group_follower_active：已有进行中关系。重复分享不重复创建（BR-F-11），
+                // 这不是错误 —— 端上据此把该好友标记为「已邀请」
+                already.add(followerId);
+            }
+        }
+
+        ShareInviteResp resp = new ShareInviteResp();
+        resp.setInvitedFollowerIds(invited);
+        resp.setAlreadyInvitedFollowerIds(already);
+        log.info(
+                "shareInvite done, groupId={}, invited={}, already={}",
+                req.getGroupId(),
+                invited.size(),
+                already.size());
+        return resp;
+    }
+
+    // ------------------------------------------------------------------
+    // ⑤ 建联
+    // ------------------------------------------------------------------
+
+    @Override
+    public boolean followerConnect(String groupId, String followerId) {
+        requireText(groupId, "groupId");
+        requireText(followerId, "followerId");
+
+        // 条件更新 WHERE status='INVITED'：重复点击命中 0 行，天然幂等（BR-F-13）。
+        // 不先查后判 —— 那在并发下会两个线程都读到 INVITED 各推进一次
+        int rows =
+                relationMapper.advanceStatusByGroupFollower(
+                        groupId,
+                        followerId,
+                        RelationStatus.INVITED.name(),
+                        RelationStatus.CONNECTED.name());
+        log.info(
+                "followerConnect groupId={}, followerId={}, advanced={}",
+                groupId,
+                followerId,
+                rows > 0);
+        return rows > 0;
+    }
+
+    // ------------------------------------------------------------------
+    // ⑥ 徒弟加入
+    // ------------------------------------------------------------------
+
+    @Override
+    public String followerJoin(FollowerJoinReq req) {
+        requireText(req.getGroupId(), "groupId");
+        requireText(req.getFollowerId(), "followerId");
+        requireText(req.getOutBizNo(), "outBizNo");
+        requireText(req.getOutFlowNo(), "outFlowNo");
+
+        FissionGroup group = requireRunningGroup(req.getGroupId());
+
+        // 师徒非同人（BR-F-14 的前置，1614）：自己邀请自己即可无限刷奖
+        if (req.getFollowerId().equals(group.getSponsorId())) {
+            throw new BizException(ErrorCode.SPONSOR_IS_FOLLOWER, "师徒不能为同一人");
+        }
+
+        // 幂等前置查：outFlowNo 标识本次操作，命中直接返回原关系
+        String hitOpNo = opRecordMapper.selectOpNoByIdempotentKey(req.getOutFlowNo());
+        if (hitOpNo != null) {
+            FissionRelation r = relationMapper.selectActive(req.getGroupId(), req.getFollowerId());
+            log.info("followerJoin idempotent hit, outFlowNo={}", req.getOutFlowNo());
+            return r == null ? null : r.getRelationId();
+        }
+
+        try {
+            String relationId =
+                    tx.joinRelation(
+                            req.getGroupId(),
+                            group.getActivityId(),
+                            group.getSponsorId(),
+                            req.getFollowerId(),
+                            req.getOutBizNo(),
+                            req.getOutFlowNo(),
+                            relationExpireOf(group));
+            if (relationId != null) {
+                return relationId;
+            }
+        } catch (DuplicateKeyException e) {
+            // 撞 uk_group_follower_active 或 uk_idempotent：并发加入已建好（BR-F-16）
+            log.info("followerJoin concurrent, fall back to query, groupId={}", req.getGroupId());
+        }
+
+        // 并发已推进：回查那一条。同一徒弟只产生一条关系，这是 L3 的兜底结果
+        FissionRelation r = relationMapper.selectActive(req.getGroupId(), req.getFollowerId());
+        if (r == null) {
+            throw new BizException(ErrorCode.FISSION_QUERY_ERROR, "加入失败且未查到关系");
+        }
+        return r.getRelationId();
+    }
+
+    // ------------------------------------------------------------------
     // 辅助
     // ------------------------------------------------------------------
+
+    /** 取进行中的裂变组，不存在或已终结即拒绝 —— 往已结束的轮次里拉人不成立。 */
+    private FissionGroup requireRunningGroup(String groupId) {
+        FissionGroup group = groupMapper.selectByGroupId(groupId);
+        if (group == null) {
+            throw new BizException(ErrorCode.INVALID_PARAM, "裂变组不存在: " + groupId);
+        }
+        if (!"RUNNING".equals(group.getStatus())) {
+            throw new BizException(ErrorCode.GROUP_NOT_RUNNING, "裂变组已终结: " + group.getStatus());
+        }
+        return group;
+    }
+
+    /**
+     * 关系有效期取轮次的有效期。
+     *
+     * <p>关系不能活得比它所属的轮次久 —— 轮次结算后才完成的关系，奖发给谁都不对。PRD 6.1 也 写明「关系有效期须 ≤ 活动有效期」。
+     */
+    private static String relationExpireOf(FissionGroup group) {
+        return group.getExpireTime().toString().replace('T', ' ');
+    }
 
     private static QualifyReq toQualifyReq(SponsorQueryReq req) {
         QualifyReq q = new QualifyReq();
