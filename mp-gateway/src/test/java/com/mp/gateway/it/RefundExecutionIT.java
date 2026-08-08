@@ -395,7 +395,7 @@ class RefundExecutionIT extends AbstractMySqlIT {
      * 「先回收后退款」从内部被绕过，三道闸一道都不会响。
      *
      * <p><b>断言退款仍被挡住是本用例的重点</b>：只断言 {@code reconcileRevoke} 返回 {@code UNKNOWN} 的话，一个
-     * 「返回未知但仍把状态推成已回收」的实现照样通过 —— 而资损恰恰发生在状态上，不在返回值上。
+     * 「返回未知但仍把状态推成已回收」的实现照样通过 —— 而资损发生在状态上，不在返回值上。
      */
     @Test
     void reconcileRevokeDoesNotSettleWhenNoGrantedItemExists() {
