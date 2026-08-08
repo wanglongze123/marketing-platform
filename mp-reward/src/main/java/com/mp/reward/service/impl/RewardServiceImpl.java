@@ -321,7 +321,7 @@ public class RewardServiceImpl implements RewardService {
      * 回写终态。
      *
      * <p><b>{@code UNKNOWN} 与 {@code PROCESSING} 不回写</b>：记录保持 {@code PROCESSING} 等查单收敛。 把 {@code
-     * UNKNOWN} 写成终态等于宣称「这笔已经定了」，而它恰恰没定。
+     * UNKNOWN} 写成终态等于宣称「这笔已经定了」，而它并没有定。
      */
     private void writeBackSummary(
             String opNo, RetStatus summary, String bizOrderNo, int itemCount) {

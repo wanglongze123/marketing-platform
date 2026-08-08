@@ -19,7 +19,7 @@ import org.slf4j.LoggerFactory;
  * 的下单预占全部争抢它，持锁时间还会把事务内其余三写 一起拖长，P99 ≤ 100ms 无法达成。移出后热点行不在同步路径上，最终一致由任务保证。
  *
  * <p><b>每单幂等不由这里承担</b>：由 {@code benefit_task.uk_biz_type_op} 挡在入队处。库存 SQL 的 下界（{@code WHERE locked
- * >= ?}）挡的是「总数被减成负值」，挡不住「某一单重复释放」—— 那两件事 常被当成一件，实际上后者会释放掉别人的预占，可售余量凭空多一份。
+ * >= ?}）挡的是「总数被减成负值」，挡不住「某一单重复释放」—— 那两件事 常被当成一件，实际上后者会释放掉别人的预占，可售余量多出一份。
  */
 public class StockTaskHandler implements TaskHandler {
 

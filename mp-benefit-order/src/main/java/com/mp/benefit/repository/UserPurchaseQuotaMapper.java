@@ -19,7 +19,7 @@ public interface UserPurchaseQuotaMapper extends BaseMapper<UserPurchaseQuota> {
      * 确保额度行存在。已存在则什么都不做，<b>不覆盖 {@code used_qty}</b>。
      *
      * <p>写成 {@code ON DUPLICATE KEY UPDATE limit_qty = #{limitQty}} 会顺手把运营调整后的限额 同步过来，看似合理 ——
-     * 但那也意味着每次下单都在改这一行，而该行正被并发扣减，白白制造 热点写。限额变更属运营动作，不该由下单路径捎带。
+     * 但那也意味着每次下单都在改这一行，而该行正被并发扣减，平添一处热点写。限额变更属运营动作，不该由下单路径捎带。
      */
     @Update(
             "INSERT INTO user_purchase_quota (user_id, activity_id, sku_id, period_key, used_qty,"
@@ -53,7 +53,7 @@ public interface UserPurchaseQuotaMapper extends BaseMapper<UserPurchaseQuota> {
     /**
      * 返还额度（关单 / 支付失败）。
      *
-     * <p><b>只有「交易未成立」才返还，退款不返还</b>（技术方案 §3.4）：限购是为了防单用户过度占用 营销资源，若「买了再退」能刷回额度，限购形同虚设 ——
+     * <p><b>只有「交易未成立」才返还，退款不返还</b>（技术方案 §3.4）：限购是为了防单用户过度占用 营销资源，若「买了再退」能刷回额度，限购即被绕过 ——
      * 这是薅羊毛的标准手法。库存则相反， 退款要回补，因为商品本身可以再卖给别人。这个不对称是有意为之。
      */
     @Update(

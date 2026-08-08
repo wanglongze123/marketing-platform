@@ -66,7 +66,7 @@ class ProviderCallbackIT extends AbstractMySqlIT {
     /**
      * 构造一条已签名的通知。
      *
-     * <p><b>签名走真实签名器，不硬编码</b>：硬编码验的是「测试造的签名能被验过」，而签发侧与验签侧的 字段集合是否一致恰恰验不到 —— 而那正是验签要挡的东西（与 {@code
+     * <p><b>签名走真实签名器，不硬编码</b>：硬编码验的是「测试造的签名能被验过」，而签发侧与验签侧的 字段集合是否一致则验不到 —— 而那正是验签要挡的东西（与 {@code
      * newPayCallback} 同一处置）。
      */
     private ProviderCallbackReq notify(String opNo, String seq, RetStatus result) {
@@ -308,7 +308,7 @@ class ProviderCallbackIT extends AbstractMySqlIT {
      * <p>本用例用注入让两组都失败无法区分 fail-fast 与逐个失败，故构造的是「A 组失败、B 组成功」： 若实现用了 {@code invokeAny} 或在任一 future
      * 异常时提前返回，B 组的明细会停在非终态。
      *
-     * <p><b>下游账本的计数是关键断言</b>：fail-fast 的形态恰恰是「调用发出去了但本地没记」，只看平台 侧的明细看不出区别 —— 那正是资损的成因。
+     * <p><b>下游账本的计数是关键断言</b>：fail-fast 的形态是「调用发出去了但本地没记」，只看平台 侧的明细看不出区别 —— 那正是资损的成因。
      */
     @Test
     void fanOutDoesNotCancelSiblingsWhenOneProviderFails() {
@@ -349,7 +349,7 @@ class ProviderCallbackIT extends AbstractMySqlIT {
      *
      * <p>破除方式是给 B 组布置 300ms 延迟，让取消真的能打断它。这与 PR-6 的「数据量不足一页」同族 —— 那里靠灌数据破除，这里靠加耗时。
      *
-     * <p><b>断言落在下游账本上</b>：fail-fast 的失效形态恰恰是「调用发出去了、本地没记」，只看平台侧 的明细分辨不出 —— 那正是资损的成因。
+     * <p><b>断言落在下游账本上</b>：fail-fast 的失效形态是「调用发出去了、本地没记」，只看平台侧 的明细分辨不出 —— 那正是资损的成因。
      */
     @Test
     void slowSiblingIsNotCancelledWhenAnotherProviderFailsFast() {

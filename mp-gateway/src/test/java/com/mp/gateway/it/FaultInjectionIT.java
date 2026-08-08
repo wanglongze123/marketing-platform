@@ -263,7 +263,7 @@ class FaultInjectionIT extends AbstractMySqlIT {
      * 查单是「下游已发放但平台不知道单号」这一状态的唯一出口，收敛时不填则该列永远为空。
      *
      * <p>后果落在对账上：{@code idx_provider_order} 支撑 BR-C-26「按供应方单号反查业务」，而<b>发生过
-     * 超时的单恰恰是最需要反查的那批</b>，它们却查不到。既有用例只断言 {@code reward_grant_item}（发奖侧） 的单号，权益侧的 {@code
+     * 超时的单正是最需要反查的那批</b>，它们却查不到。既有用例只断言 {@code reward_grant_item}（发奖侧） 的单号，权益侧的 {@code
      * benefit_fulfillment_record} 无人检查，故此缺陷此前不显形。
      */
     @Test

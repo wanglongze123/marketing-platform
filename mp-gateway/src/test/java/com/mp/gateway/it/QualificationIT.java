@@ -151,7 +151,7 @@ class QualificationIT extends AbstractMySqlIT {
     /**
      * <b>配了范围但取不到值时判不通过</b>，而非放行。
      *
-     * <p>放行等于「配置形同虚设」：运营配了城市限制，而请求不带城市就能绕过去。
+     * <p>放行等于「配置不起作用」：运营配了城市限制，而请求不带城市就能绕过去。
      */
     @Test
     void missingValueAgainstConfiguredScopeIsRejected() {

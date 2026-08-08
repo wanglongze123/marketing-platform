@@ -617,7 +617,7 @@ class ShapeFreezeTest {
                 .as("预占必须带余量谓词，否则直接超卖")
                 .contains(normalize("total - locked - consumed >= #{qty}"));
 
-        // 转消耗：locked 减、consumed 加，缺后者会让可售余量凭空多一份
+        // 转消耗：locked 减、consumed 加，缺后者会让可售余量多出一份
         String consume = normalize(sqlOf(mapper, "tryConsume"));
         assertThat(consume)
                 .as("转消耗须同时改 locked 与 consumed")
@@ -660,7 +660,7 @@ class ShapeFreezeTest {
      *
      * <ul>
      *   <li>库存 SQL 的下界 {@code WHERE locked >= ?} —— 防的是「总数被减成负值」。{@code locked} 是该 {@code
-     *       stock_key} 下所有订单<b>共享</b>的计数器，A 单重复释放时它因别的订单占用仍大于 0， 谓词照常放行，结果 A 释放掉了 B 的预占，可售余量凭空多一份
+     *       stock_key} 下所有订单<b>共享</b>的计数器，A 单重复释放时它因别的订单占用仍大于 0， 谓词照常放行，结果 A 释放掉了 B 的预占，可售余量多出一份
      *   <li>{@code uk_biz_type_op} —— 防的是重复<b>入队</b>，防不住同一条任务被重复<b>执行</b>
      * </ul>
      *
@@ -699,9 +699,9 @@ class ShapeFreezeTest {
      * 库存类任务的 {@code op_no} 必须是确定性键，不得留空串。
      *
      * <p>每单幂等完全由 {@code uk_biz_type_op} 承担 —— 库存 SQL 的下界提供不了：{@code locked} 是该 {@code stock_key}
-     * 下所有订单共享的计数器，A 单重复释放两次时它因别的订单占用仍远大于 0， 下界根本不会拦，结果是 A 释放了别人的预占，可售余量凭空多一份（技术方案 §7.4）。
+     * 下所有订单共享的计数器，A 单重复释放两次时它因别的订单占用仍远大于 0， 下界根本不会拦，结果是 A 释放了别人的预占，可售余量多出一份（技术方案 §7.4）。
      *
-     * <p>留空串则同一单可插入无数条释放任务，唯一键形同虚设 —— 这正是 §3.3 警告过的 {@code NOT NULL DEFAULT ''} 陷阱。
+     * <p>留空串则同一单可插入无数条释放任务，唯一键不起作用 —— 这正是 §3.3 警告过的 {@code NOT NULL DEFAULT ''} 陷阱。
      */
     @Test
     void stockTasksCarryADeterministicOpNo() {
@@ -713,7 +713,7 @@ class ShapeFreezeTest {
         String body = tx.substring(idx, Math.min(tx.length(), idx + 500));
 
         assertThat(normalize(body))
-                .as("库存任务的 op_no 须取 bizNo + '_' + taskType，留空串则唯一键形同虚设")
+                .as("库存任务的 op_no 须取 bizNo + '_' + taskType，留空串则唯一键不起作用")
                 .contains(normalize("bizNo + \"_\" + taskType.name()"));
     }
 

@@ -21,7 +21,7 @@ import org.testcontainers.utility.MountableFile;
 /**
  * 集成测试基类：真实 MySQL + 完整 Spring 上下文。
  *
- * <p><b>为什么不用 H2</b>：本阶段要验的恰恰是 H2 与 MySQL 行为不一致的那几处 —— 唯一索引对多行 NULL 的处理、条件更新的 {@code
+ * <p><b>为什么不用 H2</b>：本阶段要验的正是 H2 与 MySQL 行为不一致的那几处 —— 唯一索引对多行 NULL 的处理、条件更新的 {@code
  * affected_rows}、Flyway DDL 可执行性（《开发规范》§9.2）。用 H2 测等于没测。
  *
  * <p><b>为什么用单例容器而非 {@code @Testcontainers + @Container}</b>：后者按类起停， 四个测试类就要起四次 MySQL。静态块只执行一次，容器由
@@ -164,7 +164,7 @@ abstract class AbstractMySqlIT {
     /**
      * 建单入参，凭证由真实的 {@code preConsult} 签发。
      *
-     * <p><b>不在测试里自行拼凭证</b>：那样测的是「测试造出来的凭证能被验过」，而咨询与下单是否对同一 用户、同一商品、同一价格达成一致恰恰验不到 ——
+     * <p><b>不在测试里自行拼凭证</b>：那样测的是「测试造出来的凭证能被验过」，而咨询与下单是否对同一 用户、同一商品、同一价格达成一致则验不到 ——
      * 而这正是签名与比价要挡的东西。走真实签发， 咨询侧一旦少签一个字段，下单侧的比对立刻失配。
      */
     protected CreateTradeReq newTradeReq(String tag) {
@@ -191,7 +191,7 @@ abstract class AbstractMySqlIT {
     /**
      * 支付通知，<b>签名由真实的签名器算出</b>。
      *
-     * <p>不在测试里硬编码签名值：那样测的是「测试造的签名能被验过」，而签发侧与验签侧的字段集合 是否一致恰恰验不到 —— 而那正是验签要挡的东西。走真实签名器，签发侧少签一个字段，全部用例
+     * <p>不在测试里硬编码签名值：那样测的是「测试造的签名能被验过」，而签发侧与验签侧的字段集合 是否一致则验不到 —— 而那正是验签要挡的东西。走真实签名器，签发侧少签一个字段，全部用例
      * 立刻变红。
      */
     protected PayCallbackReq newPayCallback(

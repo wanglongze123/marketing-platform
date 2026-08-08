@@ -22,7 +22,7 @@ import org.junit.jupiter.api.Test;
 /**
  * 库存 0 超卖与限购，对应《分阶段方案》§5.7 退出标准 17、18。
  *
- * <p><b>0 超卖的判据是「售出数 == 库存总量」，不是「没报错」。</b> 超卖的失效形态恰恰是全部成功 ——
+ * <p><b>0 超卖的判据是「售出数 == 库存总量」，不是「没报错」。</b> 超卖的失效形态是全部成功 ——
  * 每个请求都拿到订单、都没有异常，只是卖出去的比有的多。故每个并发用例都同时断言三处：成功数、 {@code locked + consumed} 的终值、以及订单表实际行数。
  *
  * <p>并发用例用真实线程池压同一行，不是串行调用 N 次：串行永远测不出「两个线程同时读到还剩 1」。
@@ -234,7 +234,7 @@ class StockAndQuotaIT extends AbstractMySqlIT {
     /**
      * 支付成功后预占转消耗，<b>可售余量不变</b>。
      *
-     * <p>转消耗只是把「占着」变成「卖掉了」，不释放余量。若实现成 {@code locked -= n} 而忘了 {@code consumed += n}，可售余量会凭空多一份 ——
+     * <p>转消耗只是把「占着」变成「卖掉了」，不释放余量。若实现成 {@code locked -= n} 而忘了 {@code consumed += n}，可售余量会多出一份 ——
      * 这正是「断言余量」而非只断言 {@code locked} 的理由。
      */
     @Test
@@ -255,7 +255,7 @@ class StockAndQuotaIT extends AbstractMySqlIT {
      * 支付失败释放库存与额度，可售余量回升。
      *
      * <p>tag 取 {@code stockPayFail} 而非 {@code payFail}：后者与 {@code BranchRejectionIT} 撞车 —— 同 tag
-     * 派生同 {@code clientReqNo}，第二个类跑到时命中幂等返回原单，压根不会扣库存，断言随之失准。 <b>tag 在整个 IT 套件里必须唯一</b>，不只是在本类里。
+     * 派生同 {@code clientReqNo}，第二个类跑到时命中幂等返回原单，根本不会扣库存，断言随之失准。 <b>tag 在整个 IT 套件里必须唯一</b>，不只是在本类里。
      */
     @Test
     void payFailureReleasesStockAndQuota() {
@@ -316,7 +316,7 @@ class StockAndQuotaIT extends AbstractMySqlIT {
      * >= qty} 挡下 —— 于是它验的是「下界生效」，而不是 「A 单不会释放掉 B 单的预占」。
      *
      * <p>后者才是真正的风险，且<b>下界完全拦不住</b>：{@code locked} 是该 {@code stock_key} 下所有订单共享的 计数器，A 单重复释放时它因 B
-     * 单占用仍大于 0，谓词照常通过，结果是可售余量凭空多一份 —— 直接超卖。
+     * 单占用仍大于 0，谓词照常通过，结果是可售余量多出一份 —— 直接超卖。
      *
      * <p>拦住它的只能是 {@code benefit_task.uk_biz_type_op}：同一单同类任务只入队一条。本用例通过 「人工把已完成的任务打回
      * PENDING」模拟唯一键被绕过（真实场景是调度器重复领取），断言即便如此 也不会多减 —— 因为任务只有一条，重跑的还是它自己。
@@ -344,7 +344,7 @@ class StockAndQuotaIT extends AbstractMySqlIT {
         runScheduler();
 
         assertThat(lockedOf()).as("B 单的预占不得被 A 的重复释放动到").isEqualTo(1);
-        assertThat(availableOf()).as("可售余量不得凭空增加").isEqualTo(TOTAL_STOCK - 1);
+        assertThat(availableOf()).as("可售余量不得增加").isEqualTo(TOTAL_STOCK - 1);
     }
 
     /** 同一单同类库存任务只入队一条，由 {@code uk_biz_type_op} 保证。 */
@@ -366,7 +366,7 @@ class StockAndQuotaIT extends AbstractMySqlIT {
                 .as("同一单同类库存任务只应有一条")
                 .isEqualTo(1);
 
-        // op_no 必须是确定性键而非空串 —— 空串时唯一索引形同虚设
+        // op_no 必须是确定性键而非空串 —— 空串时唯一索引不起作用
         assertThat(
                         str(
                                 benefitJdbc,

@@ -3,7 +3,7 @@ package com.mp.common.util;
 /**
  * 幂等键派生：<b>确定性可重算，同一操作重试必须得到同一个值</b>。
  *
- * <p>与 {@link BizNoGenerator} 规则相反 —— 后者必须用随机源，此处恰恰禁止。两条铁律：
+ * <p>与 {@link BizNoGenerator} 规则相反 —— 后者必须用随机源，此处禁止。两条铁律：
  *
  * <ol>
  *   <li>UNKNOWN / 超时重试<b>必须复用原键</b>。任务表建任务时即固化 opNo，重试只读不生成

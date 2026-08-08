@@ -4,7 +4,7 @@ package com.mp.benefit.service;
  * 库存与限购的维度键派生。
  *
  * <p>与 {@code IdempotentKeys} 同一条规矩：<b>确定性可重算</b>。预占用一个键、释放用另一个键，就会 「占了 A 的、还了 B
- * 的」——两边都不报错，只是可售余量凭空多一份或少一份，要到对账才发现。
+ * 的」——两边都不报错，只是可售余量多出一份或少一份，要到对账才发现。
  */
 public final class StockKeys {
 

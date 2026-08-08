@@ -13,7 +13,7 @@ import org.apache.ibatis.annotations.Update;
  * 超卖的全部要点， 也是本项目不引入分布式锁做库存的理由（技术方案 §7.4：L2 是性能优化，L3 才是正确性兜底）。
  *
  * <p><b>下界保护不提供每单幂等</b>：{@code locked} 是该 {@code stock_key} 下所有订单共享的计数器。 A 单重复释放两次时，{@code locked}
- * 因别的订单占用仍远大于 0，{@code WHERE locked >= ?} 根本 不会拦 —— 结果是 A 释放了别人的预占，可售余量凭空多一份，直接超卖。每单幂等由 {@code
+ * 因别的订单占用仍远大于 0，{@code WHERE locked >= ?} 根本 不会拦 —— 结果是 A 释放了别人的预占，可售余量多出一份，直接超卖。每单幂等由 {@code
  * benefit_task.uk_biz_type_op} 承担，故库存类任务的 {@code op_no} 必须取 {@code biz_no + '_' + task_type} 而非留空串。
  */
 @Mapper

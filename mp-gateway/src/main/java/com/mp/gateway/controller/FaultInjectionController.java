@@ -98,7 +98,7 @@ public class FaultInjectionController {
      * 清空下游账本，只在开始一轮新演示时用。
      *
      * <p>与 {@code /reset} 分开：模式是「接下来怎么表现」，账本是「已经发生过什么」。演示中途把 账本清掉，「无重复发放」的断言就失去了依据 ——
-     * 它恰恰要靠账本里只有一条来证明。
+     * 它要靠账本里只有一条来证明。
      */
     @DeleteMapping("/ledger")
     public ApiResponse<Map<String, Object>> clearLedger() {
