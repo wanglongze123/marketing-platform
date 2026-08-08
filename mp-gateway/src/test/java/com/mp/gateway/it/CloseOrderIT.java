@@ -335,7 +335,7 @@ class CloseOrderIT extends AbstractMySqlIT {
      * {@code op_no} 不同，{@code uk_biz_type_op} 各挡各的，挡不住「两条都入队」。
      *
      * <p>真正拦住它的是 {@code stock_status} 的条件更新（PR-5）：两者都要求前置 {@code LOCKED}， 谁先执行谁推进，另一个 {@code
-     * affected_rows = 0} 跳过。<b>若少了这道闸，同一单会先转消耗 再被释放，可售余量凭空多一份。</b>
+     * affected_rows = 0} 跳过。<b>若少了这道闸，同一单会先转消耗 再被释放，可售余量多出一份。</b>
      *
      * <p>用条件更新直接把主单打成「已支付」来构造：正常链路下支付态只能被推进一次，两条分支不会 同时落任务 —— 但那是<b>当前</b>状态机的性质，不是库存层的保证。这里验的是库存层。
      */
@@ -371,7 +371,7 @@ class CloseOrderIT extends AbstractMySqlIT {
 
         // 转消耗则 consumed=1、余量少一件；释放则 consumed=0、余量满。
         // 两者必居其一 —— 若两条任务都执行了实际的库存 UPDATE，会是 consumed=1 且余量也满，
-        // 那一件库存凭空多出来了
+        // 那一件库存多出来了
         if (StockStatus.CONSUMED.name().equals(orderField("stock_status", bizNo))) {
             assertThat(consumedOf()).isEqualTo(1);
             assertThat(availableOf()).as("已卖掉的那件不得回到可售").isEqualTo(TOTAL_STOCK - 1);
@@ -461,7 +461,7 @@ class CloseOrderIT extends AbstractMySqlIT {
      * 淹没，真正需要人看的那条就找不出来了。
      *
      * <p>修法在调度器：{@code BizException} 携带 {@code 1xxx} / {@code 4xxx} 时判 {@code FAIL} 而非 {@code
-     * UNKNOWN} —— 业务规则拒绝是<b>确定的答案</b>，重试拿到的还是同一个。{@code 5xxx} 不在其列，它的语义恰恰是「结果未知」，必须继续收敛。
+     * UNKNOWN} —— 业务规则拒绝是<b>确定的答案</b>，重试拿到的还是同一个。{@code 5xxx} 不在其列，它的语义是「结果未知」，必须继续收敛。
      */
     @Test
     void closeTaskOfAPaidOrderSettlesInsteadOfGoingDead() {
@@ -495,17 +495,17 @@ class CloseOrderIT extends AbstractMySqlIT {
      *
      * <p>这一条锁死的是分流的<b>边界</b>：判据取错误码号段而非异常类型，因为 {@code BizException} 同时 承载 {@code 1xxx} / {@code
      * 4xxx} / {@code 5xxx} 三个分区。若实现写成「catch BizException 一律判 FAIL」，上一条照常绿，而 {@code
-     * 5001}（下游未知）会被当成终态失败 —— 那正是「把 UNKNOWN 误判为 FAILED」，四分类要防的头一件事。
+     * 5001}（下游未知）会被当成终态失败 —— 那正是「把 UNKNOWN 误判为 FAILED」，四分类要防的第一类。
      *
      * <p><b>构造方式必须让 {@code BizException} 真的从 handler 抛出来</b>，且带 {@code 5xxx}。初稿用的是 注入关单 RPC 超时 ——
-     * 那条路径压根不抛 {@code BizException}（{@code askPayToClose} 把异常兜成 {@code UNKNOWN} 进 {@code
+     * 那条路径根本不抛 {@code BizException}（{@code askPayToClose} 把异常兜成 {@code UNKNOWN} 进 {@code
      * CLOSING}），走不到分流那段代码。<b>实测：把判据改成「1xxx/4xxx/5xxx 一律判 FAIL」后初稿照常全绿</b>，注释里那句「锁死边界」是空的。
      *
      * <p>改用 {@link com.mp.benefit.lock.BizLock} 抢不到锁的 {@code 5002}：先占住该单的关单锁，任务执行时 {@code tryLock}
      * 立即失败并抛出。这是 V2 里唯一能从任务链路自然抛出 {@code 5xxx} 的点，语义也恰当 —— 抢不到锁不代表这笔业务不成立，正是「等会儿再来」。
      *
      * <p><b>锁必须由另一个线程持有</b>：Redisson 的 {@code RLock} 可重入，而 {@code runScheduler()} 是同步 执行的 ——
-     * 测试线程自己持锁时，任务在同一线程里重入成功，压根不会抛。初稿正是如此，实测 「Expecting code to raise a throwable」才发现。
+     * 测试线程自己持锁时，任务在同一线程里重入成功，根本不会抛。首版即如此，实测 「Expecting code to raise a throwable」才发现。
      */
     @Test
     void systemLevelUnknownStillRetries() throws Exception {

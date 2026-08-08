@@ -1431,7 +1431,7 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
      * 本方法只做「不查库就能判的」那部分。
      *
      * <p>{@code configVersion} 不作为拒绝依据：它是活动级版本，与权益内容无关（后者由 {@code packageVersion}
-     * 决定）。活动改版而价格与权益包都未变时，用户看到的承诺确实没变，据此拒绝 只会白白打断下单。
+     * 决定）。活动改版而价格与权益包都未变时，用户看到的承诺确实没变，据此拒绝只会打断下单。
      */
     private ConsultTokenPayload verifyConsultToken(CreateTradeReq req) {
         // 签名与时效不通过时在此抛 4003

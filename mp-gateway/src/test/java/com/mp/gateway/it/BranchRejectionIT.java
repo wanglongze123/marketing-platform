@@ -29,7 +29,7 @@ class BranchRejectionIT extends AbstractMySqlIT {
 
         benefitOrderService.payCallback(
                 newPayCallback(bizNo, created.getTradeNo(), "NS_1", "FAILED"));
-        // 驱动一轮，证明「没有履约」不是因为没人跑，而是因为压根没有任务
+        // 驱动一轮，证明「没有履约」不是因为没人跑，而是因为没有任务
         runScheduler();
 
         assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.PAY_FAILED.name());

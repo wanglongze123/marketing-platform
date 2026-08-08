@@ -293,7 +293,7 @@ class FissionBidirectionalGrantIT extends AbstractMySqlIT {
     /**
      * 师傅返奖失败不影响徒弟已成功的奖励（BR-F-20）。
      *
-     * <p>回滚徒弟奖等于因为师傅没拿到而把已发给徒弟的收回去 —— 对用户是凭空被扣。
+     * <p>回滚徒弟奖等于因为师傅没拿到而把已发给徒弟的收回去 —— 对用户即已到手的奖励被收回。
      */
     @Test
     void sponsorRewardFailureDoesNotAffectFollowerGrant() {
