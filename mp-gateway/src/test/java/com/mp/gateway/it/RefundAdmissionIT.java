@@ -289,6 +289,144 @@ class RefundAdmissionIT extends AbstractMySqlIT {
         assertThat(revokeCalls()).as("不得二次回收").isEqualTo(afterFirst);
     }
 
+    // ------------------------------------------------------------------
+    // PR-7/8 review 补：三处缺陷各自的用例
+    // ------------------------------------------------------------------
+
+    /**
+     * <b>实付金额未知的单不受理退款，且不得先把权益回收掉</b>（review 缺陷 ①）。
+     *
+     * <p>{@code pay_amount} 可空是 {@code applyPaidAfterClosing} 有意留下的：关单受理后查单确认 「这笔已收款」时支付方并未回答收了多少，按
+     * §5.6 的口径留空等通知回填。这条路径真实存在。
+     *
+     * <p>原实现在 {@code callPayRefund} 直接拆箱 {@code Long} 抛 NPE，而 NPE 被「异常一律映射 {@code UNKNOWN}」 捕获 ——
+     * 主单进 {@code REFUNDING}、落查单任务、回报「结果未定」，<b>表现与支付方超时完全一样</b>， 而退款请求根本没发出去。且查单收敛救不回来：支付方查无该单恒答
+     * {@code UNKNOWN}，重试至死信后 这笔单永停 {@code REFUNDING}。与 PR-7 的键长溢出同族。
+     *
+     * <p><b>断言必须落在「回收没有发生」上</b>：只断言 {@code createRefund} 抛错的话，一个「准入照常 回收、退款时才拒绝」的实现同样能通过 ——
+     * 而那时权益已被收走且钱退不出去，用户既没权益也没钱， 正是本链路要防的那一类。故拒绝必须发生在准入阶段。
+     */
+    @Test
+    void orderWithUnknownPayAmountIsRejectedBeforeAnyRevoke() {
+        String bizNo = grantedOrder("np_amount");
+        // 造出 pay_amount 为空的单 —— 与 applyPaidAfterClosing 收敛后的状态一致
+        benefitJdbc.update(
+                "UPDATE play_biz_record SET pay_amount = NULL WHERE play_biz_record_no = ?", bizNo);
+
+        int revokeBefore = revokeCalls();
+        int refundBefore = payLedger.refundSize();
+
+        assertThatThrownBy(() -> admit(bizNo, "RQ11"))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .as("金额未知须给出确定的业务拒绝，而非按未知态收敛")
+                .isEqualTo(ErrorCode.PAY_AMOUNT_UNKNOWN);
+
+        assertThat(revokeCalls() - revokeBefore).as("拒绝须早于回收，权益不得被收走").isZero();
+        assertThat(payLedger.refundSize() - refundBefore).as("支付方不得收到退款").isZero();
+        assertThat(orderField("refund_status", bizNo))
+                .as("状态不得被推进")
+                .isEqualTo(RefundStatus.NONE.name());
+    }
+
+    /**
+     * {@code createRefund} 侧同样挡住金额未知（review 缺陷 ①，第二道）。
+     *
+     * <p>它是公开接口，不强制经过准入 —— 准入那道保证「回收不会白做」，这道保证「不会拆箱成 NPE 再被映射成 UNKNOWN」。两道各自可被单独调用，故都要有。
+     *
+     * <p>本用例把单推到 {@code REVOKING} 后才抹掉金额，绕过准入那道，验证的正是内层这道。<b>与 PR-8 的「服务层 {@code if} 遮蔽了 DB
+     * 谓词」是同一处置</b>：多层实现的每一层都要单独验过。
+     */
+    @Test
+    void createRefundAlsoRejectsUnknownPayAmount() {
+        String bizNo = grantedOrder("np_amount2");
+        admit(bizNo, "RQ12");
+        assertThat(orderField("refund_status", bizNo)).isEqualTo(RefundStatus.REVOKING.name());
+
+        benefitJdbc.update(
+                "UPDATE play_biz_record SET pay_amount = NULL WHERE play_biz_record_no = ?", bizNo);
+        int refundBefore = payLedger.refundSize();
+
+        assertThatThrownBy(() -> benefitOrderService.createRefund(bizNo, "RQ12"))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.PAY_AMOUNT_UNKNOWN);
+
+        assertThat(payLedger.refundSize() - refundBefore).as("支付方不得收到退款").isZero();
+        assertThat(orderField("refund_status", bizNo))
+                .as("拒绝后不得停在 REFUNDING —— 那是永不收敛的黑洞")
+                .isEqualTo(RefundStatus.REVOKING.name());
+    }
+
+    /**
+     * <b>部分核销时，已回收成功的那一项必须留痕</b>（review 缺陷 ②）。
+     *
+     * <p>一单跨两个供应方，A 已核销、B 未使用：整笔汇总为失败（权益还在，不得退款），<b>但 B 的券 确实已经被供应方收走了</b>。
+     *
+     * <p>原实现的 {@code markRevoked} 谓词是「一单一次」，而回收本身逐供应方发起 —— 汇总失败时一条 留痕都不落。后果是对账第 2 项（已退款权益未回收）把 B
+     * 判成差异并补一次回收，<b>而这条项是 资损哨兵，假阳性会让它失效</b>；人工据此处置时也会以为一件都没收回来。
+     *
+     * <p>三条断言各挡一类：下游确实收了一件、平台确实记了一件、且只记了那一件（不能把 A 也标上 —— 那是反方向的错，对账会以为 A 已回收而放过一笔真的没收回来的券）。
+     */
+    @Test
+    void successfullyRevokedItemIsRecordedEvenWhenOverallRevokeFails() {
+        String bizNo = grantedOrder("partial_used");
+        java.util.List<String> opNos =
+                benefitJdbc.queryForList(
+                        "SELECT grant_op_no FROM benefit_fulfillment_record"
+                                + " WHERE play_biz_record_no = ? AND grant_status = 'SUCCESS'"
+                                + " ORDER BY provider_type",
+                        String.class,
+                        bizNo);
+        assertThat(opNos).as("seed 权益包须跨两个供应方，否则本用例验不到部分失败").hasSize(2);
+        // 只核销 A，B 保持未使用
+        providerLedger.markUsage(opNos.get(0), "USED");
+
+        int revokeBefore = revokeCalls();
+        RevokeAdmitResp resp = admit(bizNo, "RQ13");
+
+        assertThat(resp.getRetStatus()).as("有一件收不回来，整笔即失败").isEqualTo(RetStatus.FAIL);
+        assertThat(orderField("refund_status", bizNo)).isEqualTo(RefundStatus.REVOKE_FAILED.name());
+        assertThat(revokeCalls() - revokeBefore).as("B 确实被下游收走了").isEqualTo(1);
+
+        assertThat(fulfillmentRevokedCount(bizNo)).as("已收走的那一件必须留痕，否则对账第 2 项假阳性").isEqualTo(1);
+        assertThat(
+                        str(
+                                benefitJdbc,
+                                "SELECT grant_op_no FROM benefit_fulfillment_record"
+                                        + " WHERE play_biz_record_no = ? AND revoke_no IS NOT NULL",
+                                bizNo))
+                .as("留痕的必须是真被收走的那一件，不能是已核销的 A")
+                .isEqualTo(opNos.get(1));
+    }
+
+    /**
+     * <b>部分核销时 {@code usageStatus} 取最阻断的那一项</b>（review 缺陷 ②，第二半）。
+     *
+     * <p>原实现在循环里逐条覆盖，汇总值取决于 {@code selectGranted} 的返回顺序：A 已核销、B 回收成功 时最终留下 {@code
+     * REVOKED}，于是调用方看到「失败，但券没被用过」——与事实相反。而 {@code reasonCode} 正按这个值在 {@code 1752}（已核销，确定收不回）与
+     * {@code 1753}（回收未完成） 之间选码，人工会把一笔永远不可能成功的回收当成普通出错去重试。
+     */
+    @Test
+    void usageStatusAggregatesToTheMostBlockingItem() {
+        String bizNo = grantedOrder("partial_usage");
+        java.util.List<String> opNos =
+                benefitJdbc.queryForList(
+                        "SELECT grant_op_no FROM benefit_fulfillment_record"
+                                + " WHERE play_biz_record_no = ? AND grant_status = 'SUCCESS'"
+                                + " ORDER BY provider_type",
+                        String.class,
+                        bizNo);
+        providerLedger.markUsage(opNos.get(0), "USED");
+
+        RevokeAdmitResp resp = admit(bizNo, "RQ14");
+
+        assertThat(resp.getUsageStatus()).as("已核销不能被后一项的 REVOKED 盖掉").isEqualTo("USED");
+        assertThat(resp.getReasonCode())
+                .as("已核销是确定收不回，须区别于「回收未完成」")
+                .isEqualTo(ErrorCode.BENEFIT_ALREADY_USED);
+    }
+
     // ---- 断言辅助 ----
 
     private int fulfillmentRevokedCount(String bizNo) {

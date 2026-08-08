@@ -93,6 +93,19 @@ public final class ErrorCode {
      */
     public static final String REVOKE_NOT_DONE = "1753";
 
+    /**
+     * 实付金额未知，无法确定退款金额。V3 PR-7/8 review 补。
+     *
+     * <p>{@code pay_amount} 可空是有意的：关单受理后查单确认「这笔已收款」时，支付方并未回答收了 多少，此路径按 §5.6 的口径留空等通知回填 ——
+     * 「实付金额未知」本身是可表达的状态，而一个猜来 的数不是。
+     *
+     * <p><b>退款侧必须显式拒绝这一状态，不能以应付额代入</b>：实付 ≠ 应付时按应付退是多退或少退， 而多退一笔钱要走人工追讨。归 1xxx 是因为它确定 ——
+     * 金额补齐前重试多少次都是同一答案，判 5xxx 会让退款任务一路重试到死信。
+     *
+     * <p>处置是等支付通知回填 {@code pay_amount} 后重新发起，或人工核定金额。
+     */
+    public static final String PAY_AMOUNT_UNKNOWN = "1754";
+
     /** 价格不一致：凭证成交价 ≠ 服务端重算价。V2 引入比价后使用 */
     public static final String PRICE_MISMATCH = "1711";
 

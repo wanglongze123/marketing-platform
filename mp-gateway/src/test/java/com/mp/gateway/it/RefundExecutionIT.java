@@ -380,6 +380,71 @@ class RefundExecutionIT extends AbstractMySqlIT {
                 .isZero();
     }
 
+    // ------------------------------------------------------------------
+    // PR-7/8 review 补：收敛通路的空明细判定
+    // ------------------------------------------------------------------
+
+    /**
+     * <b>{@code REVOKING} 但一条成功明细都没有时，收敛通路不得判成功</b>（review 缺陷 ③）。
+     *
+     * <p>同步链路的 {@code revokeGranted} 对这一情形判得对：打 ERROR、置未定、交人工，理由是「不静默
+     * 当作无需回收，那会退掉一笔可能已发放的单」。<b>收敛通路必须给出同一个答案</b> —— 原实现的循环 一次都不执行，直接落到 {@code
+     * settleRevoke}，于是<b>一次回收都没发生的单进入「回收已完成」</b>。
+     *
+     * <p>危害在下一步：{@code createRefund} 的前置态谓词正是 {@code REVOKING}，这单会被照常放行 ——
+     * 「先回收后退款」从内部被绕过，三道闸一道都不会响。
+     *
+     * <p><b>断言退款仍被挡住是本用例的重点</b>：只断言 {@code reconcileRevoke} 返回 {@code UNKNOWN} 的话，一个
+     * 「返回未知但仍把状态推成已回收」的实现照样通过 —— 而资损恰恰发生在状态上，不在返回值上。
+     */
+    @Test
+    void reconcileRevokeDoesNotSettleWhenNoGrantedItemExists() {
+        // 走真实的未收敛路径：注入回收超时，准入后操作记录停在 UNKNOWN、落 REVOKE 任务。
+        //
+        // 不能用正常准入后改库来造这个场景 —— 那条路径的回收已经成功，操作记录本就是
+        // SUCCESS，断言「不得置 SUCCESS」会被前置状态直接满足，测不到收敛通路做了什么
+        String bizNo = benefitOrderService.createTrade(newTradeReq("rvk_empty")).getBizNo();
+        payLedger.markPaid(bizNo);
+        benefitOrderService.payCallback(newPayCallback(bizNo, "T_rvk_empty", "N1", "SUCCESS"));
+        runScheduler();
+
+        injector.setProviderMode(FaultMode.TIMEOUT_AFTER_COMMIT);
+        RevokeAdmitReq req = new RevokeAdmitReq();
+        req.setBizNo(bizNo);
+        req.setRefundReqNo("RRE");
+        req.setOperator("cs_bob");
+        benefitOrderService.revokeAndAdmit(req);
+        injector.reset();
+        assertThat(orderField("refund_status", bizNo)).isEqualTo(RefundStatus.REVOKING.name());
+
+        int refundBefore = payLedger.refundSize();
+
+        // 造数据不一致：明细全部改为 FAILED，主单 grant_status 仍是 GRANT_SUCCESS。
+        // 于是 selectGranted 返回空 —— 这正是缺陷 ③ 的触发条件
+        benefitJdbc.update(
+                "UPDATE benefit_fulfillment_record SET grant_status = 'FAILED', revoke_no = NULL,"
+                        + " revoke_time = NULL WHERE play_biz_record_no = ?",
+                bizNo);
+
+        RetStatus result = benefitOrderService.reconcileRevoke(bizNo);
+
+        assertThat(result).as("数据不一致须回报未定，交人工").isEqualTo(RetStatus.UNKNOWN);
+        assertThat(orderField("refund_status", bizNo))
+                .as("一次回收都没发生，不得进入「回收已完成」")
+                .isEqualTo(RefundStatus.REVOKING.name());
+        assertThat(
+                        str(
+                                benefitJdbc,
+                                "SELECT status FROM play_op_record WHERE play_biz_record_no = ?"
+                                        + " AND op_type = 'REVOKE_BENEFIT'",
+                                bizNo))
+                .as("操作记录不得置 SUCCESS —— 对账按它判断退款走到哪一步")
+                .isNotEqualTo("SUCCESS");
+
+        // 关键一条：退款必须仍被挡住。资损发生在状态上，不在返回值上
+        assertThat(payLedger.refundSize() - refundBefore).as("支付方不得收到退款").isZero();
+    }
+
     private String taskStatus(String bizNo, TaskType type, String opNo) {
         return str(
                 benefitJdbc,
