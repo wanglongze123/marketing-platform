@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.stereotype.Component;
 
 /**
@@ -45,6 +46,16 @@ public class SocialProfileStore {
 
     /** 召回本身是否不可用（{@code 5603}），与过滤器的依赖故障是两回事 */
     private volatile boolean recallDown;
+
+    /**
+     * 平台发起召回的次数，按 {@code sponsorId} 分别计数。
+     *
+     * <p><b>与 {@code ProviderLedger.recordGrantAttempt} 同一用途</b>：调用次数只有下游数得准。
+     * 平台侧数不出来——它拿到的是合并去重后的候选集，「问了几页」这个信息在返回值里已经不存在。
+     *
+     * <p>没有它，「不足一页即停止翻页」这条只能靠读代码确认：多问一次下游拿到空页，最终候选集 与不多问完全一样。
+     */
+    private final Map<String, AtomicInteger> recallCalls = new ConcurrentHashMap<>();
 
     /** 依赖不可用的规则集合，逐条注入 */
     private final Set<SocialDependency> downRules = ConcurrentHashMap.newKeySet();
@@ -101,6 +112,17 @@ public class SocialProfileStore {
         return recallDown;
     }
 
+    /** 记一次召回到达。所有模式都算，包括抛不可用的那次 —— 请求确实发出了。 */
+    public void recordRecallCall(String sponsorId) {
+        recallCalls.computeIfAbsent(sponsorId, k -> new AtomicInteger()).incrementAndGet();
+    }
+
+    /** 平台向该师傅发起过几次召回，即翻了几页。 */
+    public int recallCallCount(String sponsorId) {
+        AtomicInteger n = recallCalls.get(sponsorId);
+        return n == null ? 0 : n.get();
+    }
+
     /** 该规则的依赖是否不可用。调用点据此抛异常，模拟「问不到人」。 */
     public void failIfDown(SocialDependency rule) {
         if (downRules.contains(rule)) {
@@ -119,6 +141,7 @@ public class SocialProfileStore {
         inExperiment.clear();
         inCrowd.clear();
         downRules.clear();
+        recallCalls.clear();
         recallDown = false;
     }
 
