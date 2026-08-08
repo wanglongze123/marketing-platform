@@ -581,17 +581,19 @@ public class OrderTxService {
     }
 
     /**
-     * 回收成功：落回收单号与回收时间到履约明细，回写操作记录终态。
+     * 回收成功：<b>逐条</b>落回收单号与回收时间到履约明细，回写操作记录终态。
      *
      * <p><b>{@code revoke_time} 由库时钟取</b>，与 {@code createRefund} 的操作记录时间同源 —— 两端出自
      * 不同时钟时，「先回收后退款」这条顺序在审计时可能反过来（BR-B-34）。
      *
      * <p>主单退款态<b>停在 {@code REVOKING}</b>，不在此推进：下一步是 {@code createRefund} 把它推到 {@code
      * REFUNDING}。此处若提前推进，一笔回收成功但退款尚未发起的单看起来像已在退款中。
+     *
+     * @param revoked 确实回收成功的明细，逐条留痕；空列表时只回写操作记录
      */
     @BenefitTx
-    public void settleRevoke(String bizNo, String revokeNo, String usageStatus) {
-        fulfillmentMapper.markRevoked(bizNo, revokeNo, usageStatus);
+    public void settleRevoke(String bizNo, String revokeNo, List<RevokedItem> revoked) {
+        markRevokedItems(bizNo, revokeNo, revoked);
         opRecordMapper.finish(
                 bizNo,
                 OpType.REVOKE_BENEFIT.name(),
@@ -603,10 +605,14 @@ public class OrderTxService {
     /**
      * 回收确定失败：主单退 {@code REVOKE_FAILED}，操作记录置失败。
      *
+     * <p><b>仍要为已成功的那几项留痕</b>：一单跨多个供应方时各项结果可以不同 —— A 已核销回收失败、 B 未使用回收成功，整笔汇总为失败，而 B
+     * 的券确实已经被收走了。汇总结果决定主单状态，不决定 明细留痕；两者混同会让对账第 2 项把 B 判成「已退款未回收」，而那条项是资损哨兵。
+     *
      * <p><b>不推进退款</b>：权益还在用户手里，退款即为资损。该状态可由人工重试重入 —— 故它是 {@code admitRefund} 的合法前置态之一。
      */
     @BenefitTx
-    public void failRevoke(String bizNo, String usageStatus) {
+    public void failRevoke(String bizNo, String revokeNo, List<RevokedItem> revoked) {
+        markRevokedItems(bizNo, revokeNo, revoked);
         bizRecordMapper.advanceRefundStatus(
                 bizNo, RefundStatus.REVOKING.name(), RefundStatus.REVOKE_FAILED.name());
         opRecordMapper.finish(
@@ -623,10 +629,15 @@ public class OrderTxService {
      * <p><b>不置 {@code REVOKE_FAILED}</b>：那是「确定失败」的位置，而此刻权益可能已被收走。判失败
      * 会让人工按「权益还在」处置，可能导致二次回收；更糟的是若据此拒绝退款，用户既没权益也没钱。
      *
+     * <p>已确定回收成功的那几项<b>照常留痕</b>，理由同 {@link #failRevoke}：未定的是整笔，不是每一项。 留痕还使收敛通路能跳过它们 —— 见 {@code
+     * reconcileRevoke} 按 {@code revoke_no} 判断哪些还要重问。
+     *
      * <p>任务与状态同事务落库，理由与 {@code finishGrant} 一字不差：置未定态却没落任务，这笔单 就永远停在中间态 —— 没有任何机制会再看它一眼。
      */
     @BenefitTx
-    public void unresolvedRevoke(String bizNo, String revokeNo, RetStatus downstream) {
+    public void unresolvedRevoke(
+            String bizNo, String revokeNo, RetStatus downstream, List<RevokedItem> revoked) {
+        markRevokedItems(bizNo, revokeNo, revoked);
         opRecordMapper.finish(
                 bizNo,
                 OpType.REVOKE_BENEFIT.name(),
@@ -635,6 +646,17 @@ public class OrderTxService {
                 downstream.name());
         taskMapper.enqueue(
                 BizNoGenerator.taskNo(), bizNo, TaskType.REVOKE.name(), revokeNo, 0, "{}");
+    }
+
+    /**
+     * 逐条落回收留痕。
+     *
+     * <p>三个出口（成功、失败、未定）都调它 —— 留痕的判据是「这一项收没收走」，与整笔的汇总结果 无关。集中在一处而非各写一遍：三处若各自演化，「失败时也要留痕」这条迟早在某一处丢掉。
+     */
+    private void markRevokedItems(String bizNo, String revokeNo, List<RevokedItem> revoked) {
+        for (RevokedItem item : revoked) {
+            fulfillmentMapper.markRevoked(bizNo, item.grantOpNo(), revokeNo, item.usageStatus());
+        }
     }
 
     // ---- 退款执行（V3 PR-8） ----
