@@ -185,6 +185,48 @@ class FissionBidirectionalGrantIT extends AbstractMySqlIT {
                 .isNotNull();
     }
 
+    /**
+     * <b>{@code UNKNOWN} 的查单任务真的会被收敛，而不是无人处理。</b>
+     *
+     * <p>这一条由逐行审阅补入。原用例只断言查单任务为 {@code PENDING} —— 而「等待收敛」与「没有 处理器、无人处理」<b>都是 {@code
+     * PENDING}</b>，两者用同一个断言分不开。缺处理器时任务会在 调度器的「无处理器」分支里 {@code PENDING → DOING → PENDING}
+     * 无限循环，{@code retry_count} 因该分支不计数而永不增长，连死信都进不去，关系永久停在 {@code JOINED}。
+     *
+     * <p>判据是<b>驱动调度器之后关系推进到 {@code DONE}</b>，即收敛真的发生了。
+     */
+    @Test
+    void unknownGrantIsActuallyConvergedByQueryTask() {
+        // 下游已记账但调用方未收到结果 —— 查单能查得，收敛为成功
+        injector.setProviderMode(FaultMode.TIMEOUT_AFTER_COMMIT);
+
+        String sponsorId = "U_sp_conv";
+        String followerId = "U_fo_conv";
+        String groupId = joinedGroup(sponsorId, followerId, "conv");
+
+        fissionService.followerDone(doneReq(groupId, followerId, "conv"));
+
+        String relationId = relationIdOf(groupId, followerId);
+        assertThat(relationStatus(relationId)).isEqualTo(RelationStatus.JOINED.name());
+
+        // 恢复下游，驱动查单任务
+        injector.setProviderMode(FaultMode.SUCCESS);
+        scheduler.runOnce();
+
+        assertThat(relationStatus(relationId))
+                .as("查单须真的把关系收敛到 DONE —— 只断言任务 PENDING 分不出「无人处理」")
+                .isEqualTo(RelationStatus.DONE.name());
+        assertThat(opStatus("OF_DONE_conv")).isEqualTo(OpStatus.SUCCESS.name());
+
+        // 收敛后同样落师傅返奖任务：两条路径复用同一套四写
+        String sponsorFlowNo = IdempotentKeys.sponsorFlowNo("OF_DONE_conv");
+        assertThat(taskStatus(relationId, TaskType.SPONSOR_REWARD, sponsorFlowNo))
+                .as("查单收敛也要落师傅返奖任务，否则这条路径上师傅永远拿不到奖")
+                .isNotNull();
+
+        // 全程只发一次：查单收敛不产生第二笔发放
+        assertThat(rewardRecordCount(IdempotentKeys.followerGrantNo("OF_DONE_conv"))).isEqualTo(1);
+    }
+
     /** 发奖确定失败：关系保持 JOINED 可重入，{@code granting_until} 清空。 */
     @Test
     void failedGrantKeepsRelationJoinedAndClearsGrantingFlag() {

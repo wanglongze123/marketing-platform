@@ -72,5 +72,18 @@ public final class IdempotentKeys {
         return outFlowNo + "_SP";
     }
 
+    /**
+     * 由徒弟发奖键反推 {@code outFlowNo}。
+     *
+     * <p>查单任务手上只有 {@code opNo}（即发奖键），而确权后置还需要 {@code outFlowNo} 与师傅返奖键。 三者同源，去掉后缀即可反推 ——
+     * <b>反推而非把它们一并存进任务</b>：多存一份就多一处可能与 键规则漂移的副本，而后缀规则的事实来源只应有本类一处。
+     */
+    public static String outFlowNoOfFollowerGrant(String followerGrantNo) {
+        if (followerGrantNo == null || !followerGrantNo.endsWith("_FL")) {
+            throw new IllegalArgumentException("非徒弟发奖键: " + followerGrantNo);
+        }
+        return followerGrantNo.substring(0, followerGrantNo.length() - 3);
+    }
+
     // V3 后续补：refundNo、revokeNo
 }

@@ -5,6 +5,7 @@ import com.mp.common.enums.RelationStatus;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.enums.TaskType;
 import com.mp.common.util.BizNoGenerator;
+import com.mp.common.util.IdempotentKeys;
 import com.mp.fission.config.FissionTx;
 import com.mp.fission.entity.FissionRelation;
 import com.mp.fission.repository.FissionGroupMapper;
@@ -248,6 +249,44 @@ public class FissionTxService {
         // 轮次进度 +1（BR-F-18）。SQL 自增而非读出加一回写，并发下两个徒弟同时完成才不会只记一个
         groupMapper.incrementProgress(groupId);
         return true;
+    }
+
+    /**
+     * 查单收敛为成功时的四写，参数由 {@code followerGrantNo} 反推。
+     *
+     * <p>查单任务手上只有 {@code (relationId, followerGrantNo)}，而四写还需要 {@code outFlowNo} 与 {@code
+     * sponsorFlowNo}。三者同源：{@code followerGrantNo = outFlowNo + "_FL"}， 故去掉后缀即得 {@code
+     * outFlowNo}，再派生出 {@code sponsorFlowNo}。
+     *
+     * <p><b>反推而非把它们存进任务 payload</b>：payload 里存一份就多一处可能与键规则漂移的副本， 而后缀规则是 {@link IdempotentKeys}
+     * 里唯一的事实来源。
+     *
+     * <p><b>本方法内调 {@link #settleDone} 是同类调用，被调方的 {@code @FissionTx} 不生效</b>（V1 缺陷
+     * ①：注解不经代理、不报错）。此处安全的原因是本方法自身带 {@code @FissionTx}，四写落在 <b>本方法的</b>事务里 —— 而不是因为 {@code
+     * settleDone} 上有注解。把注解从本方法上去掉，四写会 各自自动提交且不报任何错。
+     *
+     * @return {@code false} 表示关系已被推进（同步链路先收敛了）
+     */
+    @FissionTx
+    public boolean settleDoneFromQuery(String relationId, String followerGrantNo) {
+        String outFlowNo = IdempotentKeys.outFlowNoOfFollowerGrant(followerGrantNo);
+        FissionRelation relation = relationMapper.selectByRelationId(relationId);
+        if (relation == null) {
+            return false;
+        }
+        return settleDone(
+                relationId,
+                relation.getGroupId(),
+                relation.getOutBizNo(),
+                outFlowNo,
+                followerGrantNo,
+                IdempotentKeys.sponsorFlowNo(outFlowNo));
+    }
+
+    /** 查单收敛为确定失败：同 {@link #markDoneFailed}，参数由 {@code followerGrantNo} 反推。 */
+    @FissionTx
+    public void markDoneFailedByGrantNo(String relationId, String followerGrantNo) {
+        markDoneFailed(relationId, IdempotentKeys.outFlowNoOfFollowerGrant(followerGrantNo));
     }
 
     /** 发奖未收敛：操作记录置未知态，<b>不推进关系</b>，保留查单任务由收敛处置。 */
