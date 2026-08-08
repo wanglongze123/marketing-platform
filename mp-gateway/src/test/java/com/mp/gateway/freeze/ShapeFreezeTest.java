@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
@@ -672,7 +673,17 @@ class ShapeFreezeTest {
         String tx =
                 read("mp-benefit-order/src/main/java/com/mp/benefit/service/OrderTxService.java");
 
-        for (String method : List.of("consumeStock", "releaseStock")) {
+        // 前置态各不相同，正是三者不可互相替代的地方：消耗与释放从 LOCKED 进，
+        // 回补从 CONSUMED 进 —— 若回补也认 LOCKED，一笔关单释放过的单还能再被回补一次，
+        // 而那次回补减掉的是别的订单的 consumed（PR-10 后置 review 补入 restoreStock）
+        Map<String, String> guards =
+                Map.of(
+                        "consumeStock", "StockStatus.LOCKED.name()",
+                        "releaseStock", "StockStatus.LOCKED.name()",
+                        "restoreStock", "StockStatus.CONSUMED.name()");
+
+        for (Map.Entry<String, String> e : guards.entrySet()) {
+            String method = e.getKey();
             int idx = tx.indexOf("public RetStatus " + method + "(");
             assertThat(idx).as("未找到 %s", method).isGreaterThan(0);
             String body = tx.substring(idx, Math.min(tx.length(), idx + 700));
@@ -680,7 +691,7 @@ class ShapeFreezeTest {
             assertThat(normalize(body))
                     .as("%s 必须以主单库存态的条件更新为幂等闸，下界与唯一键都替代不了它", method)
                     .contains(normalize("advanceStockStatus("))
-                    .contains(normalize("StockStatus.LOCKED.name()"));
+                    .contains(normalize(e.getValue()));
         }
 
         // 条件更新自身必须带前置状态，否则它只是个无条件赋值

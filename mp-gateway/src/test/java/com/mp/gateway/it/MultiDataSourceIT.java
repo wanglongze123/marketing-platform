@@ -45,7 +45,9 @@ class MultiDataSourceIT extends AbstractMySqlIT {
                 "2101",
                 "2102",
                 "2103",
-                "2190");
+                "2190",
+                // 3101：stock_status 补 RESTORED 取值、benefit_task 补 STOCK_RESTORE 类型
+                "3101");
         assertHistoryOwnedBy(
                 rewardJdbc, "db_reward", "0201", "1201", "1202", "1203", "3201", "3202");
         assertHistoryOwnedBy(fissionJdbc, "db_fission", "3301", "3302", "3303", "3304", "3305");

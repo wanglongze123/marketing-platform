@@ -304,6 +304,293 @@ class RefundExecutionIT extends AbstractMySqlIT {
     }
 
     // ------------------------------------------------------------------
+    // 退款回补库存，但不返还限购额度（技术方案 §3.4 的口径表）
+    // ------------------------------------------------------------------
+
+    private int consumedOf() {
+        return num(
+                benefitJdbc,
+                "SELECT consumed FROM marketing_stock WHERE stock_key = ?",
+                "sku:" + SKU_ID);
+    }
+
+    private int usedQtyOf(String userId) {
+        Integer used =
+                benefitJdbc.queryForObject(
+                        "SELECT COALESCE(SUM(used_qty), 0) FROM user_purchase_quota"
+                                + " WHERE user_id = ? AND sku_id = ?",
+                        Integer.class,
+                        userId,
+                        SKU_ID);
+        return used == null ? 0 : used;
+    }
+
+    /**
+     * <b>退款成功后须回补 {@code consumed}</b>（技术方案 §3.4 口径表）。
+     *
+     * <p>此前 {@code settleRefund} 只推主单状态，既没有回补语句也不落任何库存任务 —— {@code consumed} 永远还不回去。
+     *
+     * <p><b>它的表现不是超卖，而是对账第 6 项每轮报一次假差异</b>：该项比对 {@code consumed} 与「已支付 且未退款成功」的份数（{@code
+     * sumConsumedQuantity} 的谓词含 {@code refund_status <> 'REFUND_SUCCESS'}）， 退款后分母减少而 {@code
+     * consumed} 不动。§3.4 原话：「退款/关单后的口径必须定死，否则对账第 6 项 在任何含退款的压测里都会报差异」——而假告警会让资损哨兵失效。
+     *
+     * <p><b>断言两处而非一处</b>：只断 {@code stock_status} 的话，一个「改了状态但没调回补 SQL」的实现照样绿； 只断 {@code consumed}
+     * 的话，分不清是回补干的还是别的路径顺手减的。
+     */
+    @Test
+    void refundRestoresConsumedStock() {
+        String bizNo = admittedOrder("rf_restore", "RR30");
+        runScheduler(); // 跑掉 STOCK_CONSUME
+        int consumedBefore = consumedOf();
+        assertThat(orderField("stock_status", bizNo)).isEqualTo("CONSUMED");
+
+        benefitOrderService.createRefund(bizNo, "RR30");
+        runScheduler(); // 跑 STOCK_RESTORE
+
+        assertThat(orderField("stock_status", bizNo))
+                .as("回补后本单库存态须进 RESTORED")
+                .isEqualTo("RESTORED");
+        assertThat(consumedBefore - consumedOf()).as("退款须把这一份已售还回可售").isEqualTo(1);
+    }
+
+    /**
+     * <b>退款回补库存，但<u>不</u>返还限购额度</b> —— 这个不对称是 §3.4 定死的。
+     *
+     * <p>商品可以再卖给别人，故库存回补；而「买了再退」若能刷回额度，限购即被绕过。缺了这一条， 一个「退款走 {@code STOCK_RELEASE}」的实现照样通过上一个用例 ——
+     * 而那条任务会连额度一起还掉。
+     *
+     * <p>断言落在 {@code quota_status} 与 {@code used_qty} 两处：前者证明状态机没动它，后者证明计数器 没被减。
+     */
+    @Test
+    void refundDoesNotReturnPurchaseQuota() {
+        String bizNo = admittedOrder("rf_quota", "RR31");
+        runScheduler();
+        int usedBefore = usedQtyOf("U_rf_quota");
+        assertThat(usedBefore).as("下单时应已占用额度").isPositive();
+
+        benefitOrderService.createRefund(bizNo, "RR31");
+        runScheduler();
+
+        assertThat(usedQtyOf("U_rf_quota")).as("退款不返还额度，否则「买了再退」可刷回限购").isEqualTo(usedBefore);
+        assertThat(orderField("quota_status", bizNo))
+                .as("额度态须停在 LOCKED —— 买了就算用掉")
+                .isEqualTo("LOCKED");
+    }
+
+    /**
+     * <b>回补任务重复执行不得多减</b> —— 且必须<u>另有一笔单占着 {@code consumed}</u>。
+     *
+     * <p>这是 §7.4 反复强调的那条：<b>下界谓词提供不了每单幂等</b>。{@code consumed} 是该 {@code stock_key}
+     * 下所有订单共享的计数器，本单重复回补时它因别的单占用仍大于 0，{@code WHERE consumed >= qty} 照常放行 ——
+     * 结果是这一单还掉了别人的已售份额，可售余量凭空多出一份，直接超卖。
+     *
+     * <p>故必须先造一笔 B 单占着 {@code consumed}。<b>若只有 A 单，回补后 {@code consumed} 归零，第二次被下界 挡下 ——
+     * 验的就成了「下界生效」而不是「不动别人的份额」</b>，与 §7.4 记的「这个错误只有一种用例能 暴露」是同一条。
+     *
+     * <p>真正拦住它的是主单 {@code stock_status} 的条件更新（{@code CONSUMED → RESTORED}），本用例通过 人工把任务打回 {@code
+     * PENDING} 模拟调度器重复领取。
+     */
+    @Test
+    void repeatedRestoreDoesNotStealAnotherOrdersConsumed() {
+        // B 单：支付并转消耗，占着 consumed 不退款
+        String holder = benefitOrderService.createTrade(newTradeReq("rf_holder")).getBizNo();
+        payLedger.markPaid(holder);
+        benefitOrderService.payCallback(newPayCallback(holder, "T_rf_holder", "N1", "SUCCESS"));
+        runScheduler();
+
+        String bizNo = admittedOrder("rf_dup_restore", "RR32");
+        runScheduler();
+        int consumedBefore = consumedOf();
+
+        benefitOrderService.createRefund(bizNo, "RR32");
+        runScheduler();
+        int afterFirst = consumedOf();
+        assertThat(consumedBefore - afterFirst).isEqualTo(1);
+
+        // 人工把回补任务打回待执行，模拟调度器重复领取
+        benefitJdbc.update(
+                "UPDATE benefit_task SET status = 'PENDING', lease_owner = NULL,"
+                        + " next_time = NOW(3) WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.STOCK_RESTORE.name());
+        runScheduler();
+
+        assertThat(consumedOf())
+                .as("重复回补不得吃掉另一笔单的已售份额 —— 下界拦不住这一类，靠的是 stock_status 那道闸")
+                .isEqualTo(afterFirst);
+    }
+
+    /**
+     * <b>关单释放过的单不得再被退款回补</b> —— 这是 {@code RESTORED} 不复用 {@code RELEASED} 的用处。
+     *
+     * <p>两者归还的是不同的计数器：{@code RELEASED} 表示预占已还（{@code locked} 减，交易未成立）， {@code RESTORED}
+     * 表示已售已还（{@code consumed} 减，成立后反悔）。若合并成一个值，回补的条件更新 就要同时接受 {@code LOCKED} 与 {@code CONSUMED}
+     * 两个前置态，于是一笔关单释放过的单还能再被回补 一次，减掉的是别的订单的 {@code consumed}。
+     *
+     * <p>本用例直接对一笔已释放的单落回补任务 —— 正常链路造不出这个组合，故绕过服务层构造， 与 PR-7/8「让被外层遮蔽的内层约束变得可观测」是同一处置。
+     */
+    @Test
+    void releasedOrderIsNotRestoredAgain() {
+        String bizNo = benefitOrderService.createTrade(newTradeReq("rf_released")).getBizNo();
+        benefitOrderService.payCallback(newPayCallback(bizNo, "T_rf_rel", "N1", "FAILED"));
+        runScheduler();
+        assertThat(orderField("stock_status", bizNo)).isEqualTo("RELEASED");
+
+        int consumedBefore = consumedOf();
+        // 绕过服务层直接落一条回补任务
+        benefitJdbc.update(
+                "INSERT INTO benefit_task (task_no, biz_no, task_type, op_no, status, next_time,"
+                        + " retry_count, payload) VALUES (?, ?, 'STOCK_RESTORE', ?, 'PENDING',"
+                        + " NOW(3), 0, '{}')",
+                "TSK_rf_rel_manual",
+                bizNo,
+                bizNo + "_STOCK_RESTORE");
+        runScheduler();
+
+        assertThat(orderField("stock_status", bizNo))
+                .as("已释放的单不得被回补改写 —— 它从未转过消耗")
+                .isEqualTo("RELEASED");
+        assertThat(consumedOf()).as("不得减掉别的订单的已售份额").isEqualTo(consumedBefore);
+    }
+
+    // ------------------------------------------------------------------
+    // REFUND_FAILED 不是死状态：人工带 operator 可重入（技术方案 §6.4）
+    // ------------------------------------------------------------------
+
+    /** 把一单推到 {@code REFUND_FAILED}。 */
+    private String failedRefundOrder(String tag, String refundReqNo) {
+        String bizNo = admittedOrder(tag, refundReqNo);
+        injector.setPayMode(FaultMode.FAIL);
+        benefitOrderService.createRefund(bizNo, refundReqNo);
+        injector.reset();
+        assertThat(orderField("refund_status", bizNo)).isEqualTo(RefundStatus.REFUND_FAILED.name());
+        return bizNo;
+    }
+
+    /**
+     * <b>{@code REFUND_FAILED} 必须能由人工重入，否则它是死状态</b>（技术方案 §6.4）。
+     *
+     * <p>状态迁移表把 {@code REFUND_FAILED → REFUNDING} 标注为人工重试边，而此前三条通路都够不着它： 准入的前置态只有 {@code NONE} /
+     * {@code REVOKE_FAILED}，{@code createRefund} 要求 {@code REVOKING}， {@code manualRepair}
+     * 的「重试退款」只补查单任务而 {@code failRefund} 的前置态是 {@code REFUNDING}。 于是一笔退款失败的单永远退不了款，只能改库。
+     *
+     * <p>§6.4 原话：「若准入谓词不给例外分支，这两条边永远 {@code affected_rows=0}，它们又会退化成 死状态」。
+     */
+    @Test
+    void refundFailedCanBeReAdmittedByOperator() {
+        String bizNo = failedRefundOrder("rf_reentry", "RR20");
+
+        RevokeAdmitReq req = new RevokeAdmitReq();
+        req.setBizNo(bizNo);
+        req.setRefundReqNo("RR20");
+        req.setOperator("cs_carol");
+        req.setReason("用户申诉，重试退款");
+        benefitOrderService.revokeAndAdmit(req);
+
+        assertThat(orderField("refund_status", bizNo))
+                .as("带 operator 的人工准入须能把 REFUND_FAILED 拉回 REVOKING")
+                .isEqualTo(RefundStatus.REVOKING.name());
+
+        // 拉回后真的能退成，才叫「不是死状态」—— 只断言状态变了的话，
+        // 一个「改了状态但退款仍走不通」的实现照样绿
+        assertThat(benefitOrderService.createRefund(bizNo, "RR20")).isEqualTo(RetStatus.SUCCESS);
+        assertThat(orderField("refund_status", bizNo))
+                .isEqualTo(RefundStatus.REFUND_SUCCESS.name());
+    }
+
+    /**
+     * <b>不带 {@code operator} 的自动路径不得从 {@code REFUND_FAILED} 重入</b>——人工通道是显式开口，不是放宽谓词。
+     *
+     * <p>缺了这一条，一个「无条件把 {@code REFUND_FAILED} 加进前置态集合」的实现照样通过上一条 ——
+     * 而那等于悄悄放宽了状态机：任何自动重试都能把一笔已判定失败的退款重新发起，且不留操作人。 §6.4 的要求是「做法不是悄悄放宽谓词，而是用参数把人工通道显式化」。
+     */
+    @Test
+    void refundFailedStaysClosedToAutomaticPath() {
+        String bizNo = failedRefundOrder("rf_auto", "RR21");
+
+        RevokeAdmitReq req = new RevokeAdmitReq();
+        req.setBizNo(bizNo);
+        req.setRefundReqNo("RR21");
+        // operator 不填 —— 自动路径
+
+        assertThatThrownBy(() -> benefitOrderService.revokeAndAdmit(req))
+                .isInstanceOf(BizException.class);
+        assertThat(orderField("refund_status", bizNo))
+                .as("自动路径不得把 REFUND_FAILED 拉回，开口只对带审计的调用生效")
+                .isEqualTo(RefundStatus.REFUND_FAILED.name());
+    }
+
+    /**
+     * <b>人工重入必须复用原 {@code refundNo}，不得按新工单号重新派生</b>（BR-B-38）。
+     *
+     * <p>这条在「{@code REFUND_FAILED} 经人工重入」这一路上才显形：客服换个工单号再来一次，派生出的 是一把新键 —— 主单的 {@code fillRefundNo}
+     * 带 {@code IS NULL} 守卫，库里存的还是旧号，而<b>真正发给 支付方的是新号</b>，于是同一单对支付系统发起了两笔退款。
+     *
+     * <p><b>三道闸一道都拦不住它</b>：条件更新看的是状态、{@code uk_biz_op} 看的是 {@code (bizNo, CREATE_REFUND,
+     * '')}（{@code upsert} 只累加 {@code retry_count}），两者都不检查这把键本身。故断言 落在支付方账本上 —— 平台侧的闸只能证明「平台没重复受理」。
+     */
+    @Test
+    void manualReEntryReusesOriginalRefundNo() {
+        String bizNo = failedRefundOrder("rf_keyreuse", "RR22");
+        String originalRefundNo = orderField("refund_no", bizNo);
+        assertThat(originalRefundNo).isEqualTo(IdempotentKeys.refundNo(bizNo, "RR22"));
+        int before = payLedger.refundSize();
+
+        RevokeAdmitReq req = new RevokeAdmitReq();
+        req.setBizNo(bizNo);
+        req.setRefundReqNo("RR22");
+        req.setOperator("cs_dave");
+        req.setReason("换工单号重试");
+        benefitOrderService.revokeAndAdmit(req);
+
+        // 客服带着新工单号重试 —— 派生规则若照它走，会得到一把全新的键
+        benefitOrderService.createRefund(bizNo, "TICKET_9527");
+
+        assertThat(orderField("refund_no", bizNo)).as("退款单号须保持原值").isEqualTo(originalRefundNo);
+        assertThat(payLedger.containsRefund(originalRefundNo)).as("发给支付方的须是原键").isTrue();
+        assertThat(payLedger.containsRefund(IdempotentKeys.refundNo(bizNo, "TICKET_9527")))
+                .as("不得按新工单号派生出第二把键 —— 那对支付系统就是第二笔退款")
+                .isFalse();
+        assertThat(payLedger.refundSize() - before).as("支付方账本只增一笔").isEqualTo(1);
+    }
+
+    /**
+     * <b>人工准入须把 {@code operator} / {@code reason} 落进操作记录</b>（BR-C-27、技术方案 §6.4）。
+     *
+     * <p>§6.4 把「人工通道显式开口」与「留审计」写成同一条：谓词给人工路径开例外，代价是那次操作 必须可追溯到人。<b>此前该参数被接收却从未使用</b> ——
+     * 开了口却没留痕，比不开口更糟：库里查不出 「谁把这单从退款失败拉回来重试的」，对账也算不出真实的自动收敛率。
+     */
+    @Test
+    void manualAdmissionPersistsOperatorAudit() {
+        String bizNo = failedRefundOrder("rf_audit", "RR23");
+
+        RevokeAdmitReq req = new RevokeAdmitReq();
+        req.setBizNo(bizNo);
+        req.setRefundReqNo("RR23");
+        req.setOperator("cs_erin");
+        req.setReason("客诉升级，人工重试");
+        benefitOrderService.revokeAndAdmit(req);
+
+        assertThat(
+                        str(
+                                benefitJdbc,
+                                "SELECT operator FROM play_op_record"
+                                        + " WHERE play_biz_record_no = ? AND op_type ="
+                                        + " 'REVOKE_BENEFIT'",
+                                bizNo))
+                .as("人工准入的操作人须落库")
+                .isEqualTo("cs_erin");
+        assertThat(
+                        str(
+                                benefitJdbc,
+                                "SELECT reason FROM play_op_record"
+                                        + " WHERE play_biz_record_no = ? AND op_type ="
+                                        + " 'REVOKE_BENEFIT'",
+                                bizNo))
+                .isEqualTo("客诉升级，人工重试");
+    }
+
+    // ------------------------------------------------------------------
     // 标准 24：REVOKE / REFUND 任务不陪着重试到死信
     // ------------------------------------------------------------------
 

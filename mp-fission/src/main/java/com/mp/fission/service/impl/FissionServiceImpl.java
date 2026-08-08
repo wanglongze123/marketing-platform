@@ -27,6 +27,7 @@ import com.mp.fission.entity.FissionGroup;
 import com.mp.fission.entity.FissionRelation;
 import com.mp.fission.filter.FilterContext;
 import com.mp.fission.filter.FriendFilterChain;
+import com.mp.fission.reconcile.FissionReconcileService;
 import com.mp.fission.repository.FissionGroupMapper;
 import com.mp.fission.repository.FissionOpRecordMapper;
 import com.mp.fission.repository.FissionRelationMapper;
@@ -106,18 +107,21 @@ public class FissionServiceImpl implements FissionService {
     private final FissionOpRecordMapper opRecordMapper;
     private final FissionTxService tx;
     private final FriendFilterChain filterChain;
+    private final FissionReconcileService reconcileService;
 
     public FissionServiceImpl(
             FissionGroupMapper groupMapper,
             FissionRelationMapper relationMapper,
             FissionOpRecordMapper opRecordMapper,
             FissionTxService tx,
-            FriendFilterChain filterChain) {
+            FriendFilterChain filterChain,
+            FissionReconcileService reconcileService) {
         this.groupMapper = groupMapper;
         this.relationMapper = relationMapper;
         this.opRecordMapper = opRecordMapper;
         this.tx = tx;
         this.filterChain = filterChain;
+        this.reconcileService = reconcileService;
     }
 
     // ------------------------------------------------------------------
@@ -655,6 +659,24 @@ public class FissionServiceImpl implements FissionService {
             log.warn("grantReward threw, treat as UNKNOWN, opNo={}", followerGrantNo, e);
             return RetStatus.UNKNOWN;
         }
+    }
+
+    // ------------------------------------------------------------------
+    // ⑧ 对账
+    // ------------------------------------------------------------------
+
+    /**
+     * 跑一轮裂变侧对账（技术方案 §6.8 第 7、10、12、13 项）。编排在 {@link FissionReconcileService}， 本方法只是玩法层的对外入口。
+     *
+     * <p><b>接线本身就是修复</b>：{@code FissionReconcileService} 早已实现，但此前全仓没有任何调用方 —— 那四项从未运行过，其中第 7
+     * 项（师傅奖漏发）与第 13 项（发奖在途标志超时）都是资损哨兵。
+     *
+     * <p><b>不加锁</b>：与权益侧同理，对账是旁路只读扫描 + 幂等补建，两个实例同时跑的后果只是补建 两次同一条任务 —— 而 {@code enqueue} 命中 {@code
+     * uk_biz_type_op} 不产生第二条。
+     */
+    @Override
+    public java.util.Map<String, Integer> reconcile() {
+        return reconcileService.reconcileOnce();
     }
 
     // ------------------------------------------------------------------

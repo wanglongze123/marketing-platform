@@ -23,9 +23,21 @@ public enum StockStatus {
     /** 已预占。下单成功后的初始态 */
     LOCKED,
 
-    /** 已转消耗。支付成功后的终态 */
+    /** 已转消耗。支付成功后的态；退款回补时由它进 {@link #RESTORED} */
     CONSUMED,
 
     /** 已释放。支付失败 / 关单后的终态 */
-    RELEASED
+    RELEASED,
+
+    /**
+     * 已回补。退款成功后的终态，由 {@link #CONSUMED} 进入。
+     *
+     * <p><b>不复用 {@code RELEASED}</b>：两者归还的是不同的计数器 —— {@code RELEASED} 表示「预占已还」 （{@code locked}
+     * 减），本值表示「已售已还」（{@code consumed} 减）。合并成一个值会让 {@code STOCK_RESTORE} 的条件更新既能从 {@code LOCKED} 进也能从
+     * {@code CONSUMED} 进，于是一笔关单释放过的单还能再被退款回补一次， 而那次回补减的是别的订单的 {@code consumed}。
+     *
+     * <p>它也是「退款回补库存但不返还额度」这个不对称（技术方案 §3.4 口径表）在状态机上的落点： 库存有本值，而 {@code QuotaStatus} 没有对应项 ——
+     * 额度买了就算用掉。
+     */
+    RESTORED
 }

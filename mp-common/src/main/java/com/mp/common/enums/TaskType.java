@@ -28,6 +28,24 @@ public enum TaskType {
     /** 库存释放。V2 PR-6 接入 */
     STOCK_RELEASE(5, false),
 
+    /**
+     * 库存回补：退款成功后把 {@code consumed} 还回可售。V3 PR-10 后置补入。
+     *
+     * <p><b>与 {@code STOCK_RELEASE} 是两件事，不可合并</b>：那个还 {@code locked}（交易未成立，预占归还）， 本类型还 {@code
+     * consumed}（交易已成立后反悔，已售归还）。合并会让退款去减一个早已归零的 {@code locked}，被下界谓词挡下 —— 不报错，而库存实际没回补。
+     *
+     * <p><b>也不返还限购额度</b>：技术方案 §3.4 的口径表把这个不对称写死了 —— 商品可以再卖给别人，故
+     * 库存回补；而「买了再退」若能刷回额度，限购即被绕过，故额度不还。本类型的执行体因此只碰 {@code marketing_stock}，{@code quota_status} 停在
+     * {@code LOCKED} 不动。
+     *
+     * <p><b>缺了它，对账第 6 项在任何含退款的场景里每轮必报一次假差异</b>：该项比对 {@code consumed} 与「已支付且未退款成功」的份数，退款后分母减少而
+     * {@code consumed} 不动。而假告警会让资损哨兵 失效 —— §3.4 原话：「退款/关单后的口径必须定死，否则对账第 6 项在任何含退款的压测里都会报差异」。
+     *
+     * <p>归执行类（阈值 5）：它是一条带下界的 UPDATE，每单幂等由主单 {@code stock_status} 的条件更新 （{@code CONSUMED →
+     * RESTORED}）承担。
+     */
+    STOCK_RESTORE(5, false),
+
     /** 限购额度释放。V2 PR-5 接入 */
     QUOTA_RELEASE(5, false),
 

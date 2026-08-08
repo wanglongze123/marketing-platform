@@ -881,8 +881,11 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             throw new BizException(ErrorCode.GRANT_NOT_SETTLED, "发放结果未定，暂不受理退款: " + grantStatus);
         }
 
-        // ④ 进 REVOKING + 落操作记录，同事务。三道闸的第一、二道在此
-        if (!tx.admitRefund(order, revokeNo, req.getOperator())) {
+        // ④ 进 REVOKING + 落操作记录，同事务。三道闸的第一、二道在此。
+        //
+        // operator / reason 一并传入：带 operator 时前置态额外放行 REFUND_FAILED（人工重试边，
+        // §6.4「自动路径严格、人工路径显式开口且留审计」），且两者落进操作记录供审计（BR-C-27）
+        if (!tx.admitRefund(order, revokeNo, req.getOperator(), req.getReason())) {
             // 条件更新未命中：状态非法或并发已推进。回查当前态给出准确的拒绝原因
             PlayBizRecord latest = findByBizNo(bizNo);
             String current = latest == null ? "?" : latest.getRefundStatus();
@@ -1103,15 +1106,17 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             throw new BizException(ErrorCode.INVALID_PARAM, "订单不存在: " + bizNo);
         }
 
-        String refundNo = IdempotentKeys.refundNo(bizNo, refundReqNo);
+        // 按本次入参派生的键。**它只用于下面两道判定，不直接拿去发**：
+        // 判定要回答「这是不是同一次退款请求」，那必须看本次带来的是什么，而不是库里存着什么
+        String derived = IdempotentKeys.refundNo(bizNo, refundReqNo);
         RefundStatus current = RefundStatus.valueOf(order.getRefundStatus());
         if (current == RefundStatus.REFUND_SUCCESS || current == RefundStatus.REFUNDING) {
             // 幂等命中的判据是「同一个 refundReqNo」，不是「这单已在退款中」。
             //
             // 只看状态的话，客服换个工单号再点一次会拿到 SUCCESS —— 而那笔退款根本没发生。
             // 钱不会多退（三道闸挡得住），但工单被误标为已处理，用户的第二次诉求就此消失
-            if (refundNo.equals(order.getRefundNo())) {
-                log.info("createRefund idempotent hit, bizNo={}, refundNo={}", bizNo, refundNo);
+            if (derived.equals(order.getRefundNo())) {
+                log.info("createRefund idempotent hit, bizNo={}, refundNo={}", bizNo, derived);
                 return current == RefundStatus.REFUND_SUCCESS
                         ? RetStatus.SUCCESS
                         : RetStatus.UNKNOWN;
@@ -1132,6 +1137,17 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         // 准入那道保证「回收不会白做」，这道保证「不会拆箱成 NPE 再被映射成 UNKNOWN」。
         // 两道各自可被单独调用（本方法是公开接口，不强制经过准入），故都要有
         requirePayAmount(order);
+
+        // 真正发出去的键：本单已有退款单号则复用它，不按本次 refundReqNo 重新派生（BR-B-38）。
+        //
+        // 这条只在「REFUND_FAILED 经人工重入」这一路上才显形，且必须放在上面两道判定之后 ——
+        // 提前复用会让「客服换个工单号再点一次」变成幂等命中返回成功，而那笔退款根本没发生。
+        // 判定看本次带来的键（是不是同一次请求），发送用库里那把（同一单只对支付方用一把键）。
+        //
+        // 不复用的后果：主单的 fillRefundNo 带 IS NULL 守卫，库里存的还是旧号，而**发给支付方的
+        // 是新号** —— 同一单对支付系统发起了两笔退款。三道闸一道都拦不住：条件更新看状态、
+        // uk_biz_op 看 (bizNo, CREATE_REFUND, '')，两者都不检查这把键本身
+        String refundNo = order.getRefundNo() != null ? order.getRefundNo() : derived;
 
         // 三道闸的第一、二道：条件更新挡状态非法与并发，uk_biz_op 挡「两个 refundNo 退两次」
         if (!tx.startRefund(order, refundNo)) {
