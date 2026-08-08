@@ -9,6 +9,7 @@ import com.mp.api.fission.dto.ShareInviteReq;
 import com.mp.api.fission.dto.ShareInviteResp;
 import com.mp.api.fission.dto.SponsorQueryReq;
 import com.mp.api.fission.dto.SponsorQueryResp;
+import java.util.Map;
 
 /**
  * 裂变玩法（玩法层）。V3 PR-2 落进场与轮次管理，分享/建联/加入/完成在后续 PR。
@@ -98,4 +99,19 @@ public interface FissionService {
      * @return 关系号
      */
     String followerDone(FollowerDoneReq req);
+
+    /**
+     * 跑一轮裂变侧对账（FR-C06、技术方案 §6.8 第 7、10、12、13 项）。
+     *
+     * <p><b>本方法是那四项对账的唯一入口</b>：{@code FissionReconcileService} 不被任何调度或接口直接触达， 缺了这个入口它一次都不会运行。其中第 7
+     * 项（徒弟已发师傅未返）与第 13 项（发奖在途标志超时） 都是资损哨兵 —— 一条对账项写好了却没接线，与没写的区别只在代码行数上。
+     *
+     * <p>处置形态与权益侧 {@code BenefitOrderService#reconcile} 一致：<b>可自愈的补建任务，只告警的不改数</b>。 唯一会改字段的是第 13
+     * 项（清空过期的 {@code granting_until}），清的是豁免标志而非业务结果 —— 清完之后关系回到过期治理的扫描范围内，仍然是「把单子推回既有通路」。
+     *
+     * <p>与权益侧分成两个方法而非合成一个：两者读写不同的库、绑不同的事务管理器，合并即要求某一层 同时持有两套数据源。
+     *
+     * @return 各项差异数，无差异的项不出现在返回里
+     */
+    Map<String, Integer> reconcile();
 }

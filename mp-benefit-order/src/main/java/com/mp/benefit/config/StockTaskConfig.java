@@ -37,4 +37,21 @@ public class StockTaskConfig {
         return new StockTaskHandler(
                 TaskType.STOCK_RELEASE, bizRecordMapper, tx, OrderTxService::releaseStock);
     }
+
+    /**
+     * 回补：退款成功后把 {@code consumed} 还回可售，<b>额度不动</b>。
+     *
+     * <p>与释放分成两个 bean 而非在一个动作里判断，是因为两者的<b>前置态与归还对象都不同</b>：释放从 {@code LOCKED} 进、减 {@code
+     * locked}、连带还额度；回补从 {@code CONSUMED} 进、减 {@code consumed}、 不还额度（技术方案 §3.4
+     * 的口径表：商品可以再卖给别人，而「买了再退」不该刷回限购额度）。
+     *
+     * <p>写成一个动作靠 {@code stock_status} 分支的话，那道条件更新就要接受两个前置态 —— 于是一笔关单 释放过的单也能进回补分支，减掉别人的 {@code
+     * consumed}。
+     */
+    @Bean
+    public StockTaskHandler stockRestoreTaskHandler(
+            PlayBizRecordMapper bizRecordMapper, OrderTxService tx) {
+        return new StockTaskHandler(
+                TaskType.STOCK_RESTORE, bizRecordMapper, tx, OrderTxService::restoreStock);
+    }
 }

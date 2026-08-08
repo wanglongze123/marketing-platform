@@ -86,4 +86,26 @@ public interface FissionReconcileMapper {
     /** 按关系号取其徒弟发奖幂等号所属的 {@code outBizNo}，供第 12 项重放定位。 */
     @Select("SELECT out_biz_no FROM fission_relation WHERE relation_id = #{relationId}")
     String selectOutBizNo(@Param("relationId") String relationId);
+
+    /**
+     * 按关系号取徒弟发奖幂等号（{@code followerGrantNo}），供第 7 项派生师傅返奖键。
+     *
+     * <p><b>为什么必须回查而不能读 {@code relation.out_biz_no}</b>：两把发奖键（{@code _FL} / {@code _SP}）都派生自 {@code
+     * outFlowNo}，而关系行上不存这个值 —— 它存的是 {@code out_biz_no}。技术方案 §4.1 把两者定义 为不同的东西：{@code OutBizNo}
+     * 标识一次业务关系，{@code OutFlowNo} 标识本次操作，一次关系下可发生 多次操作（加入与确权各一次），二者不天然相等。
+     *
+     * <p>拿 {@code out_biz_no} 当 {@code outFlowNo} 用会派生出一把<b>与主链路不同的键</b>，于是 {@code uk_biz_type_op}
+     * 不冲突、任务照常入队、下游按新 {@code opNo} 当成一笔全新的发放 —— 师傅奖发两次。这一项本是「漏发」 的兜底，那样写反而造出重发。
+     *
+     * <p><b>锚点取 {@code QUERY_GRANT} 任务</b>：它由 {@code prepareDone} 与 {@code FOLLOWER_DONE} 操作记录同事务
+     * 落库，{@code biz_no} 即关系号、{@code op_no} 即 {@code followerGrantNo}，按关系号锚定无歧义。调用方去掉 {@code _FL}
+     * 后缀即得 {@code outFlowNo}，用的是 {@code IdempotentKeys} 里唯一那份反推实现 —— 与查单 收敛通路共用，故两条通路的键规则不可能漂移。
+     *
+     * <p><b>不限定任务状态</b>：确权成功时 {@code settleDone} 会把它置 {@code DONE}，而本项要的只是 {@code op_no}
+     * ——它不随状态改变。限定状态会让「四写成功了一半」这一路（关系已 {@code DONE}）恰好查不到。
+     */
+    @Select(
+            "SELECT op_no FROM fission_task WHERE biz_no = #{relationId}"
+                    + " AND task_type = 'QUERY_GRANT' LIMIT 1")
+    String selectFollowerGrantNo(@Param("relationId") String relationId);
 }
