@@ -186,6 +186,54 @@ export const SCENARIOS: Scenario[] = [
   },
 
   {
+    id: 'multiQuantity',
+    name: '多份购买',
+    desc: '买 3 份：应付 = 单价 × 3，履约每项各发 3 份',
+    async run(c) {
+      const qty = 3
+      const sku = await c.step('取 SKU 单价', async () =>
+        expectOk(await querySku(SEED_SKU_ID), '查 SKU')
+      )
+
+      const created = await c.step(
+        `下单 ${qty} 份，期望应付 = 单价 × ${qty}`,
+        async () => {
+          const d = expectOk(await trade(c.userId, newClientReqNo(), { quantity: qty }), '下单')
+          c.assert(
+            d.orderAmount === sku.salePrice * qty,
+            `orderAmount=${d.orderAmount}，期望 ${sku.salePrice * qty}`
+          )
+          return d
+        },
+        // 漏乘份数的表现是「买 3 份收 1 份钱」，且账面处处自洽 —— 只有比对金额才看得出来
+        '金额按份数放大，不是单价'
+      )
+
+      await c.step('按应付金额回调，期望受理', async () => {
+        // 传 created.orderAmount 而非 sku.salePrice：多份订单下两者不等，
+        // 传单价会被金额校验判 1731
+        expectOk(await callback(created.bizNo, created.orderAmount), '支付回调')
+      })
+
+      await c.step(
+        '等发放收敛，期望 GRANT_SUCCESS 且实付 = 应付',
+        async () => {
+          const o = await awaitGrant(created.bizNo)
+          c.assert(o.grantStatus === 'GRANT_SUCCESS', `grantStatus=${o.grantStatus}`)
+          c.assert(
+            o.payAmount === sku.salePrice * qty,
+            `payAmount=${o.payAmount}，期望 ${sku.salePrice * qty}`
+          )
+        },
+        // 「每项各发 qty 份」这层在端上验不到：查单不返回 quantity，履约明细也没有数量字段
+        // （权益包内每项恒为 1 份，发几份完全由订单份数决定）。那一层由后端
+        // StockAndQuotaIT 断言 RewardItem.qty，此处只验端上看得见的金额链路
+        '发放数量由后端 IT 断言，此处验金额链路'
+      )
+    },
+  },
+
+  {
     id: 'consultToken',
     name: '咨询凭证',
     desc: '无凭证下单被拒 4003；凭证成交价由服务端算定',
@@ -520,18 +568,33 @@ export const SCENARIOS: Scenario[] = [
   {
     id: 'rejections',
     name: '入参拒绝',
-    desc: 'quantity≠1、活动/SKU/订单不存在，期望均 4001',
+    desc: 'quantity 越界、活动/SKU/订单不存在，期望均 4001',
     async run(c) {
       await c.step(
-        'quantity=3，期望 4001',
+        'quantity=0，期望 4001',
         async () => {
           expectRejected(
-            await trade(c.userId, newClientReqNo(), { quantity: 3 }),
+            await trade(c.userId, newClientReqNo(), { quantity: 0 }),
             ERROR_CODE.INVALID_PARAM,
-            'quantity=3'
+            'quantity=0'
           )
         },
-        'V1 冻结 quantity=1，显式拒绝而非默默忽略 —— 否则付一份钱得一份权益且无报错'
+        '下界挡 0 与负数 —— 放行则建出一笔应付 0 元的单'
+      )
+      await c.step(
+        'quantity=100，期望 4001',
+        async () => {
+          expectRejected(
+            await trade(c.userId, newClientReqNo(), { quantity: 100 }),
+            ERROR_CODE.INVALID_PARAM,
+            'quantity=100'
+          )
+        },
+        // 上限不是产品口味问题：quantity 参与库存预占、限购扣减与金额相乘，
+        // 三者按它线性放大，不设上限时 salePrice × qty 会溢出，
+        // 而 Math.multiplyExact 抛的 ArithmeticException 落进「异常一律 UNKNOWN」，
+        // 表现为下单结果未定 —— 一个入参错误被伪装成了系统故障
+        '上界 99，防 salePrice × qty 溢出'
       )
       await c.step(
         '活动不存在，预咨询阶段即 4001',

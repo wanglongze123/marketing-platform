@@ -51,7 +51,13 @@ export interface CreateTradeReq {
   activityId: string
   skuId: string
   clientReqNo: string
-  /** V1 冻结为 1，传其他值后端返回 4001 */
+  /**
+   * 购买份数，合法区间 1~99，越界返回 4001。
+   *
+   * 上界不是产品口味：份数参与库存预占、限购扣减与金额相乘，三者按它线性放大，
+   * 不设上限时单价 × 份数会溢出，而溢出异常落进「异常一律 UNKNOWN」后
+   * 表现为下单结果未定 —— 一个入参错误被伪装成系统故障。
+   */
   quantity: number
   /** 咨询凭证，取自 preConsult。V2 起必填，缺失返回 4003 */
   consultToken: string

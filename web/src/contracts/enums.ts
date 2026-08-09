@@ -113,7 +113,10 @@ export const TASK_TYPE = [
   'QUERY_CLOSE',
   'STOCK_CONSUME',
   'STOCK_RELEASE',
+  'STOCK_RESTORE',
   'QUOTA_RELEASE',
+  'SPONSOR_REWARD',
+  'RELATION_EXPIRE',
   'REFUND',
   'QUERY_REFUND',
   'REVOKE',
@@ -131,8 +134,8 @@ export const RELATION_STATUS = [
 ] as const
 export type RelationStatus = (typeof RELATION_STATUS)[number]
 
-/** 库存占用态。对应 StockStatus.java */
-export const STOCK_STATUS = ['NONE', 'LOCKED', 'CONSUMED', 'RELEASED'] as const
+/** 库存占用态。对应 StockStatus.java —— RESTORED 是退款回补，与 RELEASED（未成交释放）不同源 */
+export const STOCK_STATUS = ['NONE', 'LOCKED', 'CONSUMED', 'RELEASED', 'RESTORED'] as const
 export type StockStatus = (typeof STOCK_STATUS)[number]
 
 /** 限购额度占用态。对应 QuotaStatus.java —— 无 CONSUMED，额度不随发放消耗 */

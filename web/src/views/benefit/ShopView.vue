@@ -47,6 +47,25 @@ const discount = computed(() => {
 
 const onSale = computed(() => sku.value?.saleStatus === 'ON_SALE')
 
+/** 购买份数上限，与后端 MAX_QUANTITY 一致。端上先挡一道，越界后端仍判 4001 */
+const MAX_QUANTITY = 99
+
+const quantity = ref(1)
+
+/**
+ * 页面预估的应付，仅用于下单前展示。
+ *
+ * 收银台的「应付金额」不用它，用后端返回的 orderAmount —— 单价可能在下单前被运营改过，
+ * 以页面算出来的数收款就成了「显示一个价、收另一个价」。这与 dealPrice 取凭证值同源。
+ */
+const estimatedAmount = computed(() => (sku.value?.salePrice ?? 0) * quantity.value)
+
+const stepQuantity = (delta: number) => {
+  const next = quantity.value + delta
+  if (next < 1 || next > MAX_QUANTITY) return
+  quantity.value = next
+}
+
 /** 权益项 ID → 面向用户的名字与图标 */
 const ITEM_META: Record<string, { name: string; icon: string }> = {
   ITEM_DEMO_A: { name: '会员月卡 · 30 天', icon: '🎟️' },
@@ -109,7 +128,7 @@ async function startBuy() {
     skuId: sku.value.skuId,
     // 同一次购买意图只生成一次，重试才会命中幂等
     clientReqNo: newClientReqNo(),
-    quantity: 1,
+    quantity: quantity.value,
     consultToken: consult.data.consultToken,
   })
   busy.value = false
@@ -274,6 +293,33 @@ function gotoDetail() {
           </div>
         </div>
 
+        <div class="qty">
+          <span class="qty-label">购买份数</span>
+          <div class="stepper">
+            <button
+              class="step"
+              :disabled="quantity <= 1 || busy"
+              aria-label="减少份数"
+              @click="stepQuantity(-1)"
+            >
+              −
+            </button>
+            <span class="qty-value mono" aria-live="polite">{{ quantity }}</span>
+            <button
+              class="step"
+              :disabled="quantity >= MAX_QUANTITY || busy"
+              aria-label="增加份数"
+              @click="stepQuantity(1)"
+            >
+              ＋
+            </button>
+          </div>
+          <span v-if="quantity > 1" class="qty-sum">
+            合计 ¥<b>{{ toYuan(estimatedAmount) }}</b>
+          </span>
+          <span class="muted small">单笔最多 {{ MAX_QUANTITY }} 份</span>
+        </div>
+
         <div class="buy">
           <button class="sell buy-btn" :disabled="!onSale || busy" @click="startBuy">
             {{ busy ? '处理中…' : onSale ? '立即购买' : '暂不可售' }}
@@ -306,14 +352,20 @@ function gotoDetail() {
           <dl class="kv">
             <dt>商品</dt>
             <dd>{{ sku?.skuName }}</dd>
+            <dt>份数</dt>
+            <dd>{{ quantity }} 份</dd>
             <dt>订单号</dt>
             <dd>{{ bizNo }}</dd>
             <dt>支付单号</dt>
             <dd>{{ tradeNo ?? '—' }}</dd>
             <dt>凭证成交价</dt>
             <dd>
-              ¥{{ toYuan(dealPrice) }}
-              <span v-if="dealPrice !== amount" class="mismatch">
+              ¥{{ toYuan(dealPrice) }} <span class="muted small">/ 份</span>
+              <!--
+                比对的是「单价 × 份数」与应付，不是单价与应付：多份订单下后者本就不等，
+                拿它告警会在每一笔多份单上误报，而误报久了真正的比价失配就没人看了
+              -->
+              <span v-if="dealPrice * quantity !== amount" class="mismatch">
                 与应付不一致，下单会被比价拒绝
               </span>
             </dd>
@@ -509,6 +561,57 @@ function gotoDetail() {
   border: 1px solid rgba(255, 107, 44, 0.32);
   border-radius: 4px;
   padding: 1px 6px;
+}
+
+.qty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+.qty-label {
+  font-size: 13px;
+  color: var(--text-2);
+}
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.step {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  background: var(--surface);
+  color: var(--text-1);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.step:hover:not(:disabled) {
+  background: var(--brand-soft);
+}
+.step:disabled {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+.qty-value {
+  min-width: 40px;
+  text-align: center;
+  font-size: 14px;
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  padding: 6px 0;
+}
+.qty-sum {
+  font-size: 13px;
+  color: var(--sell);
+}
+.qty-sum b {
+  font-size: 15px;
 }
 
 .buy {
