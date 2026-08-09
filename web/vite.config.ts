@@ -36,7 +36,18 @@ export default defineConfig({
      * 静态资源要在打包前就位。V4 拆服务、前端独立部署时，这里改回 dist。
      */
     outDir: '../mp-gateway/src/main/resources/static',
-    // 不清空：console.html 是手写的调试控制台，与 Vue 工程并存，清空会连它一起删
-    emptyOutDir: false,
+    /**
+     * 清空后重建：该目录现已**完全由本工程产出**，没有手写文件需要保留。
+     *
+     * 必须清空而非叠加 —— 产物文件名带内容哈希（如 `ShopView-CGFx3Z6o.js`），
+     * 每次改动都换一个名字。不清空的话旧 chunk 会永久堆在源码树里，既进版本库
+     * 也进 fat jar，且没有任何东西会提示它们已经没人引用了。
+     *
+     * 前提是这里不再有手写文件。旧的 index.html / console.html 已由 Vue 工程取代
+     * （前端技术方案 §386：console.html 的场景断言迁进 Devtools 后删除，
+     * index.html 由新前端取代）。若日后要放手写的静态资源，改用 public/ 目录，
+     * 不要靠关掉本开关来保命。
+     */
+    emptyOutDir: true,
   },
 })
