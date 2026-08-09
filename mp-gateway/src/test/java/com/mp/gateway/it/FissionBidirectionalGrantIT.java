@@ -29,13 +29,8 @@ import org.springframework.beans.factory.annotation.Autowired;
  */
 class FissionBidirectionalGrantIT extends AbstractMySqlIT {
 
-    /**
-     * 裂变活动，由 {@code V3091__seed_fission_activity.sql} 初始化。
-     *
-     * <p><b>不用 {@code ACT_DEMO_001}</b>：那是 {@code play_type = 'BENEFIT_SELL'} 的权益售卖活动。 {@code
-     * createRound} 校验 {@code playType} 后，裂变轮次开不到它上面 —— 而本类的每个用例都要先开一轮。
-     */
-    private static final String ACT = "ACT_FISSION_001";
+    /** 裂变活动，见 {@link AbstractMySqlIT#FISSION_ACTIVITY_ID}。 */
+    private static final String ACT = FISSION_ACTIVITY_ID;
 
     @Autowired private FissionService fissionService;
     @Autowired private FissionTaskScheduler scheduler;

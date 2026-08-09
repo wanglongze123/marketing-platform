@@ -127,8 +127,27 @@ abstract class AbstractMySqlIT {
                 + "&allowPublicKeyRetrieval=true&useSSL=false";
     }
 
-    /** seed 数据，由 V1090 / V1190 初始化 */
+    /**
+     * 权益售卖活动（{@code play_type = 'BENEFIT_SELL'}），seed 数据由 V1090 / V1190 初始化。
+     *
+     * <p><b>裂变用例不要用它</b>，用 {@link #FISSION_ACTIVITY_ID}：{@code createRound} 校验 {@code
+     * playType}，裂变轮次开不到 {@code BENEFIT_SELL} 活动上。
+     */
     protected static final String ACTIVITY_ID = "ACT_DEMO_001";
+
+    /**
+     * 裂变活动（{@code play_type = 'FISSION'}），seed 数据由 V3091 初始化。
+     *
+     * <p><b>凡是要开裂变轮次的用例都用它</b>。抽成基类常量而非各测试类各写一遍字面量，是因为写错的 后果不是「断言失败」而是<b>整个类每个用例都在 {@code
+     * openGroup} 处抛异常</b> —— 排查时看到的是 一堆与被测行为无关的报错。
+     *
+     * <p>这条坑真实发生过：V3 PR-4~PR-10 期间 {@code createRound} 只判「活动存在」，五个裂变测试类 借用 {@link #ACTIVITY_ID}
+     * 都能跑通；{@code playType} 校验补上后，43 个用例同时变红。它们本就不该 绿 —— 一个把裂变组开在权益售卖活动上的实现，测试却在为它背书。
+     *
+     * <p>与 {@link #ACTIVITY_ID} 的差别<b>仅在 name / play_type / scene 三个字段</b>：状态、时间窗、
+     * 配置版本一致，四个资格维度（城市、渠道、人群、风控）两边都是「不限」。故裂变用例从 {@link #ACTIVITY_ID} 切过来时，除了「能开轮」之外的行为不受影响。
+     */
+    protected static final String FISSION_ACTIVITY_ID = "ACT_FISSION_001";
 
     protected static final String SKU_ID = "SKU_DEMO_001";
 

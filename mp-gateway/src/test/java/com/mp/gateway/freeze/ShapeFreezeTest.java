@@ -427,6 +427,69 @@ class ShapeFreezeTest {
                 .doesNotContain("java.util.regex");
     }
 
+    /**
+     * 裂变集成测试不得硬编码活动号，一律取 {@code AbstractMySqlIT.FISSION_ACTIVITY_ID}。
+     *
+     * <p><b>防的是一个真实发生过的失效</b>：V3 PR-4~PR-10 期间 {@code createRound} 只判「活动存在」， 五个裂变测试类借用 {@code
+     * ACT_DEMO_001}（{@code play_type = 'BENEFIT_SELL'}）都能跑通；补上 {@code playType} 校验后 43
+     * 个用例同时变红。它们本就不该绿 —— 一个把裂变组开在权益售卖活动上的 实现，测试却在为它背书。
+     *
+     * <p><b>为什么必须机器化而不是靠注释</b>：写错的后果不是「某条断言失败」，而是该类每个用例都在 {@code openGroup}
+     * 处抛异常。排查时看到的是一堆与被测行为无关的报错，而真正的原因藏在一个 常量字面量里。下一个人加裂变用例时，复制粘贴一个旧类的 {@code ACT_DEMO_001} 是最自然的 动作
+     * —— 靠人记住不可靠，靠这条测试才拦得住。
+     *
+     * <p>判据取「裂变 IT 的<b>代码</b>里不出现权益活动号」。注释里可以出现（几处正是在解释为何不能 用它），故先剥掉注释再查。
+     *
+     * <p>{@code FissionSponsorEntryIT} 例外：它有一条用例专门断言「裂变组不能开在权益售卖活动上」， 那里出现 {@code ACT_DEMO_001}
+     * 是被测行为本身。例外按类名白名单列出而非放宽判据 —— 放宽等于 这条检查对所有类都失效。
+     */
+    @Test
+    void fissionIntegrationTestsUseTheFissionSeedActivity() {
+        // 该类的用例本身就要拿权益活动去撞 playType 校验
+        List<String> allowed = List.of("FissionSponsorEntryIT.java");
+
+        try (Stream<Path> files = Files.walk(REPO.resolve("mp-gateway/src/test/java"))) {
+            List<Path> fissionIts =
+                    files.filter(p -> p.getFileName().toString().endsWith("IT.java"))
+                            .filter(p -> !contains(p, "target"))
+                            .filter(ShapeFreezeTest::opensFissionRound)
+                            .toList();
+
+            assertThat(fissionIts).as("未找到任何开裂变轮次的 IT，判据可能已失效").isNotEmpty();
+
+            for (Path p : fissionIts) {
+                String name = p.getFileName().toString();
+                if (allowed.contains(name)) {
+                    continue;
+                }
+                assertThat(stripComments(readPath(p)))
+                        .as("%s 是裂变用例，活动号须取 FISSION_ACTIVITY_ID，不得硬编码权益活动 ACT_DEMO_001", name)
+                        .doesNotContain("ACT_DEMO_001");
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("扫描集成测试失败", e);
+        }
+    }
+
+    /** 是否会开裂变轮次 —— 这类用例才受活动 {@code playType} 约束。 */
+    private static boolean opensFissionRound(Path p) {
+        String src = readPath(p);
+        return src.contains("openGroup(") || src.contains("sponsorQuery(");
+    }
+
+    /** 剥掉块注释与行注释，使「注释里提到某字面量」不触发判据。 */
+    private static String stripComments(String source) {
+        return source.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("(?m)//.*$", "");
+    }
+
+    private static String readPath(Path p) {
+        try {
+            return Files.readString(p, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new IllegalStateException("读取源码失败: " + p, e);
+        }
+    }
+
     /** 组合注解自身必须指定管理器，否则上一条检查只是把裸注解换了个名字。 */
     @Test
     void eachTxAnnotationDeclaresItsTransactionManager() {

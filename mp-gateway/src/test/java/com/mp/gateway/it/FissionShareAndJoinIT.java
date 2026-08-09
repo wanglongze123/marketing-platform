@@ -28,8 +28,8 @@ import org.springframework.beans.factory.annotation.Autowired;
  */
 class FissionShareAndJoinIT extends AbstractMySqlIT {
 
-    /** 裂变活动，由 {@code V3091__seed_fission_activity.sql} 初始化。理由见 {@code FissionSponsorEntryIT}。 */
-    private static final String ACT = "ACT_FISSION_001";
+    /** 裂变活动，见 {@link AbstractMySqlIT#FISSION_ACTIVITY_ID}。 */
+    private static final String ACT = FISSION_ACTIVITY_ID;
 
     @Autowired private FissionService fissionService;
 

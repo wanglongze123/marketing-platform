@@ -28,14 +28,8 @@ import org.springframework.beans.factory.annotation.Autowired;
  */
 class FissionSponsorEntryIT extends AbstractMySqlIT {
 
-    /**
-     * 裂变活动，由 {@code V3091__seed_fission_activity.sql} 初始化。
-     *
-     * <p><b>不再借用 {@code ACT_DEMO_001}</b>：那是 V1090 建的 {@code play_type = 'BENEFIT_SELL'} 权益售卖活动。
-     * 借用它曾经能跑通，只因 {@code createRound} 当时只判「活动存在」—— 于是这些用例在为 「裂变组开在权益售卖活动上」这个错误行为背书。补上 {@code
-     * playType} 校验后借用即变红， 而变红是对的。
-     */
-    private static final String ACT = "ACT_FISSION_001";
+    /** 裂变活动，见 {@link AbstractMySqlIT#FISSION_ACTIVITY_ID}。 */
+    private static final String ACT = FISSION_ACTIVITY_ID;
 
     @Autowired private FissionService fissionService;
     @Autowired private com.mp.fission.repository.FissionGroupMapper groupMapper;

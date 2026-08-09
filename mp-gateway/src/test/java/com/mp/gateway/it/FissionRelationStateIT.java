@@ -29,7 +29,7 @@ class FissionRelationStateIT extends AbstractMySqlIT {
         relationMapper.insertActive(
                 relationId,
                 groupId,
-                "ACT_FISSION_001",
+                FISSION_ACTIVITY_ID,
                 "U_sponsor",
                 followerId,
                 "",
