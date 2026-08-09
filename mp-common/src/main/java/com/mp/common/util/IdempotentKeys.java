@@ -11,6 +11,10 @@ package com.mp.common.util;
  * </ol>
  *
  * <p>一律确定性字符串拼接，不用 hash —— 避免碰撞，且可读、可对账。
+ *
+ * <p><b>每一把派生出的键都在此处校验长度</b>（{@link ReqFields#requireKeyFits}）。校验放在派生处而非各调用方： 键列一律 {@code
+ * VARCHAR(64)}，而拼进键里的上游取值（工单号、通知序号、外部流水号）长度平台管不着 —— 漏校验一处就是一条溢出路径，而<b>溢出的表现是异常被四分类吞成
+ * UNKNOWN</b>，与下游超时无从区分。 放在这里，新增一把键时不可能忘。
  */
 public final class IdempotentKeys {
 
@@ -23,7 +27,7 @@ public final class IdempotentKeys {
      * @param providerType 供应方类型，取自订单快照
      */
     public static String grantOpNo(String bizNo, String providerType) {
-        return bizNo + "_G_" + providerType;
+        return ReqFields.requireKeyFits(bizNo + "_G_" + providerType, "grantOpNo");
     }
 
     /**
@@ -37,7 +41,7 @@ public final class IdempotentKeys {
      * @param notifySeq 回调携带，重传时保持不变
      */
     public static String payCallback(String bizNo, String notifySeq) {
-        return bizNo + "_" + notifySeq;
+        return ReqFields.requireKeyFits(bizNo + "_" + notifySeq, "payCallbackKey");
     }
 
     /**
@@ -47,7 +51,7 @@ public final class IdempotentKeys {
      * {@code uk_idempotent}。
      */
     public static String closeOrder(String bizNo) {
-        return bizNo + "_CLOSE";
+        return ReqFields.requireKeyFits(bizNo + "_CLOSE", "closeOrderKey");
     }
 
     /**
@@ -60,7 +64,7 @@ public final class IdempotentKeys {
      * @param outFlowNo 上游流水号，标识本次确权
      */
     public static String followerGrantNo(String outFlowNo) {
-        return outFlowNo + "_FL";
+        return ReqFields.requireKeyFits(outFlowNo + "_FL", "followerGrantNo");
     }
 
     /**
@@ -69,7 +73,7 @@ public final class IdempotentKeys {
      * <p>两者<b>必须是不同的键</b>：同一个键会让师傅返奖被 {@code uk_idempotent} 当成徒弟发奖的重传 挡下 —— 师傅永远拿不到奖，且不报错。
      */
     public static String sponsorFlowNo(String outFlowNo) {
-        return outFlowNo + "_SP";
+        return ReqFields.requireKeyFits(outFlowNo + "_SP", "sponsorFlowNo");
     }
 
     /**
@@ -97,7 +101,7 @@ public final class IdempotentKeys {
      * @param shardBizNo 分片键，形如 {@code EXPIRE_SHARD_0_OF_1}
      */
     public static String expireOpNo(String shardBizNo) {
-        return shardBizNo + "_EXPIRE";
+        return ReqFields.requireKeyFits(shardBizNo + "_EXPIRE", "expireOpNo");
     }
 
     /**
@@ -111,7 +115,7 @@ public final class IdempotentKeys {
      * @param refundReqNo 上游退款请求号，重试保持不变
      */
     public static String revokeNo(String bizNo, String refundReqNo) {
-        return bizNo + "_V_" + refundReqNo;
+        return ReqFields.requireKeyFits(bizNo + "_V_" + refundReqNo, "revokeNo");
     }
 
     /**
@@ -129,7 +133,8 @@ public final class IdempotentKeys {
      * @param providerType 供应方类型，与 {@code grantOpNo} 的第二维同源
      */
     public static String revokeItemNo(String bizNo, String refundReqNo, String providerType) {
-        return bizNo + "_V_" + refundReqNo + "_" + providerType;
+        return ReqFields.requireKeyFits(
+                bizNo + "_V_" + refundReqNo + "_" + providerType, "revokeItemNo");
     }
 
     /**
@@ -154,6 +159,6 @@ public final class IdempotentKeys {
      * <p>两者<b>必须是不同的键</b>：同键会让退款被回收记录的唯一索引挡下 —— 钱退不出去且不报错。
      */
     public static String refundNo(String bizNo, String refundReqNo) {
-        return bizNo + "_R_" + refundReqNo;
+        return ReqFields.requireKeyFits(bizNo + "_R_" + refundReqNo, "refundNo");
     }
 }

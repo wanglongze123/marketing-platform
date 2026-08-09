@@ -200,31 +200,89 @@ public class ReconcileService {
             if (order == null) {
                 continue;
             }
-            String payStatus = order.getPayStatus();
-            String grantStatus = order.getGrantStatus();
-            if ("CLOSING".equals(payStatus)) {
-                taskMapper.enqueue(
-                        BizNoGenerator.taskNo(),
-                        bizNo,
-                        TaskType.QUERY_CLOSE.name(),
-                        bizNo + "_" + TaskType.QUERY_CLOSE.name(),
-                        0,
-                        "{}");
-                repaired++;
-            } else if ("GRANT_UNKNOWN".equals(grantStatus) || "GRANTING".equals(grantStatus)) {
-                for (String opNo : reconcileMapper.selectGrantOpNos(bizNo)) {
-                    taskMapper.enqueue(
-                            BizNoGenerator.taskNo(),
-                            bizNo,
-                            TaskType.QUERY_GRANT.name(),
-                            opNo,
-                            0,
-                            "{}");
-                }
+            if (repairOne(order)) {
                 repaired++;
             }
         }
         return new Outcome(bizNos.size(), repaired);
+    }
+
+    /**
+     * 按主单当前状态补一条收敛任务。
+     *
+     * <p><b>四个分支要覆盖全部中间态</b>（§6.4）。首版只有前两个 —— 退款链路的 {@code REVOKING} 与 {@code REFUNDING}
+     * 被扫了出来却没有任何补建分支，于是本项对它们<b>检出而不修</b>：{@code diffs} 有值、{@code repaired} 恒空，单子永久卡在中间态。
+     *
+     * <p><b>那个失效形态比「没扫到」更糟</b>：监控上告警是亮的，看起来对账在正常工作，而实际上 那条告警永远不会消失 —— 没扫到至少还有人怀疑覆盖不全。
+     *
+     * <p>实测对照（探针）：同样删掉查单任务，{@code GRANT_UNKNOWN} 的单被补回并收敛到 {@code GRANT_SUCCESS}，而 {@code
+     * REFUNDING} / {@code REVOKING} 的单 {@code repaired={}}、永久停在原状态。 <b>同一段代码，履约链路能自愈，退款链路不能。</b>
+     *
+     * <p>四个分支一律<b>复用原键</b>，不新造：{@code revokeNo} 从操作记录读、{@code refundNo} 从主单读 —— 新造键会绕开 {@code
+     * uk_biz_type_op} 与下游的幂等，让一次补建变成一次全新的退款请求。
+     *
+     * <p>判定顺序：<b>退款态先于发放态</b>。一笔进入退款流程的单，其 {@code grant_status} 多半仍是 {@code
+     * GRANT_SUCCESS}（发放确实成功过），若先判发放态则退款链路的悬挂被前面的分支 抢走；而反过来不会 —— 未进退款流程的单 {@code refund_status} 恒为
+     * {@code NONE}。
+     *
+     * @return 是否补了任务。{@code false} 表示该单当前状态没有对应的收敛通路，交人工
+     */
+    private boolean repairOne(ReconcileMapper.OrderSnapshot order) {
+        String bizNo = order.getPlayBizRecordNo();
+        String payStatus = order.getPayStatus();
+        String grantStatus = order.getGrantStatus();
+        String refundStatus = order.getRefundStatus();
+
+        if ("REVOKING".equals(refundStatus)) {
+            // 回收未收敛 → 补 REVOKE。键取原 revokeNo（操作记录里），不新造
+            String revokeNo = reconcileMapper.selectRevokeOpNo(bizNo);
+            if (revokeNo == null) {
+                log.error("reconcile cannot repair REVOKING without revoke op, bizNo={}", bizNo);
+                return false;
+            }
+            taskMapper.enqueue(
+                    BizNoGenerator.taskNo(), bizNo, TaskType.REVOKE.name(), revokeNo, 0, "{}");
+            log.warn(
+                    "reconcile repaired unresolved revoke, bizNo={}, revokeNo={}", bizNo, revokeNo);
+            return true;
+        }
+        if ("REFUNDING".equals(refundStatus)) {
+            // 退款未收敛 → 补 QUERY_REFUND，**只查不发**：多退一笔钱要走人工追讨，
+            // 与 manualRepair 的「重试退款」同一条判断（BR-B-38）
+            String refundNo = order.getRefundNo();
+            if (refundNo == null) {
+                log.error("reconcile cannot repair REFUNDING without refundNo, bizNo={}", bizNo);
+                return false;
+            }
+            taskMapper.enqueue(
+                    BizNoGenerator.taskNo(),
+                    bizNo,
+                    TaskType.QUERY_REFUND.name(),
+                    refundNo,
+                    0,
+                    "{}");
+            log.warn(
+                    "reconcile repaired unresolved refund, bizNo={}, refundNo={}", bizNo, refundNo);
+            return true;
+        }
+        if ("CLOSING".equals(payStatus)) {
+            taskMapper.enqueue(
+                    BizNoGenerator.taskNo(),
+                    bizNo,
+                    TaskType.QUERY_CLOSE.name(),
+                    bizNo + "_" + TaskType.QUERY_CLOSE.name(),
+                    0,
+                    "{}");
+            return true;
+        }
+        if ("GRANT_UNKNOWN".equals(grantStatus) || "GRANTING".equals(grantStatus)) {
+            for (String opNo : reconcileMapper.selectGrantOpNos(bizNo)) {
+                taskMapper.enqueue(
+                        BizNoGenerator.taskNo(), bizNo, TaskType.QUERY_GRANT.name(), opNo, 0, "{}");
+            }
+            return true;
+        }
+        return false;
     }
 
     /**

@@ -247,7 +247,7 @@ public interface ReconcileMapper {
 
     /** 主单快照，对账按当前状态决定补哪一种任务（BR-C-23 先查证再动）。 */
     @Select(
-            "SELECT play_biz_record_no, pay_status, grant_status, refund_status, sku_id"
+            "SELECT play_biz_record_no, pay_status, grant_status, refund_status, sku_id, refund_no"
                     + " FROM play_biz_record WHERE play_biz_record_no = #{bizNo}")
     OrderSnapshot selectSnapshot(@Param("bizNo") String bizNo);
 
@@ -290,6 +290,9 @@ public interface ReconcileMapper {
         private String refundStatus;
         private String skuId;
 
+        /** 退款单号。第 4 项补 {@code QUERY_REFUND} 任务时复用它作 {@code op_no}，不新造键 */
+        private String refundNo;
+
         public String getPlayBizRecordNo() {
             return playBizRecordNo;
         }
@@ -328,6 +331,14 @@ public interface ReconcileMapper {
 
         public void setSkuId(String skuId) {
             this.skuId = skuId;
+        }
+
+        public String getRefundNo() {
+            return refundNo;
+        }
+
+        public void setRefundNo(String refundNo) {
+            this.refundNo = refundNo;
         }
     }
 

@@ -883,6 +883,12 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         // 再点一次会拿到 admitted=true —— 而那笔退款未发生。钱不会多退（后续闸挡得住），
         // 但调用方据此以为受理成功，工单被误标为已处理，用户的第二次诉求就此消失
         String revokeNo = IdempotentKeys.revokeNo(bizNo, req.getRefundReqNo());
+
+        // 逐供应方的回收键比 revokeNo 更长，而它要到回收阶段才派生 —— 那时主单已进 REVOKING。
+        // 在此提前把最长的那把量一遍：**校验来得晚等于没校验**，单子会卡在中间态，
+        // 而入口拒绝时它还停在 NONE，调用方换个短工单号即可重来（实测这条顺序确认过）
+        requireRevokeItemKeysFit(order, req.getRefundReqNo());
+
         RefundStatus refundStatus = RefundStatus.valueOf(order.getRefundStatus());
         if (refundStatus == RefundStatus.REFUND_SUCCESS || refundStatus == RefundStatus.REFUNDING) {
             if (opRecordMapper.selectByIdempotentKey(revokeNo) != null) {
@@ -1077,6 +1083,25 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
      * 后的表现与支付方超时完全一样 —— 主单进 {@code REFUNDING}、落查单任务、回报「结果未定」，而退款 请求根本没发出去。且查单收敛救不回来：支付方查无该单恒答
      * {@code UNKNOWN}，重试至死信后这笔 单永停 {@code REFUNDING}。与 PR-7 的键长溢出同族，形态更隐蔽。
      */
+    /**
+     * 提前校验<b>逐供应方的回收键</b>不会溢出 {@code VARCHAR(64)}。
+     *
+     * <p>准入只派生 {@code revokeNo}，而实际回收时每个供应方还要各派生一把更长的 {@code revokeItemNo}
+     * （多拼一段供应方名）。<b>后者要到回收阶段才算，那时主单已进 {@code REVOKING}</b> —— 于是一个
+     * 只让长键溢出的工单号会让准入「成功一半」：状态推进了，回收发不出去。
+     *
+     * <p>实测确认过这个顺序：仅靠派生处的校验，用例断言「被拒时不得推进退款态」判红。 <b>校验来得晚等于没校验</b>；在入口量一遍，被拒时单子还停在 {@code
+     * NONE}，调用方换个短工单号即可重来。
+     *
+     * <p>供应方取自本单快照，不取全表 —— 键里拼的正是这一单会用到的那些。
+     */
+    private void requireRevokeItemKeysFit(PlayBizRecord order, String refundReqNo) {
+        String bizNo = order.getPlayBizRecordNo();
+        for (String providerType : groupByProvider(order.getBenefitSnapshot()).keySet()) {
+            IdempotentKeys.revokeItemNo(bizNo, refundReqNo, providerType);
+        }
+    }
+
     private static void requirePayAmount(PlayBizRecord order) {
         if (order.getPayAmount() == null) {
             throw new BizException(
