@@ -25,6 +25,26 @@ const states = ref<Record<string, ScenarioState>>(
 )
 const running = ref(false)
 
+/**
+ * 为一次场景运行派生独立的下单用户。
+ *
+ * SKU 配了每人限购 2 份（V2190__seed_stock.sql），而十几个场景都要下单。若共用
+ * 页面顶栏那个 userId，「全部运行」跑到第三个下单场景就必然 1713 —— 且报错指向
+ * 「超出限购」，而失败的场景与限购无关，排查会先怀疑后端。
+ *
+ * 带时间戳而非只按 id 派生：否则第二次点「全部运行」时额度已被上一轮用光，
+ * 表现为「第一次全绿、之后再点就红」。
+ *
+ * ⚠️ 必须短：userId 是业务幂等键 `user_activity_sku_clientReqNo` 的第一段，而
+ * `play_op_record.idempotent_key` 只有 VARCHAR(64)。拼长了会在建单时触发
+ * `Data too long`，经兜底分支变成 `5001 system error` —— 报错既不提用户名过长，
+ * 也不指向前端，排查会先怀疑后端。故这里只取场景 id 的前 6 个字符 + 4 位时间戳。
+ */
+function scenarioUserId(id: string): string {
+  const stamp = Date.now().toString(36).slice(-4).toUpperCase()
+  return `T_${id.slice(0, 6)}_${stamp}`
+}
+
 async function runOne(id: string) {
   const scenario = SCENARIOS.find((s) => s.id === id)
   if (!scenario || running.value) return
@@ -37,7 +57,7 @@ async function runOne(id: string) {
 
   let failed = false
   const ctx: Ctx = {
-    userId: session.userId,
+    userId: scenarioUserId(id),
     assert(cond, message) {
       if (!cond) throw new Error(message)
     },

@@ -34,6 +34,18 @@ export interface StepResult {
 export interface Ctx {
   step<T>(label: string, fn: () => Promise<T>, note?: string): Promise<T>
   assert(cond: boolean, message: string): void
+
+  /**
+   * 本场景专用的下单用户，<b>每次运行都不同</b>。
+   *
+   * 不能共用页面上那个 userId：SKU 配了每人限购 2 份，而十几个场景都要下单。
+   * 共用时「全部运行」跑到第三个场景就必然 1713，且失败的是与限购无关的场景 ——
+   * 报错指向「超出限购」，而那个场景压根不在验限购，排查会先怀疑后端。
+   *
+   * 也不能只按场景 id 派生（不带时间戳）：第二次点「全部运行」时额度已被上一轮用光。
+   *
+   * 需要「同一用户多笔」的场景（如分页）自行在此基础上再派生，见 pagination。
+   */
   userId: string
 }
 
@@ -67,6 +79,14 @@ function expectRejected<T>(r: ApiResult<T>, code: number, what: string) {
   const actual = (r as { code: number }).code
   if (actual !== code) fail(`${what} 期望 code=${code}，实际 ${actual}`)
 }
+
+/**
+ * seed 给 SKU_DEMO_001 配的每人限购份数（V2190__seed_stock.sql）。
+ *
+ * 场景就着这个数走，不改 seed —— 限额是「限购生效」那批用例的判据，
+ * 调大它会让那些用例失去约束对象。
+ */
+const PURCHASE_LIMIT = 2
 
 /** 取一张咨询凭证。下单必须携带，无凭证 4003 */
 async function consultToken(userId: string): Promise<string> {
@@ -655,26 +675,30 @@ export const SCENARIOS: Scenario[] = [
   {
     id: 'pagination',
     name: '列表分页',
-    desc: '造 3 单取 size=2，期望分页真实生效',
+    desc: '造满限购笔数取 size=1，期望分页真实生效',
     async run(c) {
-      const user = `${c.userId}_pg${Date.now().toString(36).slice(-4)}`
-      await c.step('用独立 userId 造 3 单', async () => {
-        for (let i = 0; i < 3; i++) {
+      // 笔数取限购上限：超出即 1713，造不出「一个用户很多单」。
+      // 分页仍验得到 —— size=1 就能制造多页，页数由 size 决定而非订单数
+      // 只加 2 字符后缀：c.userId 已带时间戳，本场景只需与同轮其他场景区分开。
+      // 幂等键总长受 idempotent_key VARCHAR(64) 约束，此处每多一个字符都要算进去
+      const user = `${c.userId}P`
+      await c.step(`用独立 userId 造 ${PURCHASE_LIMIT} 单`, async () => {
+        for (let i = 0; i < PURCHASE_LIMIT; i++) {
           expectOk(await trade(user, newClientReqNo()), `第 ${i + 1} 单`)
         }
       })
       await c.step(
-        'size=2，期望 items=2 而 total=3',
+        `size=1，期望 items=1 而 total=${PURCHASE_LIMIT}`,
         async () => {
-          const p = expectOk(await queryOrders({ userId: user, page: 1, size: 2 }), '第一页')
-          c.assert(p.items.length === 2, `items=${p.items.length}`)
-          c.assert(p.total === 3, `total=${p.total}`)
+          const p = expectOk(await queryOrders({ userId: user, page: 1, size: 1 }), '第一页')
+          c.assert(p.items.length === 1, `items=${p.items.length}`)
+          c.assert(p.total === PURCHASE_LIMIT, `total=${p.total}`)
         },
         '未注册 PaginationInnerInterceptor 时 selectPage 会返回全表且 total 恒 0'
       )
       await c.step('第二页期望 1 条且与第一页不重复', async () => {
-        const p1 = expectOk(await queryOrders({ userId: user, page: 1, size: 2 }), '第一页')
-        const p2 = expectOk(await queryOrders({ userId: user, page: 2, size: 2 }), '第二页')
+        const p1 = expectOk(await queryOrders({ userId: user, page: 1, size: 1 }), '第一页')
+        const p2 = expectOk(await queryOrders({ userId: user, page: 2, size: 1 }), '第二页')
         c.assert(p2.items.length === 1, `第二页 ${p2.items.length} 条`)
         const overlap = p2.items.filter((b) => p1.items.some((a) => a.bizNo === b.bizNo))
         c.assert(overlap.length === 0, '两页出现重复行')

@@ -49,7 +49,20 @@ const paying = ref(false)
 const closing = ref(false)
 const convergence = ref<ConvergenceResp | null>(null)
 
+/**
+ * 请求序号，用于丢弃过期响应。
+ *
+ * 本页有三个触发点会并发发起加载：路由 bizNo 变化、手动刷新、支付/关单后的回查。
+ * 而**先发的不保证先回** —— 从订单 A 切到 B 时，A 的那一轮晚回就会覆盖 B 的数据，
+ * 表现是「详情页标题是 B、内容是 A」，不报错、再刷一次又好了。
+ *
+ * 三个请求是 Promise.all 一起发的，故只需在汇总处查一次序号：不是最新那次就整个
+ * 丢弃，loading / error / order 一概不写，交由最新那次收尾。
+ */
+let reqSeq = 0
+
 async function load() {
+  const seq = ++reqSeq
   loading.value = true
   error.value = ''
   const [o, r, c] = await Promise.all([
@@ -57,6 +70,8 @@ async function load() {
     queryOpRecords(bizNo.value),
     queryConvergence(bizNo.value),
   ])
+  // 已有更新的请求发出：本次结果作废
+  if (seq !== reqSeq) return
   loading.value = false
 
   if (o.kind === 'ok') order.value = o.data
