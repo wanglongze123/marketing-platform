@@ -53,16 +53,35 @@ const convergence = ref<ConvergenceResp | null>(null)
  * 请求序号，用于丢弃过期响应。
  *
  * 本页有三个触发点会并发发起加载：路由 bizNo 变化、手动刷新、支付/关单后的回查。
- * 而**先发的不保证先回** —— 从订单 A 切到 B 时，A 的那一轮晚回就会覆盖 B 的数据，
- * 表现是「详情页标题是 B、内容是 A」，不报错、再刷一次又好了。
+ * 而**先发的不保证先回** —— 旧的那一轮晚回就会覆盖新数据，表现是「详情页标题是 B、
+ * 内容是 A」，不报错、再刷一次又好了。
  *
  * 三个请求是 Promise.all 一起发的，故只需在汇总处查一次序号：不是最新那次就整个
  * 丢弃，loading / error / order 一概不写，交由最新那次收尾。
  */
 let reqSeq = 0
 
-async function load() {
+/**
+ * @param reset 是否先清空当前订单数据。
+ *
+ * <b>切换 bizNo 必须清，原地刷新必须不清</b> —— 两者的正确行为相反：
+ *
+ * - 不清空时切换：`v-if="loading && !order"` 因 order 仍是旧值而不成立，模板走
+ *   `v-else-if="order"` 分支，于是新请求在途的几百毫秒里**整页渲染的是上一个订单**，
+ *   金额、履约明细、任务全是旧单的。序号防护挡的是「旧响应覆盖新数据」，挡不住
+ *   「新请求在途时继续渲染旧数据」—— 后者根本不涉及响应先后。
+ * - 反过来，原地刷新若也清空，每次点「刷新」页面都会闪一下空白再重绘。
+ */
+async function load(reset = false) {
   const seq = ++reqSeq
+  if (reset) {
+    // 与新 bizNo 无关的一切旧状态一并清掉，包括上一个订单的支付/关单提示 ——
+    // 那条提示挂在 notice 上，不清会跟着飘到新订单页上，读起来像是新订单的结果
+    order.value = null
+    records.value = []
+    convergence.value = null
+    notice.value = null
+  }
   loading.value = true
   error.value = ''
   const [o, r, c] = await Promise.all([
@@ -83,8 +102,9 @@ async function load() {
   convergence.value = c.kind === 'ok' ? c.data : null
 }
 
-onMounted(load)
-watch(bizNo, load)
+onMounted(() => load())
+// 换了订单就是换了展示对象，旧数据一律不留
+watch(bizNo, () => load(true))
 
 const state = computed(() => (order.value ? deriveDisplayState(order.value) : null))
 
@@ -165,7 +185,9 @@ async function doClose() {
     <div class="back">
       <RouterLink to="/benefit/orders">← 订单管理</RouterLink>
       <RouterLink to="/my-orders">我的订单</RouterLink>
-      <button class="sm ghost" :disabled="loading" @click="load">
+      <!-- 写成 load() 而非 load：后者会把 MouseEvent 当第一个实参传进去，
+           而 event 是 truthy，于是每次点刷新都按「切换订单」清空重绘 -->
+      <button class="sm ghost" :disabled="loading" @click="load()">
         {{ loading ? '刷新中…' : '刷新' }}
       </button>
     </div>
