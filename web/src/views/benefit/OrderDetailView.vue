@@ -10,6 +10,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
+  MOCK_MERCHANT_ID,
   closeOrder,
   newNotifySeq,
   queryConvergence,
@@ -141,7 +142,7 @@ async function simulatePay(payStatus: 'SUCCESS' | 'FAILED') {
     payStatus,
     payAmount: order.value.orderAmount,
     currency: 'CNY',
-    merchantId: 'M001',
+    merchantId: MOCK_MERCHANT_ID,
   })
 
   if (cb.kind === 'rejected') {

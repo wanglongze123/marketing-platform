@@ -10,6 +10,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
+  MOCK_MERCHANT_ID,
   createTrade,
   newClientReqNo,
   newNotifySeq,
@@ -173,7 +174,7 @@ async function payAndSettle(payStatus: 'SUCCESS' | 'FAILED') {
     payStatus,
     payAmount: amount.value,
     currency: 'CNY',
-    merchantId: 'M001',
+    merchantId: MOCK_MERCHANT_ID,
   })
 
   if (cb.kind === 'rejected') {

@@ -103,6 +103,21 @@ export async function simulatePayNotify(
  * 同一个值，重试才会命中幂等返回原单；换新值即建新单。故此函数只在用户发起新的
  * 购买动作时调用一次，不在每次 HTTP 重试时调用。
  */
+/**
+ * 模拟支付通知用的商户号。
+ *
+ * 必须与后端 `mp.pay.merchant-id`（application-local.yml: MCH_LOCAL_DEMO）一致 ——
+ * 回调会逐字段比对商户号，不符即 1731 且**不推进任何状态**。
+ *
+ * 收在此处而非各页面各写一份：前端原先三个调用点各自硬编码 'M001'，与后端配置对不上，
+ * 于是所有模拟支付一律 1731。而 1731 的文案是「支付金额或币种与应付不一致」，
+ * 指向金额 —— 排查会先去核对金额，而金额一直是对的。
+ *
+ * 真实场景里这个值由支付方在通知报文里带来，端上不会自己填。此处是因为要在浏览器里
+ * 模拟「支付方发通知」，与 signPayNotify 同属演示设施。
+ */
+export const MOCK_MERCHANT_ID = 'MCH_LOCAL_DEMO'
+
 export const newClientReqNo = (): string =>
   'REQ' +
   Date.now().toString(36).toUpperCase() +

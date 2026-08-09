@@ -5,6 +5,7 @@
  * 相比旧版新增：只读端点的场景（列表分页、非法枚举、只读性）。
  */
 import {
+  MOCK_MERCHANT_ID,
   closeOrder,
   createTrade,
   newClientReqNo,
@@ -128,7 +129,7 @@ const callback = (
     payStatus: opts.payStatus ?? 'SUCCESS',
     payAmount: amount,
     currency: opts.currency ?? 'CNY',
-    merchantId: 'M001',
+    merchantId: MOCK_MERCHANT_ID,
   })
 
 /**
@@ -329,7 +330,7 @@ export const SCENARIOS: Scenario[] = [
             payStatus: 'SUCCESS',
             payAmount: created.orderAmount,
             currency: 'CNY',
-            merchantId: 'M001',
+            merchantId: MOCK_MERCHANT_ID,
             sign: '',
           })
           expectRejected(r, ERROR_CODE.PAY_NOTIFY_SIGN_INVALID, '无签名回调')
@@ -347,7 +348,7 @@ export const SCENARIOS: Scenario[] = [
             payStatus: 'SUCCESS' as const,
             payAmount: created.orderAmount,
             currency: 'CNY',
-            merchantId: 'M001',
+            merchantId: MOCK_MERCHANT_ID,
           }
           const signed = expectOk(await signPayNotify(base), '取签名')
           // 金额改成 1 分但沿用原签名 —— 金额在签名字段内，必须被验出
