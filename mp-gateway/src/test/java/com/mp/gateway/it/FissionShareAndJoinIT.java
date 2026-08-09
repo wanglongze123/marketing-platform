@@ -28,7 +28,8 @@ import org.springframework.beans.factory.annotation.Autowired;
  */
 class FissionShareAndJoinIT extends AbstractMySqlIT {
 
-    private static final String ACT = "ACT_DEMO_001";
+    /** 裂变活动，由 {@code V3091__seed_fission_activity.sql} 初始化。理由见 {@code FissionSponsorEntryIT}。 */
+    private static final String ACT = "ACT_FISSION_001";
 
     @Autowired private FissionService fissionService;
 
@@ -303,6 +304,206 @@ class FissionShareAndJoinIT extends AbstractMySqlIT {
                 .as("并发加入只应产生一条关系")
                 .isEqualTo(1);
         assertThat(relationIds).as("全部线程应拿到同一条关系").containsOnly(relationIds.get(0));
+    }
+
+    /**
+     * <b>分享者必须是该轮次的师傅</b>（1615）。
+     *
+     * <p>攻击形态：知道他人 {@code groupId} 即可发起一次 {@code sponsorId} 是自己的分享。若实现信了 请求里的 {@code
+     * sponsorId}，同一个组下会出现两个不同的 {@code sponsor_id} —— 而 PR-4 的 师傅返奖按关系上的 {@code sponsor_id}
+     * 发，奖直接落到伪造者头上。
+     *
+     * <p><b>判据取「库里那条关系的 sponsor_id」而非只断言抛异常</b>：一个「先建关系再校验」的实现 同样会抛出预期错误码，只断言异常则它照常全绿 ——
+     * 而它已经把脏数据写进去了。这与退出标准 第 16 条「均不建单必须与拒绝了同时断言」是同一处置。
+     */
+    @Test
+    void shareByNonOwnerIsRejectedAndWritesNothing() {
+        String owner = "U_sp_owner";
+        String groupId = newGroup(owner);
+        String attacker = "U_sp_attacker";
+
+        assertThatThrownBy(
+                        () -> fissionService.shareInvite(shareReq(groupId, attacker, "U_victim")))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.SPONSOR_NOT_GROUP_OWNER);
+
+        assertThat(
+                        count(
+                                fissionJdbc,
+                                "SELECT COUNT(*) FROM fission_relation WHERE group_id = ?",
+                                groupId))
+                .as("越权分享不得留下任何关系")
+                .isZero();
+        assertThat(
+                        count(
+                                fissionJdbc,
+                                "SELECT COUNT(*) FROM fission_relation WHERE sponsor_id = ?",
+                                attacker))
+                .as("伪造的 sponsor_id 不得落库 —— PR-4 的师傅返奖按它发奖")
+                .isZero();
+    }
+
+    /**
+     * 正常分享落库的 {@code sponsor_id} 取自轮次，不取自请求。
+     *
+     * <p>与上一条互补：上一条验「不一致时拒绝」，本条验「一致时落的是服务端那个值」。 两条一起才排除「校验通过后仍写请求值」的实现 —— 二者当前等价，但把「落哪个值」这件事
+     * 钉在服务端，是为了让 PR-4 接双向发奖时不必再回头确认一次数据来源。
+     */
+    @Test
+    void shareStoresServerSideSponsorId() {
+        String sponsorId = "U_sp_srv";
+        String groupId = newGroup(sponsorId);
+
+        fissionService.shareInvite(shareReq(groupId, sponsorId, "U_srv_f"));
+
+        assertThat(
+                        str(
+                                fissionJdbc,
+                                "SELECT sponsor_id FROM fission_relation WHERE group_id = ?"
+                                        + " AND follower_id = ?",
+                                groupId,
+                                "U_srv_f"))
+                .isEqualTo(sponsorId);
+    }
+
+    /**
+     * <b>已过期的轮次不能再分享、建联或加入</b>。
+     *
+     * <p>轮次状态仍是 {@code RUNNING}（过期治理属 PR-5，尚未把它推到 {@code EXPIRED}），只有 {@code expire_time}
+     * 过了。若「进行中」只判状态，本类的三条写路径都会放行 —— 而 {@code selectRunning} 那一侧早已认为这轮不可用。<b>一个类里两套「进行中」定义</b>。
+     *
+     * <p>放行的后果不止是多几条关系：关系有效期取自轮次（{@code relationExpireOf}），建出来的关系 <b>诞生即过期</b>，而没有任何机制会再看它一眼。
+     *
+     * <p>三条路径逐一断言 —— 只验其中一条时，另两条的缺口照样在。
+     */
+    @Test
+    void expiredRoundRejectsShareConnectAndJoin() {
+        String sponsorId = "U_sp_exp";
+        String groupId = newGroup(sponsorId);
+        // 先在未过期时建一条 INVITED，供过期后的建联使用 —— 否则建联返回 false 是因为没关系，
+        // 而不是因为轮次过期，用例就测不到它声称的那道闸
+        fissionService.shareInvite(shareReq(groupId, sponsorId, "U_exp_f"));
+
+        // 过期判定用库时钟，与 expire_time 同侧
+        fissionJdbc.update(
+                "UPDATE fission_group SET expire_time = DATE_SUB(NOW(3), INTERVAL 1 SECOND)"
+                        + " WHERE group_id = ?",
+                groupId);
+
+        assertThatThrownBy(
+                        () -> fissionService.shareInvite(shareReq(groupId, sponsorId, "U_exp_g")))
+                .as("过期轮次不得再分享")
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.GROUP_NOT_RUNNING);
+
+        assertThatThrownBy(() -> fissionService.followerConnect(groupId, "U_exp_f"))
+                .as("过期轮次不得再建联")
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.GROUP_NOT_RUNNING);
+
+        assertThatThrownBy(
+                        () ->
+                                fissionService.followerJoin(
+                                        joinReq(groupId, "U_exp_f", "OUT_BIZ_E", "OUT_FLOW_E")))
+                .as("过期轮次不得再加入")
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.GROUP_NOT_RUNNING);
+
+        assertThat(relationCount(groupId, RelationStatus.CONNECTED)).as("过期后不得推进关系").isZero();
+        assertThat(relationCount(groupId, RelationStatus.JOINED)).isZero();
+        assertThat(relationCount(groupId, RelationStatus.INVITED))
+                .as("过期前建立的关系保持原状，等 PR-5 的治理处置")
+                .isEqualTo(1);
+    }
+
+    /** 已终结的裂变组不能建联 —— 与分享、加入同一道闸，缺了它三条写路径口径不一。 */
+    @Test
+    void connectIntoTerminatedGroupIsRejected() {
+        String sponsorId = "U_sp_conn_term";
+        String groupId = newGroup(sponsorId);
+        fissionService.shareInvite(shareReq(groupId, sponsorId, "U_conn_term"));
+        fissionJdbc.update(
+                "UPDATE fission_group SET status = 'DONE', active_flag = group_id"
+                        + " WHERE group_id = ?",
+                groupId);
+
+        assertThatThrownBy(() -> fissionService.followerConnect(groupId, "U_conn_term"))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.GROUP_NOT_RUNNING);
+
+        assertThat(relationCount(groupId, RelationStatus.CONNECTED))
+                .as("终结轮次里的关系不得被推进 —— PR-4 的发奖以关系状态为判据")
+                .isZero();
+    }
+
+    /**
+     * <b>幂等键跨操作复用判 4002，不静默按命中处理</b>。
+     *
+     * <p>{@code uk_idempotent} 是全局唯一键，命中只证明「这个流水号用过」，不证明「用在了同一件 事上」。此处用甲的 {@code outFlowNo}
+     * 去做乙的加入：若实现只看「命中了没有」，就会回查 <b>乙</b>的 active 关系并返回 —— 而乙那条关系仍停在 {@code INVITED}，从没被推进过。
+     *
+     * <p><b>调用方拿到一个非空 relationId，会认为加入成功。</b> 这类失效没有异常、没有错误码， 只有一条状态不对的关系 —— 正是这套代码一贯规避的静默失效。
+     *
+     * <p>断言两件事：拒绝了（4002），以及乙的关系<b>仍是 INVITED</b>。只断言异常的话，一个「拒绝前 先推进」的实现照常全绿。
+     */
+    @Test
+    void reusingOutFlowNoAcrossFollowersIsRejected() {
+        String sponsorId = "U_sp_reuse";
+        String groupId = newGroup(sponsorId);
+        fissionService.shareInvite(shareReq(groupId, sponsorId, "U_reuse_a", "U_reuse_b"));
+
+        String sharedFlowNo = "OUT_FLOW_SHARED";
+        fissionService.followerJoin(joinReq(groupId, "U_reuse_a", "OUT_BIZ_A", sharedFlowNo));
+
+        // 同一个 outFlowNo 换个徒弟再来一次：这不是重传，是两次不同的操作
+        assertThatThrownBy(
+                        () ->
+                                fissionService.followerJoin(
+                                        joinReq(groupId, "U_reuse_b", "OUT_BIZ_B", sharedFlowNo)))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.IDEMPOTENT_KEY_CONFLICT);
+
+        assertThat(
+                        str(
+                                fissionJdbc,
+                                "SELECT status FROM fission_relation WHERE group_id = ?"
+                                        + " AND follower_id = ?",
+                                groupId,
+                                "U_reuse_b"))
+                .as("被冒用流水号的那个徒弟，关系必须仍停在 INVITED —— 静默按命中处理会让调用方以为他加入了")
+                .isEqualTo(RelationStatus.INVITED.name());
+        assertThat(relationCount(groupId, RelationStatus.JOINED)).as("只有 A 真正加入了").isEqualTo(1);
+    }
+
+    /**
+     * 同一徒弟、同一流水号、<b>不同 outBizNo</b> 也判 4002。
+     *
+     * <p>{@code outBizNo} 标识一次师徒关系，{@code outFlowNo} 标识本次操作（BR-F-14/15）。两者换了 一个就不是同一件事 ——
+     * 这一条覆盖的是「徒弟对上了但关系对不上」，与上一条的失效形态不同： 上一条错在人，本条错在关系。
+     */
+    @Test
+    void reusingOutFlowNoWithDifferentOutBizNoIsRejected() {
+        String sponsorId = "U_sp_reuse2";
+        String groupId = newGroup(sponsorId);
+        String flowNo = "OUT_FLOW_SAME";
+
+        fissionService.followerJoin(joinReq(groupId, "U_reuse_c", "OUT_BIZ_C1", flowNo));
+
+        assertThatThrownBy(
+                        () ->
+                                fissionService.followerJoin(
+                                        joinReq(groupId, "U_reuse_c", "OUT_BIZ_C2", flowNo)))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.IDEMPOTENT_KEY_CONFLICT);
+
+        assertThat(opRecordCount("OUT_BIZ_C2")).as("被拒的操作不得留记录").isZero();
     }
 
     /** 已终结的裂变组不能再拉人 —— 往已结束的轮次里加徒弟，奖发给谁都不对。 */

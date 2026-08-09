@@ -364,6 +364,29 @@ class ShapeFreezeTest {
         assertThat(body).as("onMiss 不得用 retry_count 计连续查无").doesNotContain("getRetryCount()");
     }
 
+    /**
+     * 查无计数的读写两侧对 payload 用同一种表示。
+     *
+     * <p>写侧是 {@code JSON_SET}（{@code BenefitTaskMapper.setMissStreak}），列类型也是 {@code JSON}。 读侧若用正则从
+     * JSON 文本里抠数字，两侧的假设就不一致 —— 而这种不一致的失效是<b>静默</b>的： payload 加字段、或 {@code missStreak}
+     * 被写成字符串，正则匹配不上即返回 0，连续查无计数 被无声重置，阈值永远达不到，重发永不触发。没有异常、没有日志，只有一笔停在 {@code GRANT_UNKNOWN} 的单。
+     *
+     * <p>断言读侧走 JSON 解析而非正则。行为由 {@code FaultInjectionIT} 的重发用例覆盖，此处防的是 有人图省事改回正则。
+     */
+    @Test
+    void missStreakIsReadWithJsonParserNotRegex() {
+        String handler =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/task/"
+                                + "QueryGrantTaskHandler.java");
+
+        assertThat(handler)
+                .as("读侧须用 JSON 解析，与写侧的 JSON_SET 对齐")
+                .contains("readTree")
+                .doesNotContain("Pattern.compile")
+                .doesNotContain("java.util.regex");
+    }
+
     /** 组合注解自身必须指定管理器，否则上一条检查只是把裸注解换了个名字。 */
     @Test
     void eachTxAnnotationDeclaresItsTransactionManager() {

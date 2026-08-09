@@ -28,7 +28,14 @@ import org.springframework.beans.factory.annotation.Autowired;
  */
 class FissionSponsorEntryIT extends AbstractMySqlIT {
 
-    private static final String ACT = "ACT_DEMO_001";
+    /**
+     * 裂变活动，由 {@code V3091__seed_fission_activity.sql} 初始化。
+     *
+     * <p><b>不再借用 {@code ACT_DEMO_001}</b>：那是 V1090 建的 {@code play_type = 'BENEFIT_SELL'} 权益售卖活动。
+     * 借用它曾经能跑通，只因 {@code createRound} 当时只判「活动存在」—— 于是这些用例在为 「裂变组开在权益售卖活动上」这个错误行为背书。补上 {@code
+     * playType} 校验后借用即变红， 而变红是对的。
+     */
+    private static final String ACT = "ACT_FISSION_001";
 
     @Autowired private FissionService fissionService;
     @Autowired private com.mp.fission.repository.FissionGroupMapper groupMapper;
@@ -201,6 +208,58 @@ class FissionSponsorEntryIT extends AbstractMySqlIT {
                                 "SELECT round_no FROM fission_group WHERE group_id = ?",
                                 second))
                 .isEqualTo(2);
+    }
+
+    /**
+     * <b>裂变轮次不能开在权益售卖活动上</b>。
+     *
+     * <p>{@code ACT_DEMO_001} 是 V1090 建的 {@code play_type = 'BENEFIT_SELL'} 活动。只判「活动存在」时
+     * 它照样能开轮，而两个玩法的配置版本与奖励快照各不相同 —— PR-4 的双向发奖按 {@code group.config_version}
+     * 读裂变奖励配置，挂错活动时读到的是一份根本不含裂变奖励的快照。
+     *
+     * <p>本用例同时是「测试固化错误行为」的回归点：修正前裂变的全部用例都借用这个活动，绿得 心安理得。
+     */
+    @Test
+    void roundCannotBeOpenedOnNonFissionActivity() {
+        assertThatThrownBy(() -> fissionService.openGroup("ACT_DEMO_001", "U_wrong_play"))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.INVALID_PARAM);
+
+        assertThat(
+                        count(
+                                fissionJdbc,
+                                "SELECT COUNT(*) FROM fission_group WHERE sponsor_id = ?",
+                                "U_wrong_play"))
+                .as("拒绝须与不建轮同时成立")
+                .isZero();
+    }
+
+    /**
+     * <b>不可用的活动不能开轮</b>（1601）。
+     *
+     * <p>可用性由库判定状态与时间窗，与 {@code decideQualification} 同一口径。不判则已下线、已结束、 尚未开始的活动照样能开轮 ——
+     * 而轮次一旦建出来，后续的分享与加入都会接受它。
+     *
+     * <p>走 {@code openGroup} 而非 {@code sponsorQuery}：后者会先被资格决策的活动可用性那一维挡下， 测不到 {@code createRound}
+     * 自己这道闸。<b>两条路都要能挡</b> —— 判据放在 {@code createRound} 正是因为它是两条路的交汇处。
+     */
+    @Test
+    void roundCannotBeOpenedOnUnavailableActivity() {
+        activityJdbc.update(
+                "UPDATE marketing_activity SET status = 'ENDED' WHERE activity_id = ?", ACT);
+
+        assertThatThrownBy(() -> fissionService.openGroup(ACT, "U_offline"))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.NO_AVAILABLE_ACTIVITY);
+
+        assertThat(
+                        count(
+                                fissionJdbc,
+                                "SELECT COUNT(*) FROM fission_group WHERE sponsor_id = ?",
+                                "U_offline"))
+                .isZero();
     }
 
     /** 轮次查询的历史开关默认关闭（BR-F-05）。 */

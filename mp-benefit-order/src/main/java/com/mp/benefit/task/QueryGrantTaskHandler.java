@@ -1,5 +1,10 @@
 package com.mp.benefit.task;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.mp.api.reward.dto.GrantItemResult;
 import com.mp.api.reward.dto.GrantRewardResp;
 import com.mp.api.reward.service.RewardService;
@@ -8,8 +13,6 @@ import com.mp.benefit.repository.BenefitTaskMapper;
 import com.mp.benefit.service.OrderTxService;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.enums.TaskType;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -33,6 +36,10 @@ public class QueryGrantTaskHandler implements TaskHandler {
 
     /** 连续查无达此次数才重发。取 3 = 短退避序列跑完一轮 */
     static final int MISS_THRESHOLD = 3;
+
+    /** 与 {@code BenefitOrderServiceImpl.JSON} 同配置：忽略未知字段，使 payload 加字段不导致解析失败。 */
+    private static final ObjectMapper JSON =
+            JsonMapper.builder().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
 
     private final RewardService rewardService;
     private final OrderTxService tx;
@@ -62,14 +69,44 @@ public class QueryGrantTaskHandler implements TaskHandler {
                 .orElse(null);
     }
 
-    /** 从 payload 读连续查无次数，缺失即 0。 */
+    /**
+     * 从 payload 读连续查无次数，缺失即 0。
+     *
+     * <p><b>读写两侧必须对 payload 用同一种表示</b>：写侧是 {@code JSON_SET}（{@link
+     * BenefitTaskMapper#setMissStreak}），列类型也是 {@code JSON}，读侧就不能用正则去抠数字。
+     *
+     * <p>原先的正则实现今天能跑通，但它的失效是<b>静默</b>的：payload 里再加字段、或 {@code missStreak} 被写成字符串/浮点，正则匹配不上就返回
+     * 0，连续查无计数被无声重置， {@link #MISS_THRESHOLD} 永远达不到，重发永不触发 —— 而重发正是 {@code TIMEOUT_BEFORE_COMMIT}
+     * 那一类故障唯一的收敛通路。没有异常、没有日志，只有一笔停在 {@code GRANT_UNKNOWN} 的单。
+     *
+     * <p>解析失败判 0 而非抛出：读不出计数不该让整个查单任务失败 —— 那会把一个计数问题升级成 收敛中断。但<b>要留日志</b>，与「静默返回 0」区别开。
+     */
     private static int currentMissStreak(BenefitTask task) {
         String payload = task.getPayload();
-        if (payload == null || !payload.contains("missStreak")) {
+        if (payload == null || payload.isBlank()) {
             return 0;
         }
-        Matcher m = Pattern.compile("\"missStreak\"\\s*:\\s*(\\d+)").matcher(payload);
-        return m.find() ? Integer.parseInt(m.group(1)) : 0;
+        try {
+            JsonNode node = JSON.readTree(payload).path("missStreak");
+            // 缺字段是正常的：任务入队时 payload 为 "{}"，首次查无才写入
+            if (node.isMissingNode() || node.isNull()) {
+                return 0;
+            }
+            if (!node.canConvertToInt()) {
+                log.warn(
+                        "missStreak is not an int, treat as 0, taskNo={}, value={}",
+                        task.getTaskNo(),
+                        node);
+                return 0;
+            }
+            return node.asInt();
+        } catch (JsonProcessingException e) {
+            log.warn(
+                    "payload is not valid JSON, treat missStreak as 0, taskNo={}",
+                    task.getTaskNo(),
+                    e);
+            return 0;
+        }
     }
 
     @Override
