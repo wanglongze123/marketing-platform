@@ -64,7 +64,7 @@ public class MockPayServiceImpl implements MockPayService {
         PayCreateResp resp = new PayCreateResp();
         resp.setRetStatus(RetStatus.SUCCESS);
         resp.setTradeNo("PAY" + seq.incrementAndGet() + "_" + req.getOutTradeNo());
-        ledger.onCreated(req.getOutTradeNo());
+        ledger.onCreated(req.getOutTradeNo(), resp.getTradeNo());
         log.info(
                 "mock pay created, outTradeNo={}, amount={}, tradeNo={}",
                 req.getOutTradeNo(),
@@ -189,6 +189,17 @@ public class MockPayServiceImpl implements MockPayService {
         }
         log.info("mock refund query found nothing, refundNo={}", refundNo);
         return refundResp(RetStatus.UNKNOWN, null, null);
+    }
+
+    /**
+     * 支付方的对账文件，供对账第 8 项。
+     *
+     * <p><b>不受注入模式影响</b>：注入模拟的是「这次调用能不能拿到结果」，而对账文件在真实链路里是 T+1
+     * 落盘推送的，与在线接口的可用性无关。让它随注入一起失败会把两种故障混为一谈。
+     */
+    @Override
+    public java.util.List<com.mp.api.mock.dto.PaidTradeRow> listPaidTrades() {
+        return ledger.listPaidTrades();
     }
 
     private static PayRefundResp refundResp(RetStatus status, String orderNo, String errorCode) {

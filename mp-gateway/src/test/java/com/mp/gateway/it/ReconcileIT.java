@@ -32,11 +32,19 @@ class ReconcileIT extends AbstractMySqlIT {
     @Autowired private ProviderLedger providerLedger;
     @Autowired private com.mp.api.reward.service.RewardService rewardService;
 
+    /** 第 8 项用例在支付方账本上造的幽灵单。{@link #reset} 按它清理 */
+    private static final String[] GHOST_TRADES = {"GHOST_ORDER_rec8", "GHOST_ORDER_rec8b"};
+
     @AfterEach
     void reset() {
         injector.reset();
         providerLedger.clearFailingProducts();
         providerLedger.clearDelays();
+        // 幽灵单留在进程内账本里的话，此后每个跑对账的用例都会多检出它一次 ——
+        // 共享状态上的绝对值断言，通过与否取决于执行顺序
+        for (String ghost : GHOST_TRADES) {
+            payLedger.forget(ghost);
+        }
     }
 
     private String paidOrder(String tag) {
@@ -371,6 +379,73 @@ class ReconcileIT extends AbstractMySqlIT {
         assertThat(report.diffOf(ReconcileItem.AMOUNT_MISMATCH)).isPositive();
         assertThat(report.repairedOf(ReconcileItem.AMOUNT_MISMATCH)).as("禁止自动改单").isZero();
         assertThat(orderField("pay_amount", bizNo)).as("金额不得被对账改回去").isEqualTo("1");
+    }
+
+    /**
+     * 第 8 项：<b>支付方已收款而本地无单，检出并告警</b>。
+     *
+     * <p><b>这是十五项里唯一「从支付方往平台看」的一项</b>。其余全是拿本地的单去比对下游 —— 那种方向
+     * 发现不了「平台自身没有任何记录的那笔单」：建单事务提交后、支付通知到达前进程崩溃，或通知永久丢失， 本地没有任何线索可查，前七项一条都覆盖不到。
+     *
+     * <p>用例直接在支付方账本上记一笔平台从未建过的单（{@code markPaid} 一个不存在的 {@code outTradeNo}）， 这正是那个场景在 mock 上的等价物。
+     */
+    @Test
+    void detectsPaidTradeWithoutLocalOrder() {
+        int before = benefitOrderService.reconcile().diffOf(ReconcileItem.PAY_WITHOUT_ORDER);
+
+        // 支付方收了一笔平台没有记录的钱
+        payLedger.markPaid(GHOST_TRADES[0], 9900L);
+
+        int after = benefitOrderService.reconcile().diffOf(ReconcileItem.PAY_WITHOUT_ORDER);
+
+        assertThat(after - before).as("支付方有、本地无 —— 前七项都发现不了它，只有本项能").isEqualTo(1);
+    }
+
+    /**
+     * 第 8 项：<b>只告警，不自动补记主单</b>。
+     *
+     * <p>技术方案原文写的是「补记主单 + 建履约任务」，实施时降级为只告警：对账文件只有 {@code outTradeNo} / {@code tradeNo} /
+     * 金额三个字段，而补记主单要 {@code activity_id} / {@code sku_id} / {@code price_snapshot} / {@code
+     * benefit_snapshot} 一整套业务数据，全都只能填占位值 —— 而<b>凭占位值造出来的单会被后续履约当成真单发奖</b>，比「本地无单」本身更糟。
+     *
+     * <p>与第 3 项「不自动补发」、第 5 项「禁止自动改单」同一条判断：正确值取决于历史，猜不出来就只告警。
+     */
+    @Test
+    void paidTradeWithoutLocalOrderIsNotAutoRepaired() {
+        payLedger.markPaid(GHOST_TRADES[1], 9900L);
+
+        ReconcileReport report = benefitOrderService.reconcile();
+
+        assertThat(report.diffOf(ReconcileItem.PAY_WITHOUT_ORDER)).as("须检出").isPositive();
+        assertThat(report.repairedOf(ReconcileItem.PAY_WITHOUT_ORDER))
+                .as("禁止自动补单 —— 占位值造出来的单会被履约当成真单发奖")
+                .isZero();
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM play_biz_record WHERE play_biz_record_no = ?",
+                                GHOST_TRADES[1]))
+                .as("不得无中生有造出主单")
+                .isZero();
+        assertThat(
+                        count(
+                                benefitJdbc,
+                                "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ?",
+                                GHOST_TRADES[1]))
+                .as("更不得为一笔来源不明的收款建履约任务")
+                .isZero();
+    }
+
+    /** 正常单（支付方与本地都有）不算第 8 项差异 —— 否则每一笔正常交易每轮报一次。 */
+    @Test
+    void normalPaidOrderIsNotAPayWithoutOrderDiff() {
+        int before = benefitOrderService.reconcile().diffOf(ReconcileItem.PAY_WITHOUT_ORDER);
+
+        paidOrder("rec8_normal");
+
+        int after = benefitOrderService.reconcile().diffOf(ReconcileItem.PAY_WITHOUT_ORDER);
+
+        assertThat(after - before).as("本地有单即不是差异 —— 判反了会让每笔正常交易都告警，哨兵被噪音淹没").isZero();
     }
 
     /**

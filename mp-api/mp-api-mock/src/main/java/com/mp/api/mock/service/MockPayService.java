@@ -1,9 +1,11 @@
 package com.mp.api.mock.service;
 
+import com.mp.api.mock.dto.PaidTradeRow;
 import com.mp.api.mock.dto.PayCloseResp;
 import com.mp.api.mock.dto.PayCreateReq;
 import com.mp.api.mock.dto.PayCreateResp;
 import com.mp.api.mock.dto.PayRefundResp;
+import java.util.List;
 
 /**
  * mock 支付。
@@ -45,4 +47,16 @@ public interface MockPayService {
      * 而重发一笔可能已成功的退款就是重复退款。与发放侧查单同一处置。
      */
     PayRefundResp queryRefund(String refundNo);
+
+    /**
+     * 拉取支付方的对账文件：本方已收款的全部交易。供对账第 8 项「支付成功本地无单」。
+     *
+     * <p><b>这是唯一一条「从支付方往平台看」的接口</b>，其余接口都是平台拿着自己的单号去问。方向 反过来才能发现<b>平台自身没有任何记录的那笔单</b> ——
+     * 建单事务提交后、支付通知到达前进程崩溃， 或通知永久丢失，本地就没有任何线索可查。前七项对账全是「按本地的单去比对」，一条都覆盖不到它。
+     *
+     * <p><b>真实形态是 T+1 的对账文件</b>（支付方每日推送或提供下载），本接口是它在 V3 的等价物。 形状保持一致：一次给出一段时间内的全部已收款流水，由平台自己逐笔比对。
+     *
+     * <p>返回的三个字段即真实对账文件的字段集 —— 支付方不知道活动、SKU、份数，故第 8 项只能告警 不能补单，理由见 {@link PaidTradeRow}。
+     */
+    List<PaidTradeRow> listPaidTrades();
 }

@@ -31,9 +31,21 @@ public class PayLedger {
         CLOSED
     }
 
+    /** 支付方交易号，键为 {@code outTradeNo}。对账文件要给出它 —— 平台侧的 {@code trade_no} 与之比对 */
+    private final Map<String, String> tradeNoByOutTradeNo = new ConcurrentHashMap<>();
+
+    /** 实付金额，键为 {@code outTradeNo}。同样是对账文件的字段 */
+    private final Map<String, Long> paidAmountByOutTradeNo = new ConcurrentHashMap<>();
+
     /** 下单即建账。重复下单不覆盖 —— 已支付的单不能被一次重复下单打回待支付。 */
     public void onCreated(String outTradeNo) {
         states.putIfAbsent(outTradeNo, State.CREATED);
+    }
+
+    /** 下单即记交易号，供对账文件带出。与 {@link #onCreated} 分开，是因为交易号由 mock 自己生成 */
+    public void onCreated(String outTradeNo, String tradeNo) {
+        onCreated(outTradeNo);
+        tradeNoByOutTradeNo.putIfAbsent(outTradeNo, tradeNo);
     }
 
     /**
@@ -43,6 +55,34 @@ public class PayLedger {
      */
     public void markPaid(String outTradeNo) {
         states.put(outTradeNo, State.PAID);
+    }
+
+    /** 标记已支付并记下实付金额。对账文件要带金额，故收款时就得存下来。 */
+    public void markPaid(String outTradeNo, long payAmount) {
+        markPaid(outTradeNo);
+        paidAmountByOutTradeNo.put(outTradeNo, payAmount);
+    }
+
+    /**
+     * 支付方的对账文件：本方已收款的全部交易。
+     *
+     * <p><b>判据取账本自己的 {@code PAID} 状态</b>，与关单、退款一致 —— 支付方只报它自己记着的事。 平台知不知道这笔单，对本方法没有影响，<b>而那正是第 8
+     * 项要发现的</b>：一笔支付方记了、平台没记 的交易，只有从这个方向看才看得见。
+     *
+     * <p>交易号缺失时回填一个由 {@code outTradeNo} 派生的值：mock 的部分入口（测试直接 {@code markPaid}） 不经过 {@code
+     * createPay}，没有生成过交易号。真实支付方一定有，此处不让它为空 —— 空值会让比对 逻辑多一条与真实环境不对应的分支。
+     */
+    public java.util.List<com.mp.api.mock.dto.PaidTradeRow> listPaidTrades() {
+        return states.entrySet().stream()
+                .filter(e -> e.getValue() == State.PAID)
+                .map(
+                        e ->
+                                new com.mp.api.mock.dto.PaidTradeRow(
+                                        e.getKey(),
+                                        tradeNoByOutTradeNo.getOrDefault(
+                                                e.getKey(), "PAY_" + e.getKey()),
+                                        paidAmountByOutTradeNo.getOrDefault(e.getKey(), 0L)))
+                .toList();
     }
 
     /**
@@ -106,8 +146,22 @@ public class PayLedger {
         return refundOrderNoByRefundNo.size();
     }
 
+    /**
+     * 移除某笔交易的全部账本痕迹。供测试清理自己造的「支付方有、本地无」的单。
+     *
+     * <p>不提供也能测，但那笔幽灵单会留在进程内账本里，此后<b>每一个跑对账的用例都会多检出它一次</b> —— 与 {@code ReconcileScanIndexIT}
+     * 要清理塞进库的行是同一件事：共享状态上的绝对值断言，通过与否 取决于执行顺序。
+     */
+    public void forget(String outTradeNo) {
+        states.remove(outTradeNo);
+        tradeNoByOutTradeNo.remove(outTradeNo);
+        paidAmountByOutTradeNo.remove(outTradeNo);
+    }
+
     public void clear() {
         states.clear();
+        tradeNoByOutTradeNo.clear();
+        paidAmountByOutTradeNo.clear();
         refundOrderNoByRefundNo.clear();
         refundAttemptsByRefundNo.clear();
     }

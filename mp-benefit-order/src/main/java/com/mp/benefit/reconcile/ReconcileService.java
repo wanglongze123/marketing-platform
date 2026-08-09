@@ -2,6 +2,8 @@ package com.mp.benefit.reconcile;
 
 import com.mp.api.benefit.dto.ReconcileItem;
 import com.mp.api.benefit.dto.ReconcileReport;
+import com.mp.api.mock.dto.PaidTradeRow;
+import com.mp.api.mock.service.MockPayService;
 import com.mp.api.reward.dto.GrantRewardResp;
 import com.mp.api.reward.service.RewardService;
 import com.mp.benefit.repository.BenefitTaskMapper;
@@ -11,6 +13,7 @@ import com.mp.common.enums.TaskType;
 import com.mp.common.util.BizNoGenerator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -55,6 +58,14 @@ public class ReconcileService {
     @Autowired private RewardService rewardService;
 
     /**
+     * 支付方，第 8 项拉对账文件用。
+     *
+     * <p><b>本类调下游 RPC，故它不能带事务注解</b>（《开发规范》§7.4）—— 这也是 {@code ShapeFreezeTest} 有一条 专门断言本类不带
+     * {@code @BenefitTx} 的原因。
+     */
+    @Autowired private MockPayService mockPayService;
+
+    /**
      * 差异判定的时间下界（秒）。
      *
      * <p><b>它不是性能调优参数，而是「差异」这个概念的定义的一部分</b>：对账查的是「长期未收敛」。 取 0 则一笔刚下单还没来得及履约的单立刻被判为差异 ——
@@ -89,6 +100,7 @@ public class ReconcileService {
         run(report, ReconcileItem.CLOSED_HOLDING_STOCK, this::repairClosedHoldingStock);
         run(report, ReconcileItem.STUCK_CLOSING, this::repairStuckClosing);
         run(report, ReconcileItem.GRANT_MISSING_DOWNSTREAM, this::checkGrantMissingDownstream);
+        run(report, ReconcileItem.PAY_WITHOUT_ORDER, this::checkPayWithoutOrder);
         run(report, ReconcileItem.AMOUNT_MISMATCH, this::checkAmountMismatch);
         run(report, ReconcileItem.STOCK_MISMATCH, this::checkStockMismatch);
         run(report, ReconcileItem.QUOTA_MISMATCH, this::checkQuotaMismatch);
@@ -293,9 +305,46 @@ public class ReconcileService {
         return new Outcome(diff, 0);
     }
 
+    /**
+     * 第 8 项：支付方已收款而本地无单 → <b>P0 告警，不自动补记主单</b>。
+     *
+     * <p><b>这是十五项里唯一「从支付方往平台看」的一项</b>，其余全是拿本地的单去比对下游。方向反过来 才能发现<b>平台自身没有任何记录的那笔单</b> ——
+     * 建单事务提交后、支付通知到达前进程崩溃，或通知永久 丢失，本地没有任何线索可查，前七项一条都覆盖不到它。
+     *
+     * <p><b>不自动补记，与技术方案原文写的「补记主单 + 建履约任务」不同</b>（实施时降级）：对账文件只有 {@code outTradeNo} / {@code tradeNo}
+     * / 金额三个字段，而补记主单要 {@code activity_id} / {@code sku_id} / {@code price_snapshot} / {@code
+     * benefit_snapshot} 一整套业务数据，全都只能填占位值 —— 而<b>凭占位值造出来的单会被后续履约当成真单发奖</b>，比「本地无单」本身更糟。
+     *
+     * <p>与第 3 项、第 5 项同一条判断：正确值取决于历史，猜不出来就只告警。
+     *
+     * <p>比对分批做，且<b>只查一次库</b>（{@code selectExistingBizNos} 取差集），不逐笔查 —— 对账文件是支付方
+     * 一天的全部流水，逐笔查会让本项成为最慢的一项。
+     */
+    private Outcome checkPayWithoutOrder() {
+        List<PaidTradeRow> paid = mockPayService.listPaidTrades();
+        int diff = 0;
+        for (int i = 0; i < paid.size(); i += BATCH_SIZE) {
+            List<PaidTradeRow> batch = paid.subList(i, Math.min(i + BATCH_SIZE, paid.size()));
+            List<String> bizNos = batch.stream().map(PaidTradeRow::outTradeNo).toList();
+            Set<String> existing = Set.copyOf(reconcileMapper.selectExistingBizNos(bizNos));
+            for (PaidTradeRow row : batch) {
+                if (!existing.contains(row.outTradeNo())) {
+                    log.error(
+                            "reconcile found paid trade without local order, outTradeNo={},"
+                                    + " tradeNo={}, amount={} — 禁止自动补单，须人工核",
+                            row.outTradeNo(),
+                            row.tradeNo(),
+                            row.payAmount());
+                    diff++;
+                }
+            }
+        }
+        return new Outcome(diff, 0);
+    }
+
     /** 第 5 项：金额不一致 → P0 告警，<b>禁止自动改单</b>。 */
     private Outcome checkAmountMismatch() {
-        List<String> bizNos = reconcileMapper.scanAmountMismatch(SCAN_LIMIT);
+        List<String> bizNos = reconcileMapper.scanAmountMismatch(staleSeconds, SCAN_LIMIT);
         for (String bizNo : bizNos) {
             log.error("reconcile found amount mismatch, bizNo={} — 禁止自动改单，须人工核", bizNo);
         }

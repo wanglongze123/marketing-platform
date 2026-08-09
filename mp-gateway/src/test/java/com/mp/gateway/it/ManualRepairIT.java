@@ -324,4 +324,38 @@ class ManualRepairIT extends AbstractMySqlIT {
                 .isInstanceOf(BizException.class)
                 .hasMessageContaining("无原幂等键");
     }
+
+    /**
+     * <b>动作失败，审计仍留痕</b>（BR-C-27）。
+     *
+     * <p>「重试发奖」在无发奖记录时抛 {@code BizException}，而那次抛出发生在<b>落审计之后</b> ——
+     * 审计行必须还在：人要能看到「有人点过这个按钮，没成」。看不到的话，一次失败的人工处置在库里 与「从没人碰过」完全一样，追责与复盘都无从下手。
+     *
+     * <p><b>这条同时锁住「这个类不该加 {@code @BenefitTx}」</b>。它看起来像漏了事务注解，但 {@code @BenefitTx} 带 {@code
+     * rollbackFor = Exception.class}，加上之后这里的审计行会随异常一起回滚，本用例立刻变红 —— 静态守卫（{@code
+     * ShapeFreezeTest}）挡的是注解本身，这条挡的是它造成的行为。
+     *
+     * <p>审计与动作不同事务，正是因为两者的失败处置相反：动作失败要回滚，审计失败不该连累动作， 而审计更不该被动作的失败抹掉。
+     */
+    @Test
+    void auditSurvivesFailedAction() {
+        String bizNo = benefitOrderService.createTrade(newTradeReq("mr_auditkeep")).getBizNo();
+
+        assertThatThrownBy(
+                        () ->
+                                benefitOrderService.manualRepair(
+                                        req(bizNo, RepairAction.RETRY_GRANT, "TK_AK")))
+                .isInstanceOf(BizException.class);
+
+        assertThat(manualRepairOpCount(bizNo)).as("动作失败了，但「有人点过」这件事必须留下").isEqualTo(1);
+        assertThat(
+                        str(
+                                benefitJdbc,
+                                "SELECT operator FROM play_op_record WHERE play_biz_record_no = ?"
+                                        + " AND op_type = ?",
+                                bizNo,
+                                OpType.MANUAL_REPAIR.name()))
+                .as("操作人须可追溯 —— 审计的用处正在于此")
+                .isEqualTo("cs_carol");
+    }
 }

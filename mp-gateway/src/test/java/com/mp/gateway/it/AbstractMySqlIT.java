@@ -96,6 +96,8 @@ abstract class AbstractMySqlIT {
         registry.add("mp.pay-notify.secret", () -> "it-pay-notify-secret");
         // 供应方通知密钥再与前两把取不同值 —— 三把同值时把它们用反不会有任何用例变红
         registry.add("mp.provider-notify.secret", () -> "it-provider-notify-secret");
+        // 本平台商户号。用例构造「他人商户的通知」时取与 OWN_MERCHANT_ID 不同的值
+        registry.add("mp.pay.merchant-id", () -> OWN_MERCHANT_ID);
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
 
@@ -132,6 +134,14 @@ abstract class AbstractMySqlIT {
 
     /** seed SKU 售价，分 */
     protected static final long SALE_PRICE = 9900L;
+
+    /**
+     * 本平台在支付方的商户号，与 {@code mp.pay.merchant-id} 同源。
+     *
+     * <p>抽成常量而非在两处各写一遍字面量：{@link #newPayCallback} 造的通知必须属于本商户，配置与它 取值不同的话每一条支付用例都会被 {@code 1731} 拒掉
+     * —— 而那是测试装配错了，不是被测代码错了。
+     */
+    protected static final String OWN_MERCHANT_ID = "MCH_IT";
 
     @Autowired protected BenefitOrderService benefitOrderService;
 
@@ -206,7 +216,7 @@ abstract class AbstractMySqlIT {
         // 线上关闭通知因此全被判 1731，而测试全绿
         req.setPayAmount("SUCCESS".equals(payStatus) ? SALE_PRICE : 0L);
         req.setCurrency("CNY");
-        req.setMerchantId("MCH_DEMO");
+        req.setMerchantId(OWN_MERCHANT_ID);
         req.setSign(payNotifySigner.sign(req.signFields()));
         return req;
     }
