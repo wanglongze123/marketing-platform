@@ -4,10 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.mp.api.benefit.dto.ReconcileItem;
 import com.mp.api.benefit.dto.ReconcileReport;
+import com.mp.api.benefit.dto.RevokeAdmitReq;
 import com.mp.api.mock.dto.FaultMode;
 import com.mp.common.enums.GrantStatus;
 import com.mp.common.enums.RefundStatus;
 import com.mp.common.enums.TaskType;
+import com.mp.common.util.IdempotentKeys;
 import com.mp.mock.fault.FaultInjector;
 import com.mp.mock.fault.PayLedger;
 import com.mp.mock.fault.ProviderLedger;
@@ -60,6 +62,19 @@ class ReconcileIT extends AbstractMySqlIT {
                 "SELECT COUNT(*) FROM benefit_task WHERE biz_no = ? AND task_type = ?",
                 bizNo,
                 type.name());
+    }
+
+    /** 已发放并走完退款准入的单，主单停在 {@code REVOKING}，可直接调 {@code createRefund}。 */
+    private String admittedRefundOrder(String tag, String refundReqNo) {
+        String bizNo = paidOrder(tag);
+        runScheduler();
+        RevokeAdmitReq req = new RevokeAdmitReq();
+        req.setBizNo(bizNo);
+        req.setRefundReqNo(refundReqNo);
+        req.setOperator("cs_probe");
+        req.setReason("对账用例");
+        benefitOrderService.revokeAndAdmit(req);
+        return bizNo;
     }
 
     // ------------------------------------------------------------------
@@ -446,6 +461,97 @@ class ReconcileIT extends AbstractMySqlIT {
         int after = benefitOrderService.reconcile().diffOf(ReconcileItem.PAY_WITHOUT_ORDER);
 
         assertThat(after - before).as("本地有单即不是差异 —— 判反了会让每笔正常交易都告警，哨兵被噪音淹没").isZero();
+    }
+
+    /**
+     * 第 4 项：<b>{@code REFUNDING} 悬挂 + 查单任务丢失 → 补 {@code QUERY_REFUND}，单子收敛</b>。
+     *
+     * <p><b>这一支首版不存在</b>：{@code repairUnresolvedOps} 只判 {@code CLOSING} 与 {@code GRANT_UNKNOWN}，
+     * 而扫描扫的是全部非终态操作记录 —— 退款链路的悬挂被扫了出来却没有任何补建分支。
+     *
+     * <p>那个失效形态<b>比「没扫到」更糟</b>：{@code diffs} 有值而 {@code repaired} 恒空，监控上告警是亮的、
+     * 看起来对账在正常工作，而那条告警永远不会消失。没扫到至少还有人怀疑覆盖不全。
+     *
+     * <p>断言落在<b>最终状态</b>而不只是任务条数：补了任务但单子推不动，等于没修。
+     */
+    @Test
+    void detectsAndRepairsUnresolvedRefund() {
+        String bizNo = admittedRefundOrder("rec_unrf", "RR_unrf");
+
+        injector.setPayMode(FaultMode.TIMEOUT_AFTER_COMMIT);
+        benefitOrderService.createRefund(bizNo, "RR_unrf");
+        injector.reset();
+        assertThat(orderField("refund_status", bizNo))
+                .as("前提：单子须停在 REFUNDING")
+                .isEqualTo(RefundStatus.REFUNDING.name());
+
+        // 模拟查单任务丢失（宕机、人为误删、DEAD 后被清理）
+        benefitJdbc.update(
+                "DELETE FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.QUERY_REFUND.name());
+
+        ReconcileReport report = benefitOrderService.reconcile();
+
+        assertThat(report.repairedOf(ReconcileItem.OP_UNRESOLVED))
+                .as("检出还不够，必须真的补出任务 —— 只检出不修的告警永远不会消失")
+                .isPositive();
+        assertThat(taskCount(bizNo, TaskType.QUERY_REFUND)).as("须补回查单任务").isEqualTo(1);
+        assertThat(
+                        str(
+                                benefitJdbc,
+                                "SELECT op_no FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                                bizNo,
+                                TaskType.QUERY_REFUND.name()))
+                .as("须复用原 refundNo —— 新造键会让下游当成一笔全新的退款")
+                .isEqualTo(IdempotentKeys.refundNo(bizNo, "RR_unrf"));
+
+        for (int i = 0; i < 3; i++) {
+            runScheduler();
+        }
+        assertThat(orderField("refund_status", bizNo))
+                .as("补了任务还要真的能推到终态，否则等于没修")
+                .isEqualTo(RefundStatus.REFUND_SUCCESS.name());
+    }
+
+    /**
+     * 第 4 项：<b>{@code REVOKING} 悬挂 + 回收任务丢失 → 补 {@code REVOKE}</b>。
+     *
+     * <p>与上一条是退款链路的两个中间态，缺任一个那一段就没有收敛通路。§6.4 要求「任何中间态都必须 同时具备准入谓词的入边与对账的一行」—— 这两条即那两行。
+     */
+    @Test
+    void detectsAndRepairsUnresolvedRevoke() {
+        String bizNo = paidOrder("rec_unrv");
+        runScheduler();
+
+        // 回收 RPC 未定 → 主单进 REVOKING
+        injector.setProviderMode(FaultMode.TIMEOUT_AFTER_COMMIT);
+        RevokeAdmitReq req = new RevokeAdmitReq();
+        req.setBizNo(bizNo);
+        req.setRefundReqNo("RR_unrv");
+        req.setOperator("cs_probe");
+        req.setReason("对账用例");
+        benefitOrderService.revokeAndAdmit(req);
+        injector.reset();
+
+        assertThat(orderField("refund_status", bizNo)).isEqualTo(RefundStatus.REVOKING.name());
+        benefitJdbc.update(
+                "DELETE FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                bizNo,
+                TaskType.REVOKE.name());
+
+        ReconcileReport report = benefitOrderService.reconcile();
+
+        assertThat(report.repairedOf(ReconcileItem.OP_UNRESOLVED)).isPositive();
+        assertThat(taskCount(bizNo, TaskType.REVOKE)).as("须补回回收任务").isEqualTo(1);
+        assertThat(
+                        str(
+                                benefitJdbc,
+                                "SELECT op_no FROM benefit_task WHERE biz_no = ? AND task_type = ?",
+                                bizNo,
+                                TaskType.REVOKE.name()))
+                .as("须复用原 revokeNo")
+                .isEqualTo(IdempotentKeys.revokeNo(bizNo, "RR_unrv"));
     }
 
     /**

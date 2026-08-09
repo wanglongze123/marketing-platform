@@ -12,6 +12,7 @@ import com.mp.common.enums.RefundStatus;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.exception.BizException;
 import com.mp.common.util.IdempotentKeys;
+import com.mp.common.util.ReqFields;
 import com.mp.mock.fault.FaultInjector;
 import com.mp.mock.fault.PayLedger;
 import com.mp.mock.fault.ProviderLedger;
@@ -435,6 +436,86 @@ class RefundAdmissionIT extends AbstractMySqlIT {
                 "SELECT COUNT(*) FROM benefit_fulfillment_record WHERE play_biz_record_no = ?"
                         + " AND revoke_no IS NOT NULL",
                 bizNo);
+    }
+
+    /**
+     * <b>超长 {@code refundReqNo} 在入口被拒，不进入退款流程</b>（幂等键长度是键契约的一部分，§4.1）。
+     *
+     * <p><b>只校验非空不够</b>：幂等键由「本地单号 + 上游取值」拼成，而上游取值的长度平台管不着。 本用例的工单号 40 字符 —— <b>比 UUID 的 36
+     * 位还短，是完全正常的取值</b>，而它会让：
+     *
+     * <ul>
+     *   <li>{@code revokeNo = bizNo + "_V_" + refundReqNo} 达到 77 字符
+     *   <li>{@code revokeItemNo}（再拼供应方）达到 88 字符
+     * </ul>
+     *
+     * <p>双双溢出 {@code VARCHAR(64)}。实测过未加校验时的行为：插入操作记录撞 {@code Data truncation}，
+     * 主单卡在中间态，退款发不出去，只能人工改库。
+     *
+     * <p><b>断言「不留痕」而不只是「抛异常」</b>：一个「先落记录再撞长度」的实现照样抛异常，而那时 库里已经有了半条记录。入口校验的意义正在于一个字节都还没写。
+     */
+    @Test
+    void overlongRefundReqNoIsRejectedAtEntry() {
+        String bizNo = grantedOrder("rf_toolong");
+        // 一个正常长度的客服工单号
+        String longReq = "TICKET-2026-08-09-CUSTOMER-SERVICE-00001";
+        assertThat(longReq).hasSize(40);
+        // 前提：这个取值确实会让键溢出。不调 IdempotentKeys.revokeNo 来算 ——
+        // 它自己就会抛（校验正落在派生处），照着公式量一遍即可
+        assertThat(bizNo.length() + "_V_".length() + longReq.length())
+                .as("用例前提：这个取值确实会让键溢出 VARCHAR(64)，否则本条什么也没验")
+                .isGreaterThan(ReqFields.KEY_MAX_LEN);
+
+        assertThatThrownBy(() -> admit(bizNo, longReq))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .as("须是确定的入参错误，而非撞库后的未知异常")
+                .isEqualTo(ErrorCode.INVALID_PARAM);
+
+        assertThat(orderField("refund_status", bizNo))
+                .as("入口拒绝不得推进退款态")
+                .isEqualTo(RefundStatus.NONE.name());
+        assertThat(opRecordCount(bizNo, "REVOKE_BENEFIT")).as("一个字节都不该写进库").isZero();
+    }
+
+    /**
+     * 边界值：<b>最长那把键正好用满 64 字符时放行，超一个字符即拒</b>。
+     *
+     * <p>准入会派生两把键：{@code revokeNo}（短）与每供应方一把的 {@code revokeItemNo}（长）。<b>边界由 长的那把决定</b> ——
+     * 按短的算会得到一个偏大的余量，那个取值下 {@code revokeNo} 还没超而 {@code revokeItemNo}
+     * 已经超了，用例期待抛异常却什么也没发生（首版即如此，实测判红）。
+     *
+     * <p><b>供应方名从库里读，不写死</b>：seed 权益包的供应方是 {@code PROVIDER_A} / {@code PROVIDER_B}， 而首版照着别处的注释写成了
+     * {@code COUPON_PROVIDER}（15 字符），算出的余量偏小 5 个字符，边界 因此测偏（实测判红）。读库则 seed 怎么改都不影响本条。
+     */
+    @Test
+    void keyLengthBoundaryIsExact() {
+        String bizNo = grantedOrder("rf_boundary");
+        // revokeItemNo = bizNo + "_V_" + refundReqNo + "_" + providerType，最长的一把
+        // 从本单的履约明细读 —— 那才是 revokeItemNo 实际会拼进去的值
+        String longestProvider =
+                benefitJdbc
+                        .queryForList(
+                                "SELECT DISTINCT provider_type FROM benefit_fulfillment_record"
+                                        + " WHERE play_biz_record_no = ?",
+                                String.class,
+                                bizNo)
+                        .stream()
+                        .max(java.util.Comparator.comparingInt(String::length))
+                        .orElseThrow();
+        int overhead = bizNo.length() + 3 + 1 + longestProvider.length();
+        int room = ReqFields.KEY_MAX_LEN - overhead;
+        assertThat(room).as("用例前提：还有余量可填，否则本条测不到边界").isPositive();
+
+        assertThatThrownBy(() -> admit(bizNo, "X".repeat(room + 1)))
+                .as("超一个字符即拒 —— 上限是个确定的数，不是「大概不要太长」")
+                .isInstanceOf(BizException.class);
+        assertThat(orderField("refund_status", bizNo))
+                .as("被拒时不得推进退款态")
+                .isEqualTo(RefundStatus.NONE.name());
+
+        // 正好用满照常受理 —— 上限不能顺手把合法取值也挡掉
+        assertThat(admit(bizNo, "X".repeat(room)).isAdmitted()).as("正好用满须放行").isTrue();
     }
 
     /** 把该单已发放的全部权益标为已核销 —— 布置在下游侧，平台读不到。 */
