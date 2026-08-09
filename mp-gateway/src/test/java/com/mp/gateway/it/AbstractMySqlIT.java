@@ -189,6 +189,18 @@ abstract class AbstractMySqlIT {
         return req;
     }
 
+    /**
+     * 建单入参，指定购买份数。
+     *
+     * <p><b>凭证不随份数变</b>：{@code preConsult} 不接收 {@code quantity}（咨询阶段还没有份数这个概念）， 故 {@code dealPrice}
+     * 与服务端重算价比的一直是<b>单价</b> —— 份数只影响 {@code order_amount}。
+     */
+    protected CreateTradeReq newTradeReq(String tag, int quantity) {
+        CreateTradeReq req = newTradeReq(tag);
+        req.setQuantity(quantity);
+        return req;
+    }
+
     /** 走真实签发链路取一张凭证。 */
     protected String consultToken(String userId, String activityId, String skuId) {
         PreConsultReq req = new PreConsultReq();
@@ -214,11 +226,28 @@ abstract class AbstractMySqlIT {
         // 只有收款通知带金额。FAILED / CLOSED 说的是「这笔没收成」，真实支付平台在这两类
         // 通知里不带金额或带 0 —— 一律填全额会掩盖「平台对未收款通知也做金额校验」这类缺陷，
         // 线上关闭通知因此全被判 1731，而测试全绿
-        req.setPayAmount("SUCCESS".equals(payStatus) ? SALE_PRICE : 0L);
+        req.setPayAmount("SUCCESS".equals(payStatus) ? orderAmountOf(bizNo) : 0L);
         req.setCurrency("CNY");
         req.setMerchantId(OWN_MERCHANT_ID);
         req.setSign(payNotifySigner.sign(req.signFields()));
         return req;
+    }
+
+    /**
+     * 本单的应付金额，供支付通知填 {@code payAmount}。
+     *
+     * <p><b>不用 {@code SALE_PRICE} 常量</b>：那是<b>单价</b>，而应付 = 单价 × 份数。多份订单下两者不等， 通知会被金额校验判成 {@code
+     * 1731}（实测确认）—— 而那是测试装配错了，不是被测代码错了。
+     *
+     * <p>查不到单时回退到单价：少数用例给的是尚未建单的 {@code bizNo}（如验签用例造的伪造通知）。
+     */
+    private long orderAmountOf(String bizNo) {
+        Long amount =
+                benefitJdbc.queryForObject(
+                        "SELECT order_amount FROM play_biz_record WHERE play_biz_record_no = ?",
+                        Long.class,
+                        bizNo);
+        return amount == null ? SALE_PRICE : amount;
     }
 
     /**

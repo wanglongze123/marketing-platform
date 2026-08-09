@@ -76,14 +76,17 @@ class BranchRejectionIT extends AbstractMySqlIT {
     // 前者才是原用例真正想守住的东西（已支付的单不被改回），只是当年只能在入口处实现。
 
     /**
-     * 标准 14：quantity != 1 被拒绝且不建单。
+     * 标准 14：<b>越界的 quantity 被拒绝且不建单</b>。
      *
-     * <p>字段保留是形状冻结，但值必须校验。默默按 1 处理会让调用方付一份钱得一份权益且无报错 —— 这类「不报错的错」在对账时表现为金额对得上、权益给少了，最难追。
+     * <p>字段保留是形状冻结，但值必须校验。默默按 1 处理会让调用方付三份钱得一份权益且无报错 —— 这类「不报错的错」在对账时表现为金额对得上、权益给少了，最难追。
+     *
+     * <p><b>V3 放开多份购买后，本条守的从「必须等于 1」变成「必须在合法区间内」</b>：原用例取 3 作为非法值，而 3 现在是合法份数。取 0 ——
+     * 它在任何版本下都非法，且是最容易被漏掉的那个 （下界比上界更少被想到，而 0 份订单会占 0 库存、收 0 元钱）。
      */
     @Test
-    void quantityOtherThanOneIsRejectedWithoutCreatingOrder() {
+    void quantityOutOfRangeIsRejectedWithoutCreatingOrder() {
         CreateTradeReq req = newTradeReq("qty3");
-        req.setQuantity(3);
+        req.setQuantity(0);
 
         assertThatThrownBy(() -> benefitOrderService.createTrade(req))
                 .isInstanceOf(BizException.class)
