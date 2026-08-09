@@ -46,9 +46,14 @@ class MultiDataSourceIT extends AbstractMySqlIT {
                 "2101",
                 "2102",
                 "2103",
-                "2190");
-        assertHistoryOwnedBy(rewardJdbc, "db_reward", "0201", "1201", "1202", "1203");
-        assertHistoryOwnedBy(fissionJdbc, "db_fission", "3301", "3302", "3303", "3304");
+                "2190",
+                // 3101：stock_status 补 RESTORED 取值、benefit_task 补 STOCK_RESTORE 类型
+                "3101",
+                // 3102：对账扫描补索引（§6.8 第 5、9、14、15 项）
+                "3102");
+        assertHistoryOwnedBy(
+                rewardJdbc, "db_reward", "0201", "1201", "1202", "1203", "3201", "3202");
+        assertHistoryOwnedBy(fissionJdbc, "db_fission", "3301", "3302", "3303", "3304", "3305");
 
         assertThat(businessTables(activityJdbc, "db_activity"))
                 .containsExactlyInAnyOrder(
@@ -69,7 +74,11 @@ class MultiDataSourceIT extends AbstractMySqlIT {
                         "user_purchase_quota");
         // smoke_record 由 V1203 删除，不应残留
         assertThat(businessTables(rewardJdbc, "db_reward"))
-                .containsExactlyInAnyOrder("reward_grant_record", "reward_grant_item");
+                .containsExactlyInAnyOrder(
+                        "reward_grant_record",
+                        "reward_grant_item",
+                        "reward_revoke_record",
+                        "reward_notify_record");
         assertThat(businessTables(fissionJdbc, "db_fission"))
                 .containsExactlyInAnyOrder(
                         "fission_group", "fission_relation", "fission_op_record", "fission_task");

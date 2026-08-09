@@ -106,13 +106,59 @@ public interface PlayBizRecordMapper extends BaseMapper<PlayBizRecord> {
             @Param("toStatus") String toStatus);
 
     /**
+     * 退款态推进，<b>重复退款三道闸的第一道</b>（技术方案 §5.6）。
+     *
+     * <p>三道闸各挡一类，{@code refundNo} 只是其中最弱的一道：
+     *
+     * <ol>
+     *   <li><b>本谓词</b> —— 挡状态非法与并发：两个线程同时进入退款，只有一个能把 {@code NONE} 推到 {@code REVOKING}
+     *   <li>{@code uk_biz_op(bizNo, 'CREATE_REFUND', '')} —— 挡「两个不同 {@code refundNo} 退两次」（客服连点）
+     *   <li>{@code refundNo} 唯一 —— 挡与支付系统对接时的同键重传
+     * </ol>
+     *
+     * <p><b>第二道是 {@code refundNo} 挡不住的那一类</b>：客服连点两次生成两个不同的退款请求号，两把 键都是新的，唯一索引不冲突 ——
+     * 只有「一单至多一次退款操作」这条单据级约束拦得住。
+     */
+    @Update(
+            "UPDATE play_biz_record SET refund_status = #{toStatus}"
+                    + " WHERE play_biz_record_no = #{bizNo} AND refund_status = #{fromStatus}")
+    int advanceRefundStatus(
+            @Param("bizNo") String bizNo,
+            @Param("fromStatus") String fromStatus,
+            @Param("toStatus") String toStatus);
+
+    /**
+     * 退款态推进，允许多个前置态。
+     *
+     * <p>准入时前置为 {@code NONE}（首次）或 {@code REVOKE_FAILED}（回收失败后人工重试）—— 后者 必须允许，否则一笔回收失败的单永远退不了款，只能改库。
+     */
+    @Update({
+        "<script>",
+        "UPDATE play_biz_record SET refund_status = #{toStatus}",
+        " WHERE play_biz_record_no = #{bizNo}",
+        " AND refund_status IN <foreach item='s' collection='fromStatuses' open='('"
+                + " separator=',' close=')'>#{s}</foreach>",
+        "</script>"
+    })
+    int advanceRefundStatusFrom(
+            @Param("bizNo") String bizNo,
+            @Param("fromStatuses") java.util.List<String> fromStatuses,
+            @Param("toStatus") String toStatus);
+
+    /** 落退款单号。退款受理后回填，供对账与查单按号反查。 */
+    @Update(
+            "UPDATE play_biz_record SET refund_no = #{refundNo}"
+                    + " WHERE play_biz_record_no = #{bizNo} AND refund_no IS NULL")
+    int fillRefundNo(@Param("bizNo") String bizNo, @Param("refundNo") String refundNo);
+
+    /**
      * 库存处置态推进，<b>库存类任务每单幂等的承重点</b>。
      *
      * <p>{@code affected_rows = 0} 即本单库存已处置过，调用方据此跳过实际的库存 UPDATE。
      *
      * <p>这道谓词不可由别处替代。库存 SQL 的下界 {@code WHERE locked >= ?} 防的是「总数被减成负值」， 而 {@code locked} 是该 {@code
-     * stock_key} 下所有订单<b>共享</b>的计数器 —— A 单重复释放时它因别的 订单占用仍大于 0，下界照常放行，结果 A 释放掉了 B
-     * 的预占，可售余量凭空多一份，直接超卖。 {@code benefit_task.uk_biz_type_op} 也替代不了：它防的是重复<b>入队</b>，而非同一条任务被
+     * stock_key} 下所有订单<b>共享</b>的计数器 —— A 单重复释放时它因别的 订单占用仍大于 0，下界照常放行，结果 A 释放掉了 B 的预占，可售余量多出一份，直接超卖。
+     * {@code benefit_task.uk_biz_type_op} 也替代不了：它防的是重复<b>入队</b>，而非同一条任务被
      * 重复<b>执行</b>（租约过期被接管、调度器重跑都会）。
      */
     @Update(

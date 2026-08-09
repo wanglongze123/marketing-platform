@@ -21,7 +21,7 @@ import org.testcontainers.utility.MountableFile;
 /**
  * 集成测试基类：真实 MySQL + 完整 Spring 上下文。
  *
- * <p><b>为什么不用 H2</b>：本阶段要验的恰恰是 H2 与 MySQL 行为不一致的那几处 —— 唯一索引对多行 NULL 的处理、条件更新的 {@code
+ * <p><b>为什么不用 H2</b>：本阶段要验的正是 H2 与 MySQL 行为不一致的那几处 —— 唯一索引对多行 NULL 的处理、条件更新的 {@code
  * affected_rows}、Flyway DDL 可执行性（《开发规范》§9.2）。用 H2 测等于没测。
  *
  * <p><b>为什么用单例容器而非 {@code @Testcontainers + @Container}</b>：后者按类起停， 四个测试类就要起四次 MySQL。静态块只执行一次，容器由
@@ -83,6 +83,10 @@ abstract class AbstractMySqlIT {
         // 不压得更狠（如 0.001 → 首档 1ms）：那个量级与调度器每轮自身耗时同级，退避量淹没在
         // 噪声里，「退避取 0」的注入测不出来（已实测确认）
         registry.add("mp.task.backoff-scale", () -> "0.02");
+        // 裂变调度器同样关掉定时器、压缩退避 —— 它与权益的调度器各配一份（任务表分库，
+        // 各库各有一个调度器），配置键也各自独立，不能指望改一个键同时作用于两者
+        registry.add("mp.fission.task.timer.enabled", () -> "false");
+        registry.add("mp.fission.task.backoff-scale", () -> "0.02");
         // 凭证配置与生产同形状，取值不同：密钥不用生产那份，有效期照生产的 15 分钟。
         // 有效期不压小 —— 压到毫秒级会让「凭证还没过期」本身变得不稳定，正常用例随机变红。
         // 「过期凭证被拒」改用负有效期签一张来验（TokenAndPricingIT），既不等待也不改配置
@@ -90,6 +94,10 @@ abstract class AbstractMySqlIT {
         registry.add("mp.consult-token.ttl-seconds", () -> "900");
         // 支付通知密钥与凭证密钥取不同值 —— 同值时把两者用反不会有任何用例变红
         registry.add("mp.pay-notify.secret", () -> "it-pay-notify-secret");
+        // 供应方通知密钥再与前两把取不同值 —— 三把同值时把它们用反不会有任何用例变红
+        registry.add("mp.provider-notify.secret", () -> "it-provider-notify-secret");
+        // 本平台商户号。用例构造「他人商户的通知」时取与 OWN_MERCHANT_ID 不同的值
+        registry.add("mp.pay.merchant-id", () -> OWN_MERCHANT_ID);
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
 
@@ -127,6 +135,14 @@ abstract class AbstractMySqlIT {
     /** seed SKU 售价，分 */
     protected static final long SALE_PRICE = 9900L;
 
+    /**
+     * 本平台在支付方的商户号，与 {@code mp.pay.merchant-id} 同源。
+     *
+     * <p>抽成常量而非在两处各写一遍字面量：{@link #newPayCallback} 造的通知必须属于本商户，配置与它 取值不同的话每一条支付用例都会被 {@code 1731} 拒掉
+     * —— 而那是测试装配错了，不是被测代码错了。
+     */
+    protected static final String OWN_MERCHANT_ID = "MCH_IT";
+
     @Autowired protected BenefitOrderService benefitOrderService;
 
     @Autowired protected BenefitTaskScheduler scheduler;
@@ -158,7 +174,7 @@ abstract class AbstractMySqlIT {
     /**
      * 建单入参，凭证由真实的 {@code preConsult} 签发。
      *
-     * <p><b>不在测试里自行拼凭证</b>：那样测的是「测试造出来的凭证能被验过」，而咨询与下单是否对同一 用户、同一商品、同一价格达成一致恰恰验不到 ——
+     * <p><b>不在测试里自行拼凭证</b>：那样测的是「测试造出来的凭证能被验过」，而咨询与下单是否对同一 用户、同一商品、同一价格达成一致则验不到 ——
      * 而这正是签名与比价要挡的东西。走真实签发， 咨询侧一旦少签一个字段，下单侧的比对立刻失配。
      */
     protected CreateTradeReq newTradeReq(String tag) {
@@ -170,6 +186,18 @@ abstract class AbstractMySqlIT {
         req.setClientReqNo("REQ_" + tag);
         req.setQuantity(1);
         req.setConsultToken(consultToken(userId, ACTIVITY_ID, SKU_ID));
+        return req;
+    }
+
+    /**
+     * 建单入参，指定购买份数。
+     *
+     * <p><b>凭证不随份数变</b>：{@code preConsult} 不接收 {@code quantity}（咨询阶段还没有份数这个概念）， 故 {@code dealPrice}
+     * 与服务端重算价比的一直是<b>单价</b> —— 份数只影响 {@code order_amount}。
+     */
+    protected CreateTradeReq newTradeReq(String tag, int quantity) {
+        CreateTradeReq req = newTradeReq(tag);
+        req.setQuantity(quantity);
         return req;
     }
 
@@ -185,7 +213,7 @@ abstract class AbstractMySqlIT {
     /**
      * 支付通知，<b>签名由真实的签名器算出</b>。
      *
-     * <p>不在测试里硬编码签名值：那样测的是「测试造的签名能被验过」，而签发侧与验签侧的字段集合 是否一致恰恰验不到 —— 而那正是验签要挡的东西。走真实签名器，签发侧少签一个字段，全部用例
+     * <p>不在测试里硬编码签名值：那样测的是「测试造的签名能被验过」，而签发侧与验签侧的字段集合 是否一致则验不到 —— 而那正是验签要挡的东西。走真实签名器，签发侧少签一个字段，全部用例
      * 立刻变红。
      */
     protected PayCallbackReq newPayCallback(
@@ -198,11 +226,28 @@ abstract class AbstractMySqlIT {
         // 只有收款通知带金额。FAILED / CLOSED 说的是「这笔没收成」，真实支付平台在这两类
         // 通知里不带金额或带 0 —— 一律填全额会掩盖「平台对未收款通知也做金额校验」这类缺陷，
         // 线上关闭通知因此全被判 1731，而测试全绿
-        req.setPayAmount("SUCCESS".equals(payStatus) ? SALE_PRICE : 0L);
+        req.setPayAmount("SUCCESS".equals(payStatus) ? orderAmountOf(bizNo) : 0L);
         req.setCurrency("CNY");
-        req.setMerchantId("MCH_DEMO");
+        req.setMerchantId(OWN_MERCHANT_ID);
         req.setSign(payNotifySigner.sign(req.signFields()));
         return req;
+    }
+
+    /**
+     * 本单的应付金额，供支付通知填 {@code payAmount}。
+     *
+     * <p><b>不用 {@code SALE_PRICE} 常量</b>：那是<b>单价</b>，而应付 = 单价 × 份数。多份订单下两者不等， 通知会被金额校验判成 {@code
+     * 1731}（实测确认）—— 而那是测试装配错了，不是被测代码错了。
+     *
+     * <p>查不到单时回退到单价：少数用例给的是尚未建单的 {@code bizNo}（如验签用例造的伪造通知）。
+     */
+    private long orderAmountOf(String bizNo) {
+        Long amount =
+                benefitJdbc.queryForObject(
+                        "SELECT order_amount FROM play_biz_record WHERE play_biz_record_no = ?",
+                        Long.class,
+                        bizNo);
+        return amount == null ? SALE_PRICE : amount;
     }
 
     /**

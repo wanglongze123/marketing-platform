@@ -4,6 +4,7 @@ import com.mp.api.mock.dto.FaultMode;
 import com.mp.api.mock.dto.PayCloseResp;
 import com.mp.api.mock.dto.PayCreateReq;
 import com.mp.api.mock.dto.PayCreateResp;
+import com.mp.api.mock.dto.PayRefundResp;
 import com.mp.api.mock.service.MockPayService;
 import com.mp.common.enums.ErrorCode;
 import com.mp.common.enums.RetStatus;
@@ -63,7 +64,7 @@ public class MockPayServiceImpl implements MockPayService {
         PayCreateResp resp = new PayCreateResp();
         resp.setRetStatus(RetStatus.SUCCESS);
         resp.setTradeNo("PAY" + seq.incrementAndGet() + "_" + req.getOutTradeNo());
-        ledger.onCreated(req.getOutTradeNo());
+        ledger.onCreated(req.getOutTradeNo(), resp.getTradeNo());
         log.info(
                 "mock pay created, outTradeNo={}, amount={}, tradeNo={}",
                 req.getOutTradeNo(),
@@ -120,5 +121,92 @@ public class MockPayServiceImpl implements MockPayService {
         resp.setPayState(after.name());
         log.info("mock close done, outTradeNo={}", outTradeNo);
         return resp;
+    }
+
+    /**
+     * 退款，按注入模式与<b>账本实际状态</b>返回四分类。
+     *
+     * <p>幂等由 {@link PayLedger#recordRefund} 的 {@code computeIfAbsent} 承载：同一 {@code refundNo}
+     * 重复调用返回首次的单号，不二次退款。<b>这是「重复退款 = 0」的最终判据</b> —— 平台的三道闸都在 平台自己的库里，只能证明平台没重复受理；钱有没有退两次，只有支付方数得准。
+     *
+     * <p>{@code TIMEOUT_AFTER_COMMIT} 是本方法最关键的一类：钱已经退了但调用方收不到结果。此时 平台若把 {@code UNKNOWN} 误判为 {@code
+     * FAIL} 而重发，就是重复退款。
+     */
+    @Override
+    public PayRefundResp refund(String outTradeNo, String refundNo, long amount) {
+        FaultMode mode = injector.payMode();
+
+        // 先记到达再分流：抛超时的那两个也算 —— 请求确实到达了支付方
+        ledger.recordRefundAttempt(refundNo);
+
+        if (mode == FaultMode.TIMEOUT_AFTER_COMMIT) {
+            String orderNo = ledger.recordRefund(refundNo);
+            log.warn(
+                    "mock refund committed then timed out, refundNo={}, orderNo={}",
+                    refundNo,
+                    orderNo);
+            throw new IllegalStateException("模拟退款超时（已退款）: " + refundNo);
+        }
+        if (mode == FaultMode.TIMEOUT_BEFORE_COMMIT) {
+            log.warn("mock refund timed out before commit, refundNo={}", refundNo);
+            throw new IllegalStateException("模拟退款超时（未退款）: " + refundNo);
+        }
+        if (mode == FaultMode.PROCESSING) {
+            // 受理但未完成：平台进 REFUNDING 并继续查单
+            log.info("mock refund accepted, still processing, refundNo={}", refundNo);
+            return refundResp(RetStatus.PROCESSING, null, null);
+        }
+        if (mode == FaultMode.FAIL) {
+            log.info("mock refund rejected, refundNo={}", refundNo);
+            return refundResp(RetStatus.FAIL, null, ErrorCode.INVALID_PARAM);
+        }
+
+        // 未收款的单退不了。判据取账本而非平台传来的状态 —— 与关单同一条理由
+        if (ledger.find(outTradeNo) != PayLedger.State.PAID) {
+            log.info("mock refund rejected, not paid, outTradeNo={}", outTradeNo);
+            return refundResp(RetStatus.FAIL, null, ErrorCode.INVALID_PARAM);
+        }
+
+        String orderNo = ledger.recordRefund(refundNo);
+        log.info("mock refund done, refundNo={}, orderNo={}, amount={}", refundNo, orderNo, amount);
+        return refundResp(RetStatus.SUCCESS, orderNo, null);
+    }
+
+    /**
+     * 退款查单。
+     *
+     * <p><b>查无返回 {@code UNKNOWN}</b>：查无可能只是提交在途，判 {@code FAIL} 会让平台重发 —— 而重发
+     * 一笔可能已成功的退款就是重复退款。与发放侧查单一字不差。
+     */
+    @Override
+    public PayRefundResp queryRefund(String refundNo) {
+        String existing = ledger.findRefund(refundNo);
+        if (existing != null) {
+            return refundResp(RetStatus.SUCCESS, existing, null);
+        }
+        if (injector.payMode() == FaultMode.FAIL) {
+            return refundResp(RetStatus.FAIL, null, ErrorCode.INVALID_PARAM);
+        }
+        log.info("mock refund query found nothing, refundNo={}", refundNo);
+        return refundResp(RetStatus.UNKNOWN, null, null);
+    }
+
+    /**
+     * 支付方的对账文件，供对账第 8 项。
+     *
+     * <p><b>不受注入模式影响</b>：注入模拟的是「这次调用能不能拿到结果」，而对账文件在真实链路里是 T+1
+     * 落盘推送的，与在线接口的可用性无关。让它随注入一起失败会把两种故障混为一谈。
+     */
+    @Override
+    public java.util.List<com.mp.api.mock.dto.PaidTradeRow> listPaidTrades() {
+        return ledger.listPaidTrades();
+    }
+
+    private static PayRefundResp refundResp(RetStatus status, String orderNo, String errorCode) {
+        PayRefundResp r = new PayRefundResp();
+        r.setRetStatus(status);
+        r.setRefundOrderNo(orderNo);
+        r.setErrorCode(errorCode);
+        return r;
     }
 }

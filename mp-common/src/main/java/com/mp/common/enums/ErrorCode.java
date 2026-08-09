@@ -50,12 +50,72 @@ public final class ErrorCode {
     /**
      * 分享者不是该轮次的师傅。V3 PR-3 补入。
      *
-     * <p>取 16xx 裂变段的下一个空位（PRD 附录 C：后三位 6xx 为裂变），与 {@link #SPONSOR_IS_FOLLOWER} 同属师徒身份校验组。
+     * <p>取 16xx 裂变段的空位（PRD 附录 C：后三位 6xx 为裂变），与 {@link #SPONSOR_IS_FOLLOWER} 同属师徒身份校验组 ——
+     * 二者一个判「师徒是不是同一人」，一个判「分享者是不是这一轮的师傅」。
      *
      * <p>归 1xxx 而非 4xxx：入参本身合法（是一个真实存在的 {@code sponsorId}），被拒的是<b>它与该轮次 的归属关系</b> —— 与 {@code 1614}
      * 同类。换个 {@code groupId} 重试可能通过，但同一组合重试结果不变。
      */
     public static final String SPONSOR_NOT_GROUP_OWNER = "1615";
+
+    /**
+     * 被分享对象未通过好友过滤（PRD FR-F05、BR-F-12）。V3 PR-6 引入。
+     *
+     * <p>归 1xxx：确定的业务拒绝 —— 该好友本轮不可被分享，重试结果不变。
+     *
+     * <p>与 {@link #FRIEND_RECALL_UNAVAILABLE} 严格分开：本码是「这个人不该被邀请」，那条是
+     * 「候选名单拉不出来」。合并会让召回方故障时前端显示「你的好友都不符合条件」。
+     */
+    public static final String FOLLOWER_FILTERED = "1611";
+
+    /**
+     * 关系非 {@code JOINED}，不能确权（PRD FR-F07）。V3 PR-4 引入。
+     *
+     * <p>确权的前置是「徒弟已加入」。对已 {@code DONE} 的关系重复确权同样落到这里 —— 那是重复 发奖的入口，必须拦在发奖之前。
+     */
+    public static final String RELATION_NOT_JOINED = "1617";
+
+    /**
+     * 发放结果未定，拒绝退款（PRD BR-B-29）。V3 PR-7 引入。
+     *
+     * <p>对应 {@code GRANTING} / {@code GRANT_UNKNOWN} 两态：<b>回收对象不明</b> —— 权益可能已发出、
+     * 可能没有，此时退款要么退了钱权益还在，要么回收一笔不存在的发放。等查单收敛后再判。
+     *
+     * <p><b>这条不能扩大成「未发放成功就不许退款」</b>：那会把 {@code NOT_START}（从未履约）与 {@code
+     * GRANT_FAILED}（履约失败）这两类最需要退款的单永久锁死 —— 而「已支付未履约」正是对账 要自动补偿的头号场景，退不了款则收敛率必然破防（技术方案 §7.5）。
+     *
+     * <p>分界线是<b>「结果是否确定」</b>，不是「是否成功」。
+     */
+    public static final String GRANT_NOT_SETTLED = "1751";
+
+    /**
+     * 权益已核销或已过期，不可回收（PRD BR-B-30）。V3 PR-7 引入。
+     *
+     * <p>归 1xxx：这是<b>确定的</b>业务拒绝，重试拿到同一答案。判 5xxx 会让回收任务一直重试到死信， 而券确实已经花掉了 —— 重试多少次都收不回来。
+     *
+     * <p>由供应方原子判定并回传（平台的前置查询只作准入初筛）。此时退款走人工处置，不自动推进。
+     */
+    public static final String BENEFIT_ALREADY_USED = "1752";
+
+    /**
+     * 回收未成功，不得推进退款（PRD BR-B-30）。V3 PR-7 引入。
+     *
+     * <p>包含两种情形：回收确定失败、回收结果未定。<b>两者都不允许退款</b> —— 前者权益还在，后者 不知道权益在不在，而「退了钱权益还在」是这条链路要防的核心资损。
+     */
+    public static final String REVOKE_NOT_DONE = "1753";
+
+    /**
+     * 实付金额未知，无法确定退款金额。V3 PR-7/8 review 补。
+     *
+     * <p>{@code pay_amount} 可空是有意的：关单受理后查单确认「这笔已收款」时，支付方并未回答收了 多少，此路径按 §5.6 的口径留空等通知回填 ——
+     * 「实付金额未知」本身是可表达的状态，而一个猜来 的数不是。
+     *
+     * <p><b>退款侧必须显式拒绝这一状态，不能以应付额代入</b>：实付 ≠ 应付时按应付退是多退或少退， 而多退一笔钱要走人工追讨。归 1xxx 是因为它确定 ——
+     * 金额补齐前重试多少次都是同一答案，判 5xxx 会让退款任务一路重试到死信。
+     *
+     * <p>处置是等支付通知回填 {@code pay_amount} 后重新发起，或人工核定金额。
+     */
+    public static final String PAY_AMOUNT_UNKNOWN = "1754";
 
     /** 价格不一致：凭证成交价 ≠ 服务端重算价。V2 引入比价后使用 */
     public static final String PRICE_MISMATCH = "1711";
@@ -120,6 +180,19 @@ public final class ErrorCode {
      */
     public static final String PAY_NOTIFY_SIGN_INVALID = "4731";
 
+    /**
+     * 供应方通知验签失败（PRD FR-B06）。V3 PR-9 引入。
+     *
+     * <p>与 {@link #PAY_NOTIFY_SIGN_INVALID} 分开而非共用：两者是不同的信任边界、不同的密钥、不同的 对接方，告警与排查也各走各的 ——
+     * 共用一个码时「哪一侧的密钥配错了」要靠读日志上下文才能分辨。
+     *
+     * <p>误判代价特别值得记：一条伪造的成功通知会让发放记录进终态，而终态<b>不再被查单推进</b>（条件 更新限定 {@code
+     * PROCESSING}），于是这笔发放永远停在「已成功」，供应方那边其实什么都没有。它 不像重复发奖能被对账第 11 项数出来 —— 记录数是对的。
+     *
+     * <p>同 BR-B-12 的处置：未通过验签的通知不得更新任何业务状态，连记录都不留。
+     */
+    public static final String PROVIDER_NOTIFY_SIGN_INVALID = "4732";
+
     // ---- 5xxx 系统异常 ----
 
     /** 下游超时/未知，映射为 {@code RetStatus.UNKNOWN} */
@@ -140,6 +213,15 @@ public final class ErrorCode {
      * 与资格决策的 1201/5201 是同一条分界线。
      */
     public static final String FISSION_QUERY_ERROR = "5601";
+
+    /**
+     * 好友召回能力不可用（PRD FR-F03）。V3 PR-6 引入。
+     *
+     * <p>归 5xxx：候选名单拉不出来是系统故障，重试可能成功。<b>不降级为空列表</b> —— 空列表与 「这个人没有好友」不可区分，端上会显示一个看起来正常的空页面，而故障无人察觉。
+     *
+     * <p>与过滤器的 fail-open 处置不同：<b>召回失败没有可放行的对象</b>，而过滤器失败时手上有一批 明确的候选人，可按各自的失败语义处置。两者不是同一类判断。
+     */
+    public static final String FRIEND_RECALL_UNAVAILABLE = "5603";
 
     /**
      * 同一业务对象正在被并发处理，请稍后重试。V2 PR-7 引入。

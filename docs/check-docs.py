@@ -114,6 +114,43 @@ def check_doc_style(txt):
           + (f'  出现于: {", ".join(narrative[:6])}' if narrative else ''))
 
 
+def check_code_comment_style():
+    """C2 类：**代码注释**的禁用词（《开发规范》§13.2）。
+
+    §13.2 管的是「本仓库的一切文字」，而本检查器原先只扫两份 md —— 于是同一批改动里，
+    文档中的禁用词被 CI 拦下，Java 注释中的那处要靠人手工发现（V3 PR-7/8 review 实测）。
+    规范的适用范围与检查器的扫描范围不一致，缺口的形态是「CI 绿而规范没被遵守」。
+
+    只扫注释与字符串之外的判断此处不做：禁用词出现在标识符里的可能性极低，而做词法分析
+    要引入一个 Java 解析器 —— 收益不抵复杂度。误报由人读一眼即可排除。
+
+    过程叙事引导句不在此扫：代码注释里「实施时先……」这类表述常常是在解释某个决策的由来，
+    与文档里的过程叙事不是一回事（§13.1 管的是文档的组织方式）。
+    """
+    section('代码注释文风（开发规范 §13.2）')
+
+    java_files = []
+    for base, dirs, files in os.walk(ROOT):
+        # target 是构建产物，.git 是版本库自身
+        dirs[:] = [d for d in dirs if d not in ('target', '.git', '.claude')]
+        for f in files:
+            if f.endswith('.java'):
+                java_files.append(os.path.join(base, f))
+
+    for word in BANNED_WORDS:
+        hits = []
+        for path in java_files:
+            try:
+                content = open(path, encoding='utf-8').read()
+            except OSError:
+                continue
+            for i, line in enumerate(content.splitlines(), 1):
+                if word in line:
+                    hits.append(f'{os.path.relpath(path, ROOT)}:{i}')
+        check(not hits, f'代码注释未使用禁用词「{word}」'
+              + (f'  出现于: {", ".join(hits[:4])}' if hits else ''))
+
+
 def check_against_repo(txt):
     """B 类：文档 vs 仓库实际状态。"""
     section('文档 vs 仓库')
@@ -273,6 +310,7 @@ def main():
 
     check_against_repo(txt)
     check_doc_style(txt)
+    check_code_comment_style()
 
     total = len(PASSED) + len(FAILED)
     print()

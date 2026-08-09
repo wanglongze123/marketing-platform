@@ -131,9 +131,9 @@ public class BenefitTaskScheduler {
             //
             // 不这样分的话，每一笔正常成交的订单都会贡献一条死信：建单时落的 CLOSE_ORDER 任务
             // 在支付有效期后到期，此时订单早已 PAY_SUCCESS，关单判 1741 —— 按 UNKNOWN 重试
-            // 五轮进 DEAD。死信本是「停止重试并等人工处置」的入口，被正常业务填满就没人看了。
+            // 五轮进 DEAD。死信本是「停止重试并等人工处置」的入口，被正常业务填满即失去处置入口。
             //
-            // 只认 1xxx / 4xxx：5xxx 是系统异常，其语义恰恰是「结果未知」，必须继续按 UNKNOWN
+            // 只认 1xxx / 4xxx：5xxx 是系统异常，其语义是「结果未知」，必须继续按 UNKNOWN
             // 收敛。这与 ErrorCode 的分区口径是同一条 —— 判据取错误码而非异常类型，因为
             // BizException 同时承载着这三个分区
             if (isDeterministicRejection(e.getCode())) {

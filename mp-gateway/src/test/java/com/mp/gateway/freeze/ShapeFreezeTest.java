@@ -18,6 +18,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
@@ -204,6 +205,45 @@ class ShapeFreezeTest {
             }
         } catch (IOException e) {
             throw new IllegalStateException("扫描源码失败", e);
+        }
+    }
+
+    /**
+     * 对账与人工处置两个类<b>不得带事务注解</b>。
+     *
+     * <p>这条冻结的是一个<b>反向结论</b>：它们看起来「漏了 {@code @BenefitTx}」，实则加上就是缺陷 —— 曾被作为 review
+     * 意见提出过，故用静态检查把判断固定下来，免得每轮 review 重来一次。
+     *
+     * <p>{@code ReconcileService} 加事务违反标准 26：它调 {@code rewardService.batchQueryByOpNos}（跨库 RPC），
+     * 且一轮扫十项、每项 200 行。而<b>标准 26 的检查只读 {@code OrderTxService} 一个文件</b>（见 {@link
+     * #transactionalMethodsContainNoRemoteCall} 的注释「全部事务边界收在 OrderTxService，故只需检查这一个类」）——
+     * 所以那处违规<b>它自己检查不出来</b>，只能由本条守住。
+     *
+     * <p>{@code ManualRepairService} 加事务会真的生效（跨 bean 调用），代价是 {@code rollbackFor = Exception.class}
+     * 把审计行一起回滚 —— 而三个动作在落审计之后才抛 {@code BizException}。「审计先于动作、 动作失败也要留痕」是它明写的约束，包事务正好破坏它。
+     *
+     * <p>两者的写各自幂等（{@code uk_biz_op} / {@code uk_biz_type_op}），没有需要原子性的跨写不变量 —— 事务本就不必要，不只是有害。
+     */
+    @Test
+    void reconcileAndManualRepairCarryNoTransactionAnnotation() {
+        for (String path :
+                List.of(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/reconcile/ReconcileService.java",
+                        "mp-benefit-order/src/main/java/com/mp/benefit/reconcile/ManualRepairService.java",
+                        "mp-fission/src/main/java/com/mp/fission/reconcile/FissionReconcileService.java")) {
+            List<String> annotated =
+                    read(path)
+                            .lines()
+                            .map(String::strip)
+                            // 只看代码行：注释里解释「为什么不加」正是本条要鼓励的写法
+                            .filter(line -> !line.startsWith("*") && !line.startsWith("//"))
+                            .filter(
+                                    line ->
+                                            line.startsWith("@BenefitTx")
+                                                    || line.startsWith("@FissionTx")
+                                                    || line.startsWith("@Transactional"))
+                            .toList();
+            assertThat(annotated).as("%s 不得带事务注解 —— 事务内有 RPC 与长扫描，且会回滚掉先落的审计", path).isEmpty();
         }
     }
 
@@ -479,9 +519,7 @@ class ShapeFreezeTest {
                 String src = Files.readString(p, StandardCharsets.UTF_8);
                 int idx = src.indexOf("catch (Exception");
                 while (idx >= 0) {
-                    // 取 catch 块起始后的一段，检查其中没有把结果判为失败
-                    String block = src.substring(idx, Math.min(src.length(), idx + 400));
-                    assertThat(block)
+                    assertThat(catchBlockOf(src, idx))
                             .as("%s 的 catch (Exception) 不得把结果判为失败，应为 UNKNOWN 或原样抛出", p)
                             .doesNotContain("RetStatus.FAIL")
                             .doesNotContain("OpStatus.FAILED");
@@ -491,6 +529,38 @@ class ShapeFreezeTest {
         } catch (IOException e) {
             throw new IllegalStateException("扫描源码失败", e);
         }
+    }
+
+    /**
+     * 截取 {@code catch} 块的<b>实际范围</b>：从它的 {@code &#123;} 起到配对的 {@code &#125;} 止。
+     *
+     * <p>原实现取「起始后固定 400 字符」，而 catch 块通常只有两三行 —— 于是窗口越过块尾，把<b>紧随其后 的正常代码</b>一并纳入检查。V3 PR-8
+     * 实测撞上：{@code reconcileRevoke} 的 catch 块正确地映射为 {@code UNKNOWN}，但其后的四分类汇总里有一句 {@code else if
+     * (one == RetStatus.FAIL)}，落在 400 字符窗口内，本检查随即报错。
+     *
+     * <p><b>这是误报，不是真问题</b>，但放着不管的代价是：下一个人会倾向于「把汇总逻辑挪远一点」 来讨好检查器，或者干脆放宽断言 ——
+     * 两种做法都让这道防线变弱。故修检查器而非改业务代码。
+     *
+     * <p>括号配对不考虑字符串字面量与注释中的花括号：catch 块里出现它们的概率极低，且真出现时 只会让截取范围偏大（回到原有的误报形态），不会漏检。
+     */
+    private static String catchBlockOf(String src, int catchIdx) {
+        int open = src.indexOf('{', catchIdx);
+        if (open < 0) {
+            return src.substring(catchIdx, Math.min(src.length(), catchIdx + 400));
+        }
+        int depth = 0;
+        for (int i = open; i < src.length(); i++) {
+            char c = src.charAt(i);
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return src.substring(catchIdx, i + 1);
+                }
+            }
+        }
+        return src.substring(catchIdx);
     }
 
     /**
@@ -609,7 +679,7 @@ class ShapeFreezeTest {
                 .as("预占必须带余量谓词，否则直接超卖")
                 .contains(normalize("total - locked - consumed >= #{qty}"));
 
-        // 转消耗：locked 减、consumed 加，缺后者会让可售余量凭空多一份
+        // 转消耗：locked 减、consumed 加，缺后者会让可售余量多出一份
         String consume = normalize(sqlOf(mapper, "tryConsume"));
         assertThat(consume)
                 .as("转消耗须同时改 locked 与 consumed")
@@ -652,7 +722,7 @@ class ShapeFreezeTest {
      *
      * <ul>
      *   <li>库存 SQL 的下界 {@code WHERE locked >= ?} —— 防的是「总数被减成负值」。{@code locked} 是该 {@code
-     *       stock_key} 下所有订单<b>共享</b>的计数器，A 单重复释放时它因别的订单占用仍大于 0， 谓词照常放行，结果 A 释放掉了 B 的预占，可售余量凭空多一份
+     *       stock_key} 下所有订单<b>共享</b>的计数器，A 单重复释放时它因别的订单占用仍大于 0， 谓词照常放行，结果 A 释放掉了 B 的预占，可售余量多出一份
      *   <li>{@code uk_biz_type_op} —— 防的是重复<b>入队</b>，防不住同一条任务被重复<b>执行</b>
      * </ul>
      *
@@ -664,7 +734,17 @@ class ShapeFreezeTest {
         String tx =
                 read("mp-benefit-order/src/main/java/com/mp/benefit/service/OrderTxService.java");
 
-        for (String method : List.of("consumeStock", "releaseStock")) {
+        // 前置态各不相同，正是三者不可互相替代的地方：消耗与释放从 LOCKED 进，
+        // 回补从 CONSUMED 进 —— 若回补也认 LOCKED，一笔关单释放过的单还能再被回补一次，
+        // 而那次回补减掉的是别的订单的 consumed（PR-10 后置 review 补入 restoreStock）
+        Map<String, String> guards =
+                Map.of(
+                        "consumeStock", "StockStatus.LOCKED.name()",
+                        "releaseStock", "StockStatus.LOCKED.name()",
+                        "restoreStock", "StockStatus.CONSUMED.name()");
+
+        for (Map.Entry<String, String> e : guards.entrySet()) {
+            String method = e.getKey();
             int idx = tx.indexOf("public RetStatus " + method + "(");
             assertThat(idx).as("未找到 %s", method).isGreaterThan(0);
             String body = tx.substring(idx, Math.min(tx.length(), idx + 700));
@@ -672,7 +752,7 @@ class ShapeFreezeTest {
             assertThat(normalize(body))
                     .as("%s 必须以主单库存态的条件更新为幂等闸，下界与唯一键都替代不了它", method)
                     .contains(normalize("advanceStockStatus("))
-                    .contains(normalize("StockStatus.LOCKED.name()"));
+                    .contains(normalize(e.getValue()));
         }
 
         // 条件更新自身必须带前置状态，否则它只是个无条件赋值
@@ -691,9 +771,9 @@ class ShapeFreezeTest {
      * 库存类任务的 {@code op_no} 必须是确定性键，不得留空串。
      *
      * <p>每单幂等完全由 {@code uk_biz_type_op} 承担 —— 库存 SQL 的下界提供不了：{@code locked} 是该 {@code stock_key}
-     * 下所有订单共享的计数器，A 单重复释放两次时它因别的订单占用仍远大于 0， 下界根本不会拦，结果是 A 释放了别人的预占，可售余量凭空多一份（技术方案 §7.4）。
+     * 下所有订单共享的计数器，A 单重复释放两次时它因别的订单占用仍远大于 0， 下界根本不会拦，结果是 A 释放了别人的预占，可售余量多出一份（技术方案 §7.4）。
      *
-     * <p>留空串则同一单可插入无数条释放任务，唯一键形同虚设 —— 这正是 §3.3 警告过的 {@code NOT NULL DEFAULT ''} 陷阱。
+     * <p>留空串则同一单可插入无数条释放任务，唯一键不起作用 —— 这正是 §3.3 警告过的 {@code NOT NULL DEFAULT ''} 陷阱。
      */
     @Test
     void stockTasksCarryADeterministicOpNo() {
@@ -705,7 +785,7 @@ class ShapeFreezeTest {
         String body = tx.substring(idx, Math.min(tx.length(), idx + 500));
 
         assertThat(normalize(body))
-                .as("库存任务的 op_no 须取 bizNo + '_' + taskType，留空串则唯一键形同虚设")
+                .as("库存任务的 op_no 须取 bizNo + '_' + taskType，留空串则唯一键不起作用")
                 .contains(normalize("bizNo + \"_\" + taskType.name()"));
     }
 

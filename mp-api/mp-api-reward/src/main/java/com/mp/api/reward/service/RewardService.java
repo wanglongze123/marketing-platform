@@ -2,6 +2,10 @@ package com.mp.api.reward.service;
 
 import com.mp.api.reward.dto.GrantRewardReq;
 import com.mp.api.reward.dto.GrantRewardResp;
+import com.mp.api.reward.dto.ProviderCallbackReq;
+import com.mp.api.reward.dto.ProviderCallbackResp;
+import com.mp.api.reward.dto.RevokeRewardReq;
+import com.mp.api.reward.dto.RevokeRewardResp;
 
 /**
  * 统一发奖（公共能力层）。唯一对接奖励供应方的出口，玩法层不直接对接供应方。
@@ -33,4 +37,50 @@ public interface RewardService {
      * @return 仍未定则返回 {@code UNKNOWN} 或 {@code PROCESSING}，调用方据此按各自的退避序列继续
      */
     GrantRewardResp reconcileGrant(String opNo);
+
+    /**
+     * 回收已发放的权益（BR-B-30）。V3 PR-7 引入。
+     *
+     * <p>同 {@code revokeNo} 重复调用返回同结果，由 {@code reward_revoke_record.uk_revoke_no} 保证。
+     * <b>回收键与发奖键不复用</b>（BR-C-11）—— 复用会让回收撞上 {@code uk_op_no} 被当成发奖重传吞掉： 权益实际没回收，而调用方拿到「成功」。
+     *
+     * <p><b>「仅当未使用才回收」由供应方原子判定</b>，平台不先查再回收：查完到回收之间用户可以把券 花掉，于是券已核销而平台以为回收成功、退了钱。返回的 {@code
+     * usageStatus} 是最终依据。
+     *
+     * <p>返回 {@code UNKNOWN} 时调用方<b>不得推进退款</b>：回收结果未定即权益可能仍在外，此时退款 就是「退了钱权益还在」。
+     */
+    RevokeRewardResp revokeReward(RevokeRewardReq req);
+
+    /**
+     * 供应方异步通知的<b>唯一入口</b>（FR-B06、技术方案 §4.3）。V3 PR-9 引入。
+     *
+     * <p>验签 → 幂等落通知记录 → 推进发放记录 → 发 {@code RewardGrantResultEvent} 事件。
+     *
+     * <p><b>发事件而非同步 RPC 回调上游</b>：本方法在公共能力层，而需要知道结果的是玩法层。同步回调 即下层调上层，违反 §1.1 单向依赖；且 {@code reward}
+     * 被两个玩法共用，轮询要每个上游各写一套。
+     *
+     * <p><b>事件负责加速收敛，查单负责保证收敛</b>（§6.7）：消费侧的幂等与 {@code QUERY_GRANT} 任务 必须并存。不得因为「有了回调就不用查单了」而去掉查单
+     * —— 事件一丢即永久悬挂。
+     *
+     * <p><b>幂等按 {@code (opNo, notifySeq)} 两维判</b>：同一 {@code opNo} 会收到多条语义不同的通知，只按 {@code opNo}
+     * 去重会把第二条真实通知当成重传丢弃。重复投递返回 {@code accepted=true} —— ACK 的语义是 「别再投了」，返回失败会让供应方一直重投。
+     */
+    ProviderCallbackResp providerCallback(ProviderCallbackReq req);
+
+    /**
+     * 批量按幂等号查发放结果，<b>专供对账拉取比对</b>（技术方案 §4.3、§6.8）。V3 PR-10 引入。
+     *
+     * <p><b>它存在的唯一理由是「禁止跨库 JOIN」</b>（§3.1）：对账要比对 {@code db_benefit} 的履约明细与 {@code db_reward}
+     * 的发放记录，而两库各用仅授权自身 schema 的账号，跨库 JOIN 在运行期直接 {@code access denied}。故比对方式是分批拉取 +
+     * 内存比对，本方法是那个「拉取」。
+     *
+     * <p><b>与 {@link #queryGrant} 的差别不只是批量</b>：那个是单笔查询，调用方拿它驱动一笔业务的收敛； 本方法是对账的数据源，返回的是「这批 {@code
+     * opNo} 在 reward 侧各是什么状态」，<b>查无的键不在结果里</b> —— 而「查无」正是对账第 3 项（发奖单下游无记录）要找的差异。
+     *
+     * <p>调用方须自行分批，单次入参不宜过大 —— 它会被拼进 {@code IN} 子句。
+     *
+     * @param opNos 发奖幂等号列表
+     * @return 各 {@code opNo} 的发放结果；<b>查无的键不出现在返回中</b>，调用方据此检出差异
+     */
+    java.util.Map<String, GrantRewardResp> batchQueryByOpNos(java.util.List<String> opNos);
 }

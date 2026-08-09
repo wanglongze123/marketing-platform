@@ -4,6 +4,7 @@ import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 /**
  * 裂变操作记录访问。
@@ -35,6 +36,24 @@ public interface FissionOpRecordMapper {
             @Param("opSeq") String opSeq,
             @Param("status") String status,
             @Param("downstreamResult") String downstreamResult);
+
+    /**
+     * 回写终态：本地执行态与下游四分类结果<b>分列两栏</b>。
+     *
+     * <p>合并会让「下游 PROCESSING」被写成本地 UNKNOWN，而两者处置策略不同（§6.6）：前者长退避 等下游完成，后者短退避尽快查证。
+     */
+    @Update(
+            "UPDATE fission_op_record SET status = #{status}, downstream_result = #{downstream},"
+                    + " finish_time = NOW(3)"
+                    + " WHERE idempotent_key = #{idempotentKey}")
+    int finish(
+            @Param("idempotentKey") String idempotentKey,
+            @Param("status") String status,
+            @Param("downstream") String downstream);
+
+    /** 按幂等键取记录状态，收敛与测试用。 */
+    @Select("SELECT status FROM fission_op_record WHERE idempotent_key = #{idempotentKey}")
+    String selectStatusByIdempotentKey(@Param("idempotentKey") String idempotentKey);
 
     /** 按幂等键回查，用于区分「幂等命中」与「单号碰撞」。 */
     @Select("SELECT op_no FROM fission_op_record WHERE idempotent_key = #{idempotentKey}")

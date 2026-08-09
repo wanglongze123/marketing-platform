@@ -9,6 +9,9 @@ target/
 *.iws
 .vscode/
 
+# 本地工具配置（沙箱白名单、权限规则），因人因机而异，不进仓库
+.claude/
+
 .DS_Store
 *.log
 logs/

@@ -130,7 +130,14 @@ public class OrderTxService {
         // 额度态取决于这一单到底扣没扣，不能跟着库存一律置 LOCKED —— 不限购的单没有额度行，
         // 置 LOCKED 会让它在释放时把同用户另一笔单的额度还掉（该行是共享计数器，下界拦不住）
         record.setQuotaStatus(quotaLocked ? QuotaStatus.LOCKED.name() : QuotaStatus.NONE.name());
-        record.setOrderAmount(salePrice);
+        // 应付 = 单价 × 份数。**salePrice 是单价，不是总价** —— preConsult 签发凭证时不带
+        // quantity（咨询阶段还没有份数这个概念），故 token.dealPrice 与服务端重算价比的
+        // 一直是单价，比价那一步不受份数影响。
+        //
+        // 漏乘份数的后果是买 3 份收 1 份钱，且**没有任何下游能发现**：支付方按 order_amount
+        // 收款、金额校验拿 pay_amount 与它比，两边一致；对账第 5 项比的也是这两个数。
+        // 库存与限购却按 3 份扣 —— 于是货发了 3 份、钱收了 1 份，账面还处处自洽
+        record.setOrderAmount(Math.multiplyExact(salePrice, qty));
         record.setCurrency("CNY");
         record.setConfigVersion(configVersion);
         record.setPriceSnapshot(priceSnapshot);
@@ -275,9 +282,9 @@ public class OrderTxService {
      *
      * <p><b>{@code op_no} 必须取 {@code bizNo + '_' + taskType}，不能留空串</b>（技术方案 §7.4）。每单幂等 完全由 {@code
      * uk_biz_type_op} 承担 —— 库存 SQL 的下界 {@code WHERE locked >= ?} 提供不了： {@code locked} 是该 {@code
-     * stock_key} 下所有订单共享的计数器，A 单重复释放两次时它因别的订单 占用仍远大于 0，下界根本不会拦，结果是 A 释放了别人的预占，可售余量凭空多一份。
+     * stock_key} 下所有订单共享的计数器，A 单重复释放两次时它因别的订单 占用仍远大于 0，下界根本不会拦，结果是 A 释放了别人的预占，可售余量多出一份。
      *
-     * <p>留空串则同一单可插入无数条释放任务，唯一键形同虚设 —— 这正是 §3.3 警告过的 {@code NOT NULL DEFAULT ''} 陷阱。
+     * <p>留空串则同一单可插入无数条释放任务，唯一键不起作用 —— 这正是 §3.3 警告过的 {@code NOT NULL DEFAULT ''} 陷阱。
      */
     private void enqueueStockTask(String bizNo, TaskType taskType) {
         taskMapper.enqueue(
@@ -358,7 +365,7 @@ public class OrderTxService {
      *
      * <p><b>{@code providerOrderNo} 必须回填</b>：查单是「下游已发放但平台不知道单号」这一状态的 唯一出口，首次调用超时未拿到单号，收敛时不填则明细的
      * {@code provider_order_no} 永远为空。 该列上的 {@code idx_provider_order} 支撑 BR-C-26「按供应方单号反查业务」——
-     * 恰恰是发生过 超时的那些单最需要对账时能反查，而它们正是空的。
+     * 发生过超时的那些单最需要对账时能反查，而它们正是空的。
      *
      * <p>传 {@code null} 时由 {@code settleByGrantOpNo} 的 {@code COALESCE} 保留原值，不会把首次调用 已拿到的单号抹掉。
      */
@@ -538,9 +545,246 @@ public class OrderTxService {
      * 库存时照常通过，重复执行会吃掉别人的预占。
      *
      * <p><b>{@code quota_status} 停在 {@code LOCKED} 不动，这是有意的</b>：额度买了就算用掉，成交时无事 可做。它与库存的不对称在技术方案
-     * §3.4 的口径表里 —— 退款要回补库存（商品可以再卖给别人）， 但不返还额度（否则「买了再退」能刷回额度，限购形同虚设）。留在 {@code LOCKED} 恰好表达「这一份
+     * §3.4 的口径表里 —— 退款要回补库存（商品可以再卖给别人）， 但不返还额度（否则「买了再退」能刷回额度，限购即被绕过）。留在 {@code LOCKED} 恰好表达「这一份
      * 额度已被这一单占用且不会归还」。
      */
+    // ---- 退款准入与回收（V3 PR-7） ----
+
+    /**
+     * 准入通过，进入 {@code REVOKING}，同事务落 {@code REVOKE_BENEFIT} 操作记录。
+     *
+     * <p><b>状态推进与操作记录同事务</b>：两者分开则「已进 {@code REVOKING} 但没有操作记录」成为可能， 而对账正是按操作记录判断「这单的退款走到哪一步了」——
+     * 缺了它，这单在对账看来从未发起过退款。
+     *
+     * <p><b>前置态分自动与人工两组</b>（技术方案 §6.4「自动路径严格、人工路径显式开口且留审计」）：
+     *
+     * <ul>
+     *   <li>自动：{@code NONE}（首次）、{@code REVOKE_FAILED}（回收失败后重试，权益还在，可重收）
+     *   <li>人工：额外放行 {@code REFUND_FAILED} —— <b>仅当带 {@code operator}</b>
+     * </ul>
+     *
+     * <p><b>不放行 {@code REFUND_FAILED} 即让它成为死状态</b>：状态迁移表把 {@code REFUND_FAILED → REFUNDING}
+     * 标注为人工重试边，而另三条通路都够不着它 —— 准入的前置态里没有它，{@code createRefund} 要求 {@code REVOKING}，{@code
+     * manualRepair} 的「重试退款」只补查单任务而 {@code failRefund} 的前置态是 {@code
+     * REFUNDING}。于是一笔退款失败的单永远退不了款，只能改库。§6.4 原话：「若准入谓词不给 例外分支，这两条边永远 {@code
+     * affected_rows=0}，它们又会退化成死状态」。
+     *
+     * <p><b>做法不是悄悄放宽谓词，而是把人工通道显式化</b>：{@code operator} 为空时前置态集合里就没有 {@code
+     * REFUND_FAILED}，自动链路照旧撞不进来 —— 开口只对带审计的调用生效。
+     *
+     * <p><b>{@code operator} / {@code reason} 随操作记录落库</b>（BR-C-27）。参数只被接收而不落库的话，
+     * 「谁把这单从退款失败拉回来重试的」在库里查不到 —— 开了口却没留痕，比不开口更糟。
+     *
+     * @param operator 人工处置操作人；{@code null} 表示自动路径，此时不放行 {@code REFUND_FAILED}
+     * @return {@code false} 表示条件更新未命中 —— 状态非法或并发已推进，这是三道闸的第一道
+     */
+    @BenefitTx
+    public boolean admitRefund(
+            PlayBizRecord order, String revokeNo, String operator, String reason) {
+        String bizNo = order.getPlayBizRecordNo();
+
+        // 人工路径显式开口：带 operator 才额外放行 REFUND_FAILED（§6.4）。
+        // 不带则集合与自动路径一致 —— 开口不会被自动链路误用
+        List<String> from =
+                operator == null || operator.isBlank()
+                        ? List.of(RefundStatus.NONE.name(), RefundStatus.REVOKE_FAILED.name())
+                        : List.of(
+                                RefundStatus.NONE.name(),
+                                RefundStatus.REVOKE_FAILED.name(),
+                                RefundStatus.REFUND_FAILED.name());
+
+        int rows =
+                bizRecordMapper.advanceRefundStatusFrom(bizNo, from, RefundStatus.REVOKING.name());
+        if (rows == 0) {
+            return false;
+        }
+
+        // op_seq 恒为空串：一单至多一次回收操作（OpType.REVOKE_BENEFIT.atMostOnce）。
+        // 这道 uk_biz_op 是三道闸的第二道 —— 客服连点生成两个不同的 refundReqNo 时，
+        // 两把幂等键都是新的、唯一索引不冲突，只有这条单据级约束拦得住
+        opRecordMapper.upsertWithOperator(
+                revokeNo,
+                revokeNo,
+                bizNo,
+                order.getUserId(),
+                order.getActivityId(),
+                OpType.REVOKE_BENEFIT.name(),
+                "",
+                OpStatus.PROCESSING.name(),
+                operator,
+                reason);
+        return true;
+    }
+
+    /**
+     * 回收成功：<b>逐条</b>落回收单号与回收时间到履约明细，回写操作记录终态。
+     *
+     * <p><b>{@code revoke_time} 由库时钟取</b>，与 {@code createRefund} 的操作记录时间同源 —— 两端出自
+     * 不同时钟时，「先回收后退款」这条顺序在审计时可能反过来（BR-B-34）。
+     *
+     * <p>主单退款态<b>停在 {@code REVOKING}</b>，不在此推进：下一步是 {@code createRefund} 把它推到 {@code
+     * REFUNDING}。此处若提前推进，一笔回收成功但退款尚未发起的单看起来像已在退款中。
+     *
+     * @param revoked 确实回收成功的明细，逐条留痕；空列表时只回写操作记录
+     */
+    @BenefitTx
+    public void settleRevoke(String bizNo, String revokeNo, List<RevokedItem> revoked) {
+        markRevokedItems(bizNo, revokeNo, revoked);
+        opRecordMapper.finish(
+                bizNo,
+                OpType.REVOKE_BENEFIT.name(),
+                "",
+                OpStatus.SUCCESS.name(),
+                RetStatus.SUCCESS.name());
+    }
+
+    /**
+     * 回收确定失败：主单退 {@code REVOKE_FAILED}，操作记录置失败。
+     *
+     * <p><b>仍要为已成功的那几项留痕</b>：一单跨多个供应方时各项结果可以不同 —— A 已核销回收失败、 B 未使用回收成功，整笔汇总为失败，而 B
+     * 的券确实已经被收走了。汇总结果决定主单状态，不决定 明细留痕；两者混同会让对账第 2 项把 B 判成「已退款未回收」，而那条项是资损哨兵。
+     *
+     * <p><b>不推进退款</b>：权益还在用户手里，退款即为资损。该状态可由人工重试重入 —— 故它是 {@code admitRefund} 的合法前置态之一。
+     */
+    @BenefitTx
+    public void failRevoke(String bizNo, String revokeNo, List<RevokedItem> revoked) {
+        markRevokedItems(bizNo, revokeNo, revoked);
+        bizRecordMapper.advanceRefundStatus(
+                bizNo, RefundStatus.REVOKING.name(), RefundStatus.REVOKE_FAILED.name());
+        opRecordMapper.finish(
+                bizNo,
+                OpType.REVOKE_BENEFIT.name(),
+                "",
+                OpStatus.FAILED.name(),
+                RetStatus.FAIL.name());
+    }
+
+    /**
+     * 回收结果未定：操作记录置未知态，<b>主单保持 {@code REVOKING}</b>，同事务落 {@code REVOKE} 任务。
+     *
+     * <p><b>不置 {@code REVOKE_FAILED}</b>：那是「确定失败」的位置，而此刻权益可能已被收走。判失败
+     * 会让人工按「权益还在」处置，可能导致二次回收；更糟的是若据此拒绝退款，用户既没权益也没钱。
+     *
+     * <p>已确定回收成功的那几项<b>照常留痕</b>，理由同 {@link #failRevoke}：未定的是整笔，不是每一项。 留痕还使收敛通路能跳过它们 —— 见 {@code
+     * reconcileRevoke} 按 {@code revoke_no} 判断哪些还要重问。
+     *
+     * <p>任务与状态同事务落库，理由与 {@code finishGrant} 一字不差：置未定态却没落任务，这笔单 就永远停在中间态 —— 没有任何机制会再看它一眼。
+     */
+    @BenefitTx
+    public void unresolvedRevoke(
+            String bizNo, String revokeNo, RetStatus downstream, List<RevokedItem> revoked) {
+        markRevokedItems(bizNo, revokeNo, revoked);
+        opRecordMapper.finish(
+                bizNo,
+                OpType.REVOKE_BENEFIT.name(),
+                "",
+                OpStatus.UNKNOWN.name(),
+                downstream.name());
+        taskMapper.enqueue(
+                BizNoGenerator.taskNo(), bizNo, TaskType.REVOKE.name(), revokeNo, 0, "{}");
+    }
+
+    /**
+     * 逐条落回收留痕。
+     *
+     * <p>三个出口（成功、失败、未定）都调它 —— 留痕的判据是「这一项收没收走」，与整笔的汇总结果 无关。集中在一处而非各写一遍：三处若各自演化，「失败时也要留痕」这条迟早在某一处丢掉。
+     */
+    private void markRevokedItems(String bizNo, String revokeNo, List<RevokedItem> revoked) {
+        for (RevokedItem item : revoked) {
+            fulfillmentMapper.markRevoked(bizNo, item.grantOpNo(), revokeNo, item.usageStatus());
+        }
+    }
+
+    // ---- 退款执行（V3 PR-8） ----
+
+    /**
+     * 退款受理：{@code REVOKING → REFUNDING}，落退款单号与操作记录，<b>同事务</b>。
+     *
+     * <p><b>前置态限定 {@code REVOKING}</b>：该状态只能由 {@code revokeAndAdmit} 置入 —— 它本身就是
+     * 「准入已通过且回收已完成」的凭据。这是「先回收后退款」不可颠倒的机器化形式：绕过准入直接 调退款，会在这道谓词上命中 0 行。
+     *
+     * <p>{@code uk_biz_op(bizNo, 'CREATE_REFUND', '')} 是三道闸的第二道，挡「两个不同 {@code refundNo} 退两次」——
+     * 客服连点生成两个新的请求号时，两把幂等键都不冲突，只有这条单据级约束拦得住。
+     *
+     * @return {@code false} 表示状态非法或并发已推进
+     */
+    @BenefitTx
+    public boolean startRefund(PlayBizRecord order, String refundNo) {
+        String bizNo = order.getPlayBizRecordNo();
+        int rows =
+                bizRecordMapper.advanceRefundStatus(
+                        bizNo, RefundStatus.REVOKING.name(), RefundStatus.REFUNDING.name());
+        if (rows == 0) {
+            return false;
+        }
+        bizRecordMapper.fillRefundNo(bizNo, refundNo);
+        opRecordMapper.upsert(
+                refundNo,
+                refundNo,
+                bizNo,
+                order.getUserId(),
+                order.getActivityId(),
+                OpType.CREATE_REFUND.name(),
+                "",
+                OpStatus.PROCESSING.name());
+        return true;
+    }
+
+    /**
+     * 退款成功：主单进终态，操作记录置成功，<b>同事务落库存回补任务</b>。
+     *
+     * <p><b>回补任务与状态推进同事务</b>，理由与 {@code applyPayCallback} 落 {@code GRANT} 一字不差：置了 {@code
+     * REFUND_SUCCESS} 却没落任务，这一单的 {@code consumed} 就永远还不回去 —— 而对账第 6 项 比对的正是 {@code consumed}
+     * 与「已支付且未退款成功」的份数，退款后分母减少而 {@code consumed} 不动，<b>每轮必报一次假差异</b>，资损哨兵随之失效（技术方案 §3.4 口径表）。
+     *
+     * <p><b>只回补库存，不返还限购额度</b>：这个不对称是 §3.4 定死的 —— 商品可以再卖给别人，故库存
+     * 回补；而「买了再退」若能刷回额度，限购即被绕过，故额度不还。因此这里落的是 {@code STOCK_RESTORE} 而非 {@code
+     * STOCK_RELEASE}：后者会连额度一起还（见 {@link #releaseStock}）。
+     *
+     * <p>{@code op_no} 取 {@code bizNo + '_' + task_type}，与其余库存类任务同一约定 —— 留空串则同一单可 插入多条回补任务，{@code
+     * uk_biz_type_op} 不起作用（§3.3 的 {@code NOT NULL DEFAULT ''} 陷阱）。
+     */
+    @BenefitTx
+    public void settleRefund(String bizNo) {
+        bizRecordMapper.advanceRefundStatus(
+                bizNo, RefundStatus.REFUNDING.name(), RefundStatus.REFUND_SUCCESS.name());
+        opRecordMapper.finish(
+                bizNo,
+                OpType.CREATE_REFUND.name(),
+                "",
+                OpStatus.SUCCESS.name(),
+                RetStatus.SUCCESS.name());
+        // 退款回补库存（§3.4 口径表）。落 STOCK_RESTORE 而非 STOCK_RELEASE：
+        // 前者只减 consumed，后者会连限购额度一并返还 —— 而退款不返还额度
+        enqueueStockTask(bizNo, TaskType.STOCK_RESTORE);
+    }
+
+    /** 退款确定失败：主单进 {@code REFUND_FAILED}，可人工重试。 */
+    @BenefitTx
+    public void failRefund(String bizNo) {
+        bizRecordMapper.advanceRefundStatus(
+                bizNo, RefundStatus.REFUNDING.name(), RefundStatus.REFUND_FAILED.name());
+        opRecordMapper.finish(
+                bizNo,
+                OpType.CREATE_REFUND.name(),
+                "",
+                OpStatus.FAILED.name(),
+                RetStatus.FAIL.name());
+    }
+
+    /**
+     * 退款结果未定：操作记录置未知态，<b>主单保持 {@code REFUNDING}</b>，同事务落 {@code QUERY_REFUND} 任务。
+     *
+     * <p><b>不置 {@code REFUND_FAILED}</b>：那是「确定失败」的位置，而此刻钱可能已经退出去了。判失败 会让人工按「没退成」处置并重发 —— 那就是重复退款。
+     */
+    @BenefitTx
+    public void unresolvedRefund(String bizNo, String refundNo, RetStatus downstream) {
+        opRecordMapper.finish(
+                bizNo, OpType.CREATE_REFUND.name(), "", OpStatus.UNKNOWN.name(), downstream.name());
+        taskMapper.enqueue(
+                BizNoGenerator.taskNo(), bizNo, TaskType.QUERY_REFUND.name(), refundNo, 0, "{}");
+    }
+
     @BenefitTx
     public RetStatus consumeStock(PlayBizRecord order) {
         String bizNo = order.getPlayBizRecordNo();
@@ -567,7 +811,7 @@ public class OrderTxService {
      * 一道则不限购的单同样以 {@code LOCKED} 进入释放，把不属于它的额度还掉 —— 这个错误只在<b>限额中途变过</b>时显形：下单时不限购，
      * 运营随后调高限额，同用户另一单建行并占用，此时前一单释放就会把后一单的额度减掉。
      *
-     * <p><b>退款不返还额度</b> —— 限购是为了防单用户过度占用营销资源，若「买了再退」能刷回额度， 限购形同虚设。库存则相反，退款要回补，商品可以再卖给别人。这个不对称写在技术方案
+     * <p><b>退款不返还额度</b> —— 限购是为了防单用户过度占用营销资源，若「买了再退」能刷回额度， 限购即被绕过。库存则相反，退款要回补，商品可以再卖给别人。这个不对称写在技术方案
      * §3.4 的 口径表里，是有意为之。退款属 V3，此处只处置「未成立」。
      */
     @BenefitTx
@@ -597,6 +841,42 @@ public class OrderTxService {
             // NONE（不限购，从未占用）与 RELEASED（已还过）都走这里，两者都不该再还
             log.info("quota not held or already released, skip, bizNo={}", bizNo);
         }
+        return RetStatus.SUCCESS;
+    }
+
+    /**
+     * 退款回补库存：{@code consumed} 还回可售，<b>限购额度不动</b>。
+     *
+     * <p><b>与 {@link #releaseStock} 的分工是本方法存在的全部理由</b>：那个处置「交易未成立」（关单、 支付失败）—— 还 {@code
+     * locked}，并连带返还额度；本方法处置「交易已成立后反悔」（退款）—— 还 {@code consumed}，且<b>不返还额度</b>。技术方案 §3.4
+     * 的口径表把这个不对称定死了：商品 可以再卖给别人，故库存回补；而「买了再退」若能刷回额度，限购即被绕过。
+     *
+     * <p>合并成一个方法会让退款去减一个早已归零的 {@code locked} —— 下界谓词 {@code locked >= qty} 把它挡下，
+     * <b>不报错而库存实际没回补</b>，且额度被顺带还掉。两种错各自静默。
+     *
+     * <p><b>每单幂等由 {@code stock_status} 的条件更新承担</b>（{@code CONSUMED → RESTORED}），不由库存 SQL
+     * 的下界承担：{@code consumed} 是该 {@code stock_key} 下所有订单共享的计数器，本单重复回补时 它因别的订单占用仍大于 0，{@code consumed
+     * >= qty} 照常放行 —— 结果是这一单还掉了别人的已售份额，可售余量多出一份，直接超卖。这与 {@code releaseStock} 里那道闸是同一条理由。
+     *
+     * <p>前置态限定 {@code CONSUMED} 而非 {@code LOCKED}：只有真正转过消耗的单才有 {@code consumed} 可还。 一笔关单释放过的单其
+     * {@code stock_status} 是 {@code RELEASED}，命中 0 行，跳过 —— 这正是 {@code RESTORED} 不复用 {@code
+     * RELEASED} 的用处。
+     */
+    @BenefitTx
+    public RetStatus restoreStock(PlayBizRecord order) {
+        String bizNo = order.getPlayBizRecordNo();
+        if (bizRecordMapper.advanceStockStatus(
+                        bizNo, StockStatus.CONSUMED.name(), StockStatus.RESTORED.name())
+                == 0) {
+            // 已回补过，或这一单未转过消耗（关单释放过的单停在 RELEASED）。
+            // 两者都不该再回补，且都不是错误 —— 任务重跑本就是预期路径
+            log.info("stock not consumed or already restored, skip, bizNo={}", bizNo);
+            return RetStatus.SUCCESS;
+        }
+        stockMapper.tryRestore(StockKeys.stockKey(order.getSkuId()), order.getQuantity());
+        // 限购额度不返还（§3.4 口径表）：quota_status 停在 LOCKED 不动，
+        // 「买了再退」不该刷回额度，否则反复买退即可绕过限购
+        log.info("stock restored after refund, bizNo={}", bizNo);
         return RetStatus.SUCCESS;
     }
 }

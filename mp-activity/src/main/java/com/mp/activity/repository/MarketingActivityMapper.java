@@ -69,7 +69,7 @@ public interface MarketingActivityMapper extends BaseMapper<MarketingActivity> {
      *
      * <ul>
      *   <li>只判状态：两个并发发布都读到 {@code DRAFT}，各自算出同一个新版本号，后一个覆盖前一个 —— 版本表里两行、主表指向其中一行，另一行成了没人认的孤儿
-     *   <li>只判版本：{@code ENDED} 的活动也能被发布，状态机形同虚设
+     *   <li>只判版本：{@code ENDED} 的活动也能被发布，状态机不起作用
      * </ul>
      *
      * <p>{@code affected_rows = 0} 即并发已被另一方推进，调用方须放弃本次发布而非重试 —— 重试会 基于陈旧的版本号再算一次。

@@ -5,8 +5,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.common.enums.ErrorCode;
+import com.mp.common.enums.GrantStatus;
 import com.mp.common.enums.TaskType;
 import com.mp.common.exception.BizException;
+import com.mp.mock.fault.PayLedger;
+import com.mp.mock.fault.ProviderLedger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -22,12 +25,16 @@ import org.junit.jupiter.api.Test;
 /**
  * 库存 0 超卖与限购，对应《分阶段方案》§5.7 退出标准 17、18。
  *
- * <p><b>0 超卖的判据是「售出数 == 库存总量」，不是「没报错」。</b> 超卖的失效形态恰恰是全部成功 ——
+ * <p><b>0 超卖的判据是「售出数 == 库存总量」，不是「没报错」。</b> 超卖的失效形态是全部成功 ——
  * 每个请求都拿到订单、都没有异常，只是卖出去的比有的多。故每个并发用例都同时断言三处：成功数、 {@code locked + consumed} 的终值、以及订单表实际行数。
  *
  * <p>并发用例用真实线程池压同一行，不是串行调用 N 次：串行永远测不出「两个线程同时读到还剩 1」。
  */
 class StockAndQuotaIT extends AbstractMySqlIT {
+
+    @org.springframework.beans.factory.annotation.Autowired private PayLedger payLedger;
+
+    @org.springframework.beans.factory.annotation.Autowired private ProviderLedger providerLedger;
 
     /** seed 库存总量，与 V2190 一致 */
     private static final int TOTAL_STOCK = 100;
@@ -234,7 +241,7 @@ class StockAndQuotaIT extends AbstractMySqlIT {
     /**
      * 支付成功后预占转消耗，<b>可售余量不变</b>。
      *
-     * <p>转消耗只是把「占着」变成「卖掉了」，不释放余量。若实现成 {@code locked -= n} 而忘了 {@code consumed += n}，可售余量会凭空多一份 ——
+     * <p>转消耗只是把「占着」变成「卖掉了」，不释放余量。若实现成 {@code locked -= n} 而忘了 {@code consumed += n}，可售余量会多出一份 ——
      * 这正是「断言余量」而非只断言 {@code locked} 的理由。
      */
     @Test
@@ -255,7 +262,7 @@ class StockAndQuotaIT extends AbstractMySqlIT {
      * 支付失败释放库存与额度，可售余量回升。
      *
      * <p>tag 取 {@code stockPayFail} 而非 {@code payFail}：后者与 {@code BranchRejectionIT} 撞车 —— 同 tag
-     * 派生同 {@code clientReqNo}，第二个类跑到时命中幂等返回原单，压根不会扣库存，断言随之失准。 <b>tag 在整个 IT 套件里必须唯一</b>，不只是在本类里。
+     * 派生同 {@code clientReqNo}，第二个类跑到时命中幂等返回原单，根本不会扣库存，断言随之失准。 <b>tag 在整个 IT 套件里必须唯一</b>，不只是在本类里。
      */
     @Test
     void payFailureReleasesStockAndQuota() {
@@ -316,7 +323,7 @@ class StockAndQuotaIT extends AbstractMySqlIT {
      * >= qty} 挡下 —— 于是它验的是「下界生效」，而不是 「A 单不会释放掉 B 单的预占」。
      *
      * <p>后者才是真正的风险，且<b>下界完全拦不住</b>：{@code locked} 是该 {@code stock_key} 下所有订单共享的 计数器，A 单重复释放时它因 B
-     * 单占用仍大于 0，谓词照常通过，结果是可售余量凭空多一份 —— 直接超卖。
+     * 单占用仍大于 0，谓词照常通过，结果是可售余量多出一份 —— 直接超卖。
      *
      * <p>拦住它的只能是 {@code benefit_task.uk_biz_type_op}：同一单同类任务只入队一条。本用例通过 「人工把已完成的任务打回
      * PENDING」模拟唯一键被绕过（真实场景是调度器重复领取），断言即便如此 也不会多减 —— 因为任务只有一条，重跑的还是它自己。
@@ -344,7 +351,7 @@ class StockAndQuotaIT extends AbstractMySqlIT {
         runScheduler();
 
         assertThat(lockedOf()).as("B 单的预占不得被 A 的重复释放动到").isEqualTo(1);
-        assertThat(availableOf()).as("可售余量不得凭空增加").isEqualTo(TOTAL_STOCK - 1);
+        assertThat(availableOf()).as("可售余量不得增加").isEqualTo(TOTAL_STOCK - 1);
     }
 
     /** 同一单同类库存任务只入队一条，由 {@code uk_biz_type_op} 保证。 */
@@ -366,7 +373,7 @@ class StockAndQuotaIT extends AbstractMySqlIT {
                 .as("同一单同类库存任务只应有一条")
                 .isEqualTo(1);
 
-        // op_no 必须是确定性键而非空串 —— 空串时唯一索引形同虚设
+        // op_no 必须是确定性键而非空串 —— 空串时唯一索引不起作用
         assertThat(
                         str(
                                 benefitJdbc,
@@ -557,6 +564,152 @@ class StockAndQuotaIT extends AbstractMySqlIT {
                 benefitJdbc,
                 "SELECT consumed FROM marketing_stock WHERE stock_key = ?",
                 stockKey());
+    }
+
+    // ------------------------------------------------------------------
+    // 多份购买（放开 quantity=1 守卫）
+    // ------------------------------------------------------------------
+
+    /**
+     * <b>买 N 份收 N 份钱</b>。
+     *
+     * <p>这是放开 {@code quantity=1} 守卫后最危险的一处：{@code order_amount} 若不乘份数，就是买 3 份 收 1
+     * 份钱，<b>而没有任何下游能发现</b> —— 支付方按 {@code order_amount} 收款，金额校验拿 {@code pay_amount} 与它比，两边一致；对账第 5
+     * 项比的也是这两个数。库存与限购却按 3 份扣， 于是货发 3 份、钱收 1 份，账面处处自洽。
+     *
+     * <p><b>单价从 seed 读，不写死</b>：写死则改 seed 时本条静默失效。
+     */
+    @Test
+    void orderAmountMultipliesByQuantity() {
+        long unitPrice =
+                num(benefitJdbc, "SELECT sale_price FROM benefit_sku WHERE sku_id = ?", SKU_ID);
+        relaxLimitTo(10);
+
+        String bizNo = benefitOrderService.createTrade(newTradeReq("mq_amount", 3)).getBizNo();
+
+        assertThat(
+                        num(
+                                benefitJdbc,
+                                "SELECT order_amount FROM play_biz_record"
+                                        + " WHERE play_biz_record_no = ?",
+                                bizNo))
+                .as("应付须为单价 × 份数 —— 漏乘即买 3 份收 1 份钱，且账面自洽无人发现")
+                .isEqualTo(unitPrice * 3);
+        assertThat(
+                        num(
+                                benefitJdbc,
+                                "SELECT quantity FROM play_biz_record"
+                                        + " WHERE play_biz_record_no = ?",
+                                bizNo))
+                .isEqualTo(3);
+    }
+
+    /**
+     * <b>买 N 份，库存与限购各扣 N</b>，且支付后转消耗也是 N。
+     *
+     * <p>库存四处（预占、转消耗、释放、回补）本就传 {@code quantity}，本条是回归保护 —— 它们与金额
+     * 那处曾处于相反状态：一边按份数、一边按单数，而<b>两边都不报错</b>。
+     */
+    @Test
+    void stockAndQuotaDeductByQuantity() {
+        relaxLimitTo(10);
+        int before = availableOf();
+
+        String bizNo = benefitOrderService.createTrade(newTradeReq("mq_stock", 3)).getBizNo();
+
+        assertThat(lockedOf()).as("预占须按份数").isEqualTo(3);
+        assertThat(availableOf()).as("可售余量须减 3").isEqualTo(before - 3);
+        assertThat(usedQtyOf("U_mq_stock")).as("限购额度须按份数扣").isEqualTo(3);
+
+        payLedger.markPaid(bizNo);
+        benefitOrderService.payCallback(newPayCallback(bizNo, "T_mq", "N1", "SUCCESS"));
+        runScheduler();
+
+        assertThat(consumedOf()).as("转消耗须按份数").isEqualTo(3);
+        assertThat(lockedOf()).as("预占须已归还").isZero();
+    }
+
+    /**
+     * <b>限购按份数判，不按单数</b>：限 2 份时，一单买 3 份直接被拒。
+     *
+     * <p>这条确定了 {@code purchase_limit_qty} 的语义 —— 它是「最多买几份」而非「最多下几单」。 两种口径下 {@code used_qty}
+     * 的累加方式相反，而对账第 15 项（{@code SUM(quantity)}）已按前者实现。
+     *
+     * <p>拒绝时须<b>不留痕</b>：额度未扣、库存未占。只断言抛异常的话，一个「先占后判」的实现照样通过， 而那会让一次被拒的下单永久占着库存。
+     */
+    @Test
+    void quotaLimitCountsSharesNotOrders() {
+        int availableBefore = availableOf();
+
+        assertThatThrownBy(() -> benefitOrderService.createTrade(newTradeReq("mq_overlimit", 3)))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .as("限 2 份时一单买 3 份须拒 —— 按单数判则它会被放行")
+                .isEqualTo(ErrorCode.QUOTA_EXCEEDED);
+
+        assertThat(usedQtyOf("U_mq_overlimit")).as("被拒时不得扣额度").isZero();
+        assertThat(availableOf()).as("被拒时不得占库存 —— 先占后判会让被拒的单永久占着").isEqualTo(availableBefore);
+    }
+
+    /** 份数下界与上界：0 / 负数 / 超过上限一律拒，且不建单。 */
+    @Test
+    void quantityOutOfRangeIsRejected() {
+        for (int bad : new int[] {0, -1, 100}) {
+            assertThatThrownBy(
+                            () -> benefitOrderService.createTrade(newTradeReq("mq_bad" + bad, bad)))
+                    .as("份数 %s 须被拒", bad)
+                    .isInstanceOf(BizException.class)
+                    .extracting(e -> ((BizException) e).getCode())
+                    .isEqualTo(ErrorCode.INVALID_PARAM);
+        }
+        assertThat(availableOf()).as("非法份数不得占库存").isEqualTo(TOTAL_STOCK);
+    }
+
+    /**
+     * <b>买 N 份，供应方收到的份数也是 N</b>。
+     *
+     * <p><b>判据取供应方账本，不取平台记录</b>：平台侧的履约明细只有状态没有数量，对账十五项也不 比对这个维度 —— 于是一个把 {@code qty} 写死成 1
+     * 的实现，在平台侧看来处处正常（明细 {@code SUCCESS}、账本一条、金额还收足了 3 份的钱），<b>只有供应方数得清到底发了几份</b>。 这与「重复发奖 = 0
+     * 取下游账本」是同一条理由。
+     *
+     * <p>它与 {@link #orderAmountMultipliesByQuantity} 构成一对：那条防「收少了」，这条防「发少了」。
+     * <b>两条缺任一条，另一条都会让缺陷看起来「账平了」</b> —— 收 1 份钱发 1 份货是自洽的， 收 3 份钱发 3 份货也是自洽的，只有收 3 发 1
+     * 才是资损，而它需要两条一起才测得出来。
+     */
+    @Test
+    void providerReceivesOrderQuantity() {
+        relaxLimitTo(10);
+        String bizNo = benefitOrderService.createTrade(newTradeReq("mq_grant", 3)).getBizNo();
+        payLedger.markPaid(bizNo);
+        benefitOrderService.payCallback(newPayCallback(bizNo, "T_mqg", "N1", "SUCCESS"));
+        runScheduler();
+
+        assertThat(orderField("grant_status", bizNo)).isEqualTo(GrantStatus.GRANT_SUCCESS.name());
+
+        // 逐供应方核对：一次调用一把 opNo，份数应为订单份数
+        List<String> opNos =
+                benefitJdbc.queryForList(
+                        "SELECT DISTINCT grant_op_no FROM benefit_fulfillment_record"
+                                + " WHERE play_biz_record_no = ? AND grant_op_no IS NOT NULL",
+                        String.class,
+                        bizNo);
+        assertThat(opNos).as("前提：该单须已产生发放调用").isNotEmpty();
+        for (String opNo : opNos) {
+            assertThat(providerLedger.grantedQty(opNo))
+                    .as("供应方 %s 收到的份数须等于订单份数 —— 写死 1 即收 3 份钱发 1 份货", opNo)
+                    .isEqualTo(3);
+        }
+    }
+
+    /**
+     * 把限购放宽到够本用例买 N 份。
+     *
+     * <p>seed 限的是 2 份，而多份用例要买 3 份 —— <b>不放宽则它们撞的是限购，测不到金额与库存</b> （首版即如此，实测两条同时报「超出限购额度」）。{@code
+     * restoreStock} 会在每个用例后还原。
+     */
+    private void relaxLimitTo(int limitQty) {
+        benefitJdbc.update(
+                "UPDATE benefit_sku SET purchase_limit_qty = ? WHERE sku_id = ?", limitQty, SKU_ID);
     }
 
     private int availableOf() {

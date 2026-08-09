@@ -13,7 +13,7 @@ import org.apache.ibatis.annotations.Update;
  * 超卖的全部要点， 也是本项目不引入分布式锁做库存的理由（技术方案 §7.4：L2 是性能优化，L3 才是正确性兜底）。
  *
  * <p><b>下界保护不提供每单幂等</b>：{@code locked} 是该 {@code stock_key} 下所有订单共享的计数器。 A 单重复释放两次时，{@code locked}
- * 因别的订单占用仍远大于 0，{@code WHERE locked >= ?} 根本 不会拦 —— 结果是 A 释放了别人的预占，可售余量凭空多一份，直接超卖。每单幂等由 {@code
+ * 因别的订单占用仍远大于 0，{@code WHERE locked >= ?} 根本 不会拦 —— 结果是 A 释放了别人的预占，可售余量多出一份，直接超卖。每单幂等由 {@code
  * benefit_task.uk_biz_type_op} 承担，故库存类任务的 {@code op_no} 必须取 {@code biz_no + '_' + task_type} 而非留空串。
  */
 @Mapper
@@ -46,4 +46,28 @@ public interface MarketingStockMapper extends BaseMapper<MarketingStock> {
             "UPDATE marketing_stock SET locked = locked - #{qty}"
                     + " WHERE stock_key = #{stockKey} AND locked >= #{qty}")
     int tryRelease(@Param("stockKey") String stockKey, @Param("qty") long qty);
+
+    /**
+     * 回补（退款成功）：{@code consumed} 减，可售余量回升。
+     *
+     * <p>技术方案 §3.4 的口径表明确要求这一步：<b>退款回补库存</b>（商品可以再卖给别人），而<b>不返还
+     * 限购额度</b>（否则「买了再退」能刷回额度，限购被绕过）。这个不对称是有意的 —— 故本方法只动 {@code marketing_stock}，{@code
+     * user_purchase_quota} 一律不碰。
+     *
+     * <p><b>缺了它，对账第 6 项在任何含退款的场景里都会报差异</b>：该项比对 {@code consumed} 与「已支付 且未退款成功」的份数（{@code
+     * sumConsumedQuantity} 的谓词 {@code refund_status <> 'REFUND_SUCCESS'}）， 退款后分母减少而 {@code
+     * consumed} 不动，每轮对账必报一次。而<b>假告警会让资损哨兵失效</b> —— §3.4 原话：「退款/关单后的口径必须定死，否则对账第 6
+     * 项在任何含退款的压测里都会报差异」。
+     *
+     * <p><b>与 {@link #tryRelease} 是两个动作，不可合并</b>：那个减 {@code locked}（交易未成立，预占归还）， 这个减 {@code
+     * consumed}（交易已成立后反悔，已售归还）。合并会让退款去减一个早已归零的 {@code locked} —— 下界谓词把它挡下，看起来「没报错」，而实际什么也没回补。
+     *
+     * <p>下界 {@code consumed >= qty} 防减成负值。<b>它同样不提供每单幂等</b>：{@code consumed} 是该 {@code stock_key}
+     * 下所有订单共享的计数器，本单重复回补时它因别的订单占用仍大于 0，谓词照常通过 —— 每单幂等由主单 {@code stock_status} 的条件更新承担（{@code
+     * CONSUMED → RESTORED}）。
+     */
+    @Update(
+            "UPDATE marketing_stock SET consumed = consumed - #{qty}"
+                    + " WHERE stock_key = #{stockKey} AND consumed >= #{qty}")
+    int tryRestore(@Param("stockKey") String stockKey, @Param("qty") long qty);
 }

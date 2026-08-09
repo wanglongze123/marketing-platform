@@ -337,7 +337,7 @@ public class ActivityServiceImpl implements ActivityService {
             return true;
         }
         if (value == null || value.isBlank()) {
-            // 配了范围但取不到值：判不通过而非放行 —— 放行等于配置形同虚设
+            // 配了范围但取不到值：判不通过而非放行 —— 放行等于配置不起作用
             return false;
         }
         return scopeJson.contains("\"" + value + "\"");

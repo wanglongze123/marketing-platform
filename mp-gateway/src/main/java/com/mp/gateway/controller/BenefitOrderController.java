@@ -3,6 +3,8 @@ package com.mp.gateway.controller;
 import com.mp.api.benefit.dto.ConvergenceResp;
 import com.mp.api.benefit.dto.CreateTradeReq;
 import com.mp.api.benefit.dto.CreateTradeResp;
+import com.mp.api.benefit.dto.ManualRepairReq;
+import com.mp.api.benefit.dto.ManualRepairResp;
 import com.mp.api.benefit.dto.OpRecordItem;
 import com.mp.api.benefit.dto.PayCallbackReq;
 import com.mp.api.benefit.dto.PreConsultReq;
@@ -11,6 +13,7 @@ import com.mp.api.benefit.dto.QueryOrderPageReq;
 import com.mp.api.benefit.dto.QueryOrderPageResp;
 import com.mp.api.benefit.dto.QueryOrderResp;
 import com.mp.api.benefit.dto.QuerySkuResp;
+import com.mp.api.benefit.dto.ReconcileReport;
 import com.mp.api.benefit.service.BenefitOrderService;
 import com.mp.common.enums.RetStatus;
 import com.mp.common.web.ApiResponse;
@@ -132,6 +135,34 @@ public class BenefitOrderController {
     @GetMapping("/order/{bizNo}/op-records")
     public ApiResponse<List<OpRecordItem>> queryOpRecords(@PathVariable String bizNo) {
         return ok(benefitOrderService.queryOpRecords(bizNo));
+    }
+
+    // ------------------------------------------------------------------
+    // 运维设施。有副作用，故用 POST。
+    // ------------------------------------------------------------------
+
+    /**
+     * 跑一轮对账（FR-C06）。V3 PR-10。
+     *
+     * <p>演示入口：人为改库制造差异 → 调本端点 → 观察差异被检出、可自愈的项补建了任务、只告警的项 出现在报告里但未改数。
+     *
+     * <p><b>与 {@code /api/fault/**} 同属运维设施，V3 交付前须移入独立端口或加鉴权</b>：它能触发补建 任务，即能改变业务链路的走向。
+     */
+    @PostMapping("/reconcile")
+    public ApiResponse<ReconcileReport> reconcile() {
+        return ok(benefitOrderService.reconcile());
+    }
+
+    /**
+     * 人工处置（FR-C07）。V3 PR-10。
+     *
+     * <p><b>{@code operator} / {@code reason} / {@code ticketNo} 必填</b>，由服务层校验后落审计（BR-C-27）。
+     *
+     * <p>同样属运维设施：它是绕过自动链路的写入口，交付前须加鉴权 —— 无鉴权的「标记人工完成」等于 任何人都能把一笔未收敛的单标成成功。
+     */
+    @PostMapping("/manual-repair")
+    public ApiResponse<ManualRepairResp> manualRepair(@RequestBody ManualRepairReq req) {
+        return ok(benefitOrderService.manualRepair(req));
     }
 
     private static <T> ApiResponse<T> ok(T data) {
