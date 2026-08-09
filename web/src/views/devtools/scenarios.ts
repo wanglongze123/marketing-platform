@@ -188,9 +188,14 @@ export const SCENARIOS: Scenario[] = [
   {
     id: 'multiQuantity',
     name: '多份购买',
-    desc: '买 3 份：应付 = 单价 × 3，履约每项各发 3 份',
+    desc: '买 2 份：应付 = 单价 × 2，履约每项各发 2 份',
     async run(c) {
-      const qty = 3
+      // 份数取 2 而非更大：演示 SKU 的 purchase_limit_qty = 2（V2190 seed），
+      // 买 3 份会被限购判 1713 —— 那验的是限购，不是本场景要验的份数金额链路。
+      //
+      // 不为此调大 seed 限额：限购 2 份是「限购生效」那批用例的判据，
+      // 改它会让那些用例失去约束对象。场景就着数据走，不是数据就着场景走
+      const qty = 2
       const sku = await c.step('取 SKU 单价', async () =>
         expectOk(await querySku(SEED_SKU_ID), '查 SKU')
       )
@@ -205,7 +210,7 @@ export const SCENARIOS: Scenario[] = [
           )
           return d
         },
-        // 漏乘份数的表现是「买 3 份收 1 份钱」，且账面处处自洽 —— 只有比对金额才看得出来
+        // 漏乘份数的表现是「买 N 份收 1 份钱」，且账面处处自洽 —— 只有比对金额才看得出来
         '金额按份数放大，不是单价'
       )
 

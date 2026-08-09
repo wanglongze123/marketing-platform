@@ -31,7 +31,17 @@ const activityId = ref('')
 const payStatus = ref<PayStatus | ''>('')
 const grantStatus = ref<GrantStatus | ''>('')
 
+/**
+ * 请求序号，用于丢弃过期响应。
+ *
+ * 本页有筛选表单与翻页两个触发源，连点时先发的不保证先回 —— 旧结果晚到会覆盖新的，
+ * 表现是「筛选条件与列表内容对不上」。运营看到的是一份不属于当前条件的数据，
+ * 而页面本身没有任何异常提示。
+ */
+let reqSeq = 0
+
 async function load() {
+  const seq = ++reqSeq
   loading.value = true
   error.value = ''
   const r = await queryOrders({
@@ -42,6 +52,7 @@ async function load() {
     page: page.value,
     size: size.value,
   })
+  if (seq !== reqSeq) return
   loading.value = false
   if (r.kind === 'ok') {
     items.value = r.data.items

@@ -24,7 +24,19 @@ const ITEM_META: Record<string, { name: string; icon: string }> = {
 }
 const meta = (id: string) => ITEM_META[id] ?? { name: id, icon: '🎁' }
 
+/**
+ * 请求序号，用于丢弃过期响应。
+ *
+ * 本页的窗口比一般列表页更宽：两阶段请求（先列表、再逐单取明细），中间还有一次
+ * Promise.all。切用户时旧的那一轮很可能仍在第二阶段，回来后覆盖新用户的结果 ——
+ * 表现是「切到用户 B，权益列表还是用户 A 的」。
+ *
+ * 两个阶段各查一次序号：第一阶段就作废时不必再发 N 个详情请求。
+ */
+let reqSeq = 0
+
 async function load() {
+  const seq = ++reqSeq
   loading.value = true
   rights.value = []
 
@@ -35,12 +47,15 @@ async function load() {
     payStatus: 'PAY_SUCCESS',
     size: 20,
   })
+  // 已被更新的请求取代：不再发第二阶段的 N 个请求
+  if (seq !== reqSeq) return
   if (list.kind !== 'ok') {
     loading.value = false
     return
   }
 
   const details = await Promise.all(list.data.items.map((o) => queryOrder(o.bizNo)))
+  if (seq !== reqSeq) return
   const acc: typeof rights.value = []
   details.forEach((d, i) => {
     if (d.kind !== 'ok') return

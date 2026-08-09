@@ -22,10 +22,25 @@ const size = 10
 const loading = ref(false)
 const error = ref('')
 
+/**
+ * 请求序号，用于丢弃过期响应。
+ *
+ * 切用户或翻页会连发两次查询，而**先发的不保证先回**。旧请求晚回时会覆盖新结果 ——
+ * 表现是「切到用户 B，页面列着用户 A 的订单」，且不报错、刷新一下又好了，
+ * 是最难复现也最容易被当成偶发的一类缺陷。
+ *
+ * 每次请求自增，回来时不是最新那次就整个丢弃：不写 items，也不写 error 与 loading
+ * —— 只认最后一次请求的结果，中途的一律当作没发生过。
+ */
+let reqSeq = 0
+
 async function load() {
+  const seq = ++reqSeq
   loading.value = true
   error.value = ''
   const r = await queryOrders({ userId: session.userId, page: page.value, size })
+  // 已有更新的请求发出：本次结果作废。不改任何状态，交由那一次收尾
+  if (seq !== reqSeq) return
   loading.value = false
   if (r.kind === 'ok') {
     items.value = r.data.items
