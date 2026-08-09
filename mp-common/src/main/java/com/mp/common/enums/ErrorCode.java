@@ -48,6 +48,17 @@ public final class ErrorCode {
     public static final String SPONSOR_IS_FOLLOWER = "1614";
 
     /**
+     * 分享者不是该轮次的师傅。V3 PR-3 补入。
+     *
+     * <p>取 16xx 裂变段的空位（PRD 附录 C：后三位 6xx 为裂变），与 {@link #SPONSOR_IS_FOLLOWER} 同属师徒身份校验组 ——
+     * 二者一个判「师徒是不是同一人」，一个判「分享者是不是这一轮的师傅」。
+     *
+     * <p>归 1xxx 而非 4xxx：入参本身合法（是一个真实存在的 {@code sponsorId}），被拒的是<b>它与该轮次 的归属关系</b> —— 与 {@code 1614}
+     * 同类。换个 {@code groupId} 重试可能通过，但同一组合重试结果不变。
+     */
+    public static final String SPONSOR_NOT_GROUP_OWNER = "1615";
+
+    /**
      * 被分享对象未通过好友过滤（PRD FR-F05、BR-F-12）。V3 PR-6 引入。
      *
      * <p>归 1xxx：确定的业务拒绝 —— 该好友本轮不可被分享，重试结果不变。
@@ -129,6 +140,17 @@ public final class ErrorCode {
 
     /** 必填参数缺失或取值非法 */
     public static final String INVALID_PARAM = "4001";
+
+    /**
+     * 幂等键冲突：同一个外部流水号被用在了另一次操作上（PRD 附录 C）。V3 PR-3 引入。
+     *
+     * <p><b>与「幂等命中」是相反的两件事</b>：命中指同一请求重复到达，返回原结果；本码指<b>不同</b> 请求复用了同一把键 —— 上游的单号生成有问题。
+     *
+     * <p>不静默按命中处理：那会返回一条与本次请求无关的记录，调用方据此认为操作成功，而实际 什么也没做。这类失效没有异常、没有日志，只有一条状态不对的数据。
+     *
+     * <p>归 4xxx：同一组合重试结果不变，须上游换号。
+     */
+    public static final String IDEMPOTENT_KEY_CONFLICT = "4002";
 
     /**
      * 活动发布校验不通过（PRD FR-C01、BR-C-04）。V3 PR-1 引入。

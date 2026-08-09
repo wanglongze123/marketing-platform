@@ -177,12 +177,25 @@ public class BenefitTaskScheduler {
     }
 
     /**
-     * 执行耗时超过续租阈值则延长租约（《分阶段方案》§5.6 ④）。
+     * 执行耗时超过阈值则尝试延长租约，并在超时已不可挽回时告警（《分阶段方案》§5.6 ④）。
      *
-     * <p>阈值取租约的三分之二：租约 30 秒时超 20 秒续租。不续租的话，一次异常缓慢的下游调用会让 租约在执行途中到期，另一实例正当接管并重跑同一任务 —— 下游按 {@code
-     * opNo} 幂等挡得住重复发放， 但两个实例同时在途会让状态回写互相覆盖，且 fencing 会把先完成那个的结果判掉。
+     * <p>阈值取租约的三分之二：租约 30 秒时超 20 秒。
      *
-     * <p>放在 handler 返回之后而非另起线程定时续租：V2 的任务是单次 RPC + 两个短事务，正常耗时 百毫秒级，执行中途无并发点可插。真正的长任务出现时再改为执行中定期续租。
+     * <p><b>这是事后续租，对「单次长 RPC」无保护作用，不要把它当成长任务的解法。</b> 本方法在 {@code handler.handle()}
+     * <b>返回之后</b>才拿得到耗时 —— 而执行期间无并发点可插， 无处发起续租。于是：
+     *
+     * <ul>
+     *   <li>耗时在阈值与租约之间（20~30s）：续租成功，确实起了作用 —— 它保护的是<b>写回</b>， 不是执行
+     *   <li>耗时超过租约（&gt;30s）：租约已过期甚至已被另一实例接管，{@code renewLease} 带 fencing， {@code affected_rows =
+     *       0}；紧随其后的 {@code writeBack} 同样被 fencing 拒绝。 这次执行完全白跑，结果被丢弃，任务由接管者重跑
+     * </ul>
+     *
+     * <p><b>故 V2 的契约是：单次任务耗时必须短于租约。</b> 依据是任务形态 —— 单次 RPC + 两个短事务， 正常百毫秒级，比 30 秒租约低两个数量级。<b>该契约当前没有
+     * RPC 超时兜底</b>：injvm 下 调用等同本地方法，Dubbo 超时不生效，V4 拆 tri 协议时须显式配置 provider/consumer timeout，
+     * 否则一个卡死的下游调用会无限期占住调度线程。
+     *
+     * <p>契约被打破时<b>必须看得见</b>：续租失败单独打 error 并写明后果，而不是混在一条 {@code renewed=false} 里 ——
+     * 后者读起来像「续租没必要」，实际是「这次执行白跑了」。 真正的长任务出现时，改法是执行前另起守护线程定期续租，不是调大阈值。
      */
     private void renewIfSlow(BenefitTask task, long startNanos) {
         long elapsedSeconds = (System.nanoTime() - startNanos) / 1_000_000_000L;
@@ -190,11 +203,25 @@ public class BenefitTaskScheduler {
             return;
         }
         int rows = taskMapper.renewLease(task.getId(), owner, leaseSeconds);
-        log.warn(
-                "task ran {}s, renewed lease, taskNo={}, renewed={}",
+        if (rows > 0) {
+            log.warn(
+                    "task ran {}s (lease {}s), lease renewed, taskNo={}",
+                    elapsedSeconds,
+                    leaseSeconds,
+                    task.getTaskNo());
+            return;
+        }
+        // 续租被 fencing 拒绝：租约已过期或已易主。本次执行的结果即将被 writeBack 一并丢弃 ——
+        // 这不是「续租没必要」，而是「单次执行超出了租约」，即上面那条契约被打破
+        log.error(
+                "task ran {}s, exceeded lease {}s and could not renew, this run is discarded and"
+                        + " the task will be re-executed by whoever holds the lease now;"
+                        + " taskNo={}, type={}, bizNo={}",
                 elapsedSeconds,
+                leaseSeconds,
                 task.getTaskNo(),
-                rows > 0);
+                task.getTaskType(),
+                task.getBizNo());
     }
 
     /** 按四分类写回。affected_rows=0 一律视为租约已易主，放弃且不重试本次写回。 */

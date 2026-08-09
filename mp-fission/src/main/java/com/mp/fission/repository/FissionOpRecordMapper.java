@@ -59,6 +59,81 @@ public interface FissionOpRecordMapper {
     @Select("SELECT op_no FROM fission_op_record WHERE idempotent_key = #{idempotentKey}")
     String selectOpNoByIdempotentKey(@Param("idempotentKey") String idempotentKey);
 
+    /**
+     * 按幂等键回查<b>整条</b>记录，供命中后校验「原操作与本次请求是否同一件事」。
+     *
+     * <p>只取 {@code op_no} 不够：幂等键是全局唯一的，命中只证明「这个流水号用过」，不证明 「用在了同一个徒弟、同一次关系上」。上游若跨操作复用了 {@code
+     * outFlowNo}，仅凭 {@code op_no} 命中就回查当前请求对应的关系并返回，会把另一次操作的结果说成本次加入成功 —— 而那条关系可能仍停在 {@code
+     * INVITED}。
+     */
+    @Select(
+            "SELECT op_no, idempotent_key, out_biz_no, activity_id, subject_id, op_type"
+                    + " FROM fission_op_record WHERE idempotent_key = #{idempotentKey}")
+    OpRecordBinding selectBindingByIdempotentKey(@Param("idempotentKey") String idempotentKey);
+
+    /**
+     * 操作记录的绑定字段投影，仅供幂等命中校验使用。
+     *
+     * <p>不复用完整实体：这里要的是「这次操作绑在谁身上」，多取一列都会让调用点看起来像是 在做业务读取。
+     */
+    class OpRecordBinding {
+
+        private String opNo;
+        private String idempotentKey;
+        private String outBizNo;
+        private String activityId;
+        private String subjectId;
+        private String opType;
+
+        public String getOpNo() {
+            return opNo;
+        }
+
+        public void setOpNo(String opNo) {
+            this.opNo = opNo;
+        }
+
+        public String getIdempotentKey() {
+            return idempotentKey;
+        }
+
+        public void setIdempotentKey(String idempotentKey) {
+            this.idempotentKey = idempotentKey;
+        }
+
+        public String getOutBizNo() {
+            return outBizNo;
+        }
+
+        public void setOutBizNo(String outBizNo) {
+            this.outBizNo = outBizNo;
+        }
+
+        public String getActivityId() {
+            return activityId;
+        }
+
+        public void setActivityId(String activityId) {
+            this.activityId = activityId;
+        }
+
+        public String getSubjectId() {
+            return subjectId;
+        }
+
+        public void setSubjectId(String subjectId) {
+            this.subjectId = subjectId;
+        }
+
+        public String getOpType() {
+            return opType;
+        }
+
+        public void setOpType(String opType) {
+            this.opType = opType;
+        }
+    }
+
     /** 某业务某类操作的记录数，测试与审计用。 */
     @Select(
             "SELECT COUNT(*) FROM fission_op_record"

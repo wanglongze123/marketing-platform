@@ -31,7 +31,8 @@ import org.springframework.beans.factory.annotation.Autowired;
  */
 class FriendFilterIT extends AbstractMySqlIT {
 
-    private static final String ACT = "ACT_DEMO_001";
+    /** 裂变活动，见 {@link AbstractMySqlIT#FISSION_ACTIVITY_ID}。 */
+    private static final String ACT = FISSION_ACTIVITY_ID;
 
     @Autowired private FissionService fissionService;
     @Autowired private SocialProfileStore social;

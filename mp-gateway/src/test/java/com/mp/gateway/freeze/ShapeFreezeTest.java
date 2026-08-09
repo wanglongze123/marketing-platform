@@ -186,8 +186,8 @@ class ShapeFreezeTest {
     void txServicesUseSchemaBoundAnnotationsInsteadOfBareTransactional() {
         try (Stream<Path> files = Files.walk(REPO)) {
             List<Path> txServices =
-                    files.filter(p -> p.toString().contains("/src/main/java/"))
-                            .filter(p -> !p.toString().contains("/target/"))
+                    files.filter(ShapeFreezeTest::underSrcMainJava)
+                            .filter(p -> !contains(p, "target"))
                             .filter(p -> p.getFileName().toString().endsWith("TxService.java"))
                             .toList();
             assertThat(txServices).as("至少应存在 OrderTxService").isNotEmpty();
@@ -404,6 +404,92 @@ class ShapeFreezeTest {
         assertThat(body).as("onMiss 不得用 retry_count 计连续查无").doesNotContain("getRetryCount()");
     }
 
+    /**
+     * 查无计数的读写两侧对 payload 用同一种表示。
+     *
+     * <p>写侧是 {@code JSON_SET}（{@code BenefitTaskMapper.setMissStreak}），列类型也是 {@code JSON}。 读侧若用正则从
+     * JSON 文本里抠数字，两侧的假设就不一致 —— 而这种不一致的失效是<b>静默</b>的： payload 加字段、或 {@code missStreak}
+     * 被写成字符串，正则匹配不上即返回 0，连续查无计数 被无声重置，阈值永远达不到，重发永不触发。没有异常、没有日志，只有一笔停在 {@code GRANT_UNKNOWN} 的单。
+     *
+     * <p>断言读侧走 JSON 解析而非正则。行为由 {@code FaultInjectionIT} 的重发用例覆盖，此处防的是 有人图省事改回正则。
+     */
+    @Test
+    void missStreakIsReadWithJsonParserNotRegex() {
+        String handler =
+                read(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/task/"
+                                + "QueryGrantTaskHandler.java");
+
+        assertThat(handler)
+                .as("读侧须用 JSON 解析，与写侧的 JSON_SET 对齐")
+                .contains("readTree")
+                .doesNotContain("Pattern.compile")
+                .doesNotContain("java.util.regex");
+    }
+
+    /**
+     * 裂变集成测试不得硬编码活动号，一律取 {@code AbstractMySqlIT.FISSION_ACTIVITY_ID}。
+     *
+     * <p><b>防的是一个真实发生过的失效</b>：V3 PR-4~PR-10 期间 {@code createRound} 只判「活动存在」， 五个裂变测试类借用 {@code
+     * ACT_DEMO_001}（{@code play_type = 'BENEFIT_SELL'}）都能跑通；补上 {@code playType} 校验后 43
+     * 个用例同时变红。它们本就不该绿 —— 一个把裂变组开在权益售卖活动上的 实现，测试却在为它背书。
+     *
+     * <p><b>为什么必须机器化而不是靠注释</b>：写错的后果不是「某条断言失败」，而是该类每个用例都在 {@code openGroup}
+     * 处抛异常。排查时看到的是一堆与被测行为无关的报错，而真正的原因藏在一个 常量字面量里。下一个人加裂变用例时，复制粘贴一个旧类的 {@code ACT_DEMO_001} 是最自然的 动作
+     * —— 靠人记住不可靠，靠这条测试才拦得住。
+     *
+     * <p>判据取「裂变 IT 的<b>代码</b>里不出现权益活动号」。注释里可以出现（几处正是在解释为何不能 用它），故先剥掉注释再查。
+     *
+     * <p>{@code FissionSponsorEntryIT} 例外：它有一条用例专门断言「裂变组不能开在权益售卖活动上」， 那里出现 {@code ACT_DEMO_001}
+     * 是被测行为本身。例外按类名白名单列出而非放宽判据 —— 放宽等于 这条检查对所有类都失效。
+     */
+    @Test
+    void fissionIntegrationTestsUseTheFissionSeedActivity() {
+        // 该类的用例本身就要拿权益活动去撞 playType 校验
+        List<String> allowed = List.of("FissionSponsorEntryIT.java");
+
+        try (Stream<Path> files = Files.walk(REPO.resolve("mp-gateway/src/test/java"))) {
+            List<Path> fissionIts =
+                    files.filter(p -> p.getFileName().toString().endsWith("IT.java"))
+                            .filter(p -> !contains(p, "target"))
+                            .filter(ShapeFreezeTest::opensFissionRound)
+                            .toList();
+
+            assertThat(fissionIts).as("未找到任何开裂变轮次的 IT，判据可能已失效").isNotEmpty();
+
+            for (Path p : fissionIts) {
+                String name = p.getFileName().toString();
+                if (allowed.contains(name)) {
+                    continue;
+                }
+                assertThat(stripComments(readPath(p)))
+                        .as("%s 是裂变用例，活动号须取 FISSION_ACTIVITY_ID，不得硬编码权益活动 ACT_DEMO_001", name)
+                        .doesNotContain("ACT_DEMO_001");
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("扫描集成测试失败", e);
+        }
+    }
+
+    /** 是否会开裂变轮次 —— 这类用例才受活动 {@code playType} 约束。 */
+    private static boolean opensFissionRound(Path p) {
+        String src = readPath(p);
+        return src.contains("openGroup(") || src.contains("sponsorQuery(");
+    }
+
+    /** 剥掉块注释与行注释，使「注释里提到某字面量」不触发判据。 */
+    private static String stripComments(String source) {
+        return source.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("(?m)//.*$", "");
+    }
+
+    private static String readPath(Path p) {
+        try {
+            return Files.readString(p, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new IllegalStateException("读取源码失败: " + p, e);
+        }
+    }
+
     /** 组合注解自身必须指定管理器，否则上一条检查只是把裸注解换了个名字。 */
     @Test
     void eachTxAnnotationDeclaresItsTransactionManager() {
@@ -487,9 +573,8 @@ class ShapeFreezeTest {
     void noCatchAllMapsToFailure() {
         try (Stream<Path> files = Files.walk(REPO)) {
             List<Path> sources =
-                    files.filter(p -> p.toString().endsWith(".java"))
-                            .filter(p -> p.toString().contains("/src/main/java/"))
-                            .filter(p -> !p.toString().contains("/target/"))
+                    files.filter(p -> p.getFileName().toString().endsWith(".java"))
+                            .filter(p -> underSrcMainJava(p) && !contains(p, "target"))
                             .toList();
             assertThat(sources).isNotEmpty();
 
@@ -1005,6 +1090,33 @@ class ShapeFreezeTest {
     /** 压掉换行与缩进，让断言不受 spotless 折行位置影响 —— 否则改一次格式就要改一次断言。 */
     private static String normalize(String source) {
         return source.replaceAll("\\s+", "");
+    }
+
+    /**
+     * 路径中是否含某个目录名。
+     *
+     * <p>按 {@link Path} 元素比对而非字符串含 {@code "/target/"} —— Windows 的分隔符是 {@code
+     * "\"}，字符串匹配恒不命中。失效形态是<b>这道闸一个文件都没检查却显示通过</b>： 过滤后集合为空，遍历零次，断言自然不红。
+     */
+    private static boolean contains(Path p, String dirName) {
+        for (Path part : p) {
+            if (part.toString().equals(dirName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 是否位于 {@code src/main/java} 之下。要求三段连续，避免误纳 {@code src/test/java}。 */
+    private static boolean underSrcMainJava(Path p) {
+        for (int i = 0; i + 2 < p.getNameCount(); i++) {
+            if (p.getName(i).toString().equals("src")
+                    && p.getName(i + 1).toString().equals("main")
+                    && p.getName(i + 2).toString().equals("java")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<String> names(Class<? extends Enum<?>> type) {

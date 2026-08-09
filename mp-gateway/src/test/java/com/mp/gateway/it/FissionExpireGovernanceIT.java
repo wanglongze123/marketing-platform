@@ -27,7 +27,8 @@ import org.springframework.beans.factory.annotation.Autowired;
  */
 class FissionExpireGovernanceIT extends AbstractMySqlIT {
 
-    private static final String ACT = "ACT_DEMO_001";
+    /** 裂变活动，见 {@link AbstractMySqlIT#FISSION_ACTIVITY_ID}。 */
+    private static final String ACT = FISSION_ACTIVITY_ID;
 
     /** 已过期：造数据时直接写进 {@code expire_time} */
     private static final String PAST = "2020-01-01 00:00:00.000";

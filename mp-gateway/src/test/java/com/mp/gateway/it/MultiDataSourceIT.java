@@ -32,7 +32,8 @@ class MultiDataSourceIT extends AbstractMySqlIT {
                 "3002",
                 "3003",
                 "3004",
-                "3090");
+                "3090",
+                "3091");
         assertHistoryOwnedBy(
                 benefitJdbc,
                 "db_benefit",

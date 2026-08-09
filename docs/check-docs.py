@@ -195,6 +195,8 @@ def check_against_repo(txt):
     ctl_dir = 'mp-gateway/src/main/java/com/mp/gateway/controller'
     paths = set()
     for f in os.listdir(os.path.join(ROOT, ctl_dir)):
+        if not f.endswith('.java'):
+            continue
         src = read(os.path.join(ctl_dir, f))
         base = re.search(r'@RequestMapping\("([^"]+)"\)', src)
         prefix = base.group(1) if base else ''

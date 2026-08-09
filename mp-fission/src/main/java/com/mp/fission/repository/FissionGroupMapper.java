@@ -59,6 +59,21 @@ public interface FissionGroupMapper extends BaseMapper<FissionGroup> {
     FissionGroup selectByGroupId(@Param("groupId") String groupId);
 
     /**
+     * 该轮次是否尚未过期，<b>按库时钟判定</b>。
+     *
+     * <p>与 {@link #selectRunning} 的 {@code expire_time > NOW(3)} 是同一个谓词，只是按 {@code group_id} 索取 ——
+     * 分享与加入手上已有 {@code groupId}，不必绕道 {@code (activityId, sponsorId)}。
+     *
+     * <p><b>不在 Java 侧比 {@code LocalDateTime.now()}</b>：{@code expire_time} 由库的 {@code
+     * DATE_ADD(NOW(3), ...)} 算出，判定与生成取自同一个时钟才不会因应用与库的时差在边界抖动 —— 与《分阶段方案》§5.6 ⑦ 对 {@code next_time}
+     * 的处置同源，那里的时差表现为「调度器一条任务也领不到」。
+     */
+    @Select(
+            "SELECT COUNT(*) > 0 FROM fission_group"
+                    + " WHERE group_id = #{groupId} AND expire_time > NOW(3)")
+    boolean isUnexpired(@Param("groupId") String groupId);
+
+    /**
      * 取占着 {@code active_flag} 的那一轮，<b>不看有效期</b>。
      *
      * <p>与 {@link #selectRunning} 的分工：本方法的判据与 {@code uk_activity_sponsor_active} 完全一致， 供撞键后回查使用 ——

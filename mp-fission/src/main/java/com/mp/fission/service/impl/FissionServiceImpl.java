@@ -65,6 +65,14 @@ public class FissionServiceImpl implements FissionService {
     private static final int ID_RETRY_LIMIT = 3;
 
     /**
+     * 本玩法的 {@code playType}，裂变轮次只能开在这类活动上。
+     *
+     * <p>取字面量而非枚举：{@code playType} 在 {@code mp-api} 的 DTO 里就是 {@code String}（见 {@code
+     * CreateActivityReq}、{@code GrantRewardReq}），为一处校验往冻结的公共契约里加枚举，代价 远大于收益 —— 而契约冻结是 M0 的验收项之一。
+     */
+    private static final String PLAY_TYPE_FISSION = "FISSION";
+
+    /**
      * 发奖在途豁免窗口：10 分钟（《分阶段方案》§6.4 ③）。
      *
      * <p>须长于「发奖 + 查单收敛」的正常耗时（V2 实测 PROCESSING 收敛 153s），短到不让一行永久 豁免。超时后允许治理接管并告警，对账第 13 项据此扫描。
@@ -204,6 +212,28 @@ public class FissionServiceImpl implements FissionService {
         ActivityConfResp conf = activityService.queryActivityConf(activityId);
         if (conf == null) {
             throw new BizException(ErrorCode.INVALID_PARAM, "活动不存在: " + activityId);
+        }
+
+        // 「存在」不等于「可以在它上面开裂变轮次」。ActivityConfResp 带着 available 与 playType
+        // 两个字段，只判 null 等于把它们丢掉：
+        //
+        // - available：由库判定时间窗与状态（与 decideQualification 同一口径）。不判则已下线、
+        //   已结束、尚未开始的活动照样能开轮，而轮次一旦建出来就会被后续的分享、加入接受
+        // - playType：不判则裂变轮次能挂在权益售卖活动上。两个玩法的配置版本、奖励快照各不
+        //   相同，PR-4 的双向发奖按 group.config_version 读裂变奖励配置，挂错活动时读到的是
+        //   一份根本不含裂变奖励的快照
+        //
+        // 判在 createRound 而非各调用点：sponsorQuery 与 openGroup 两条路都要经过这里，
+        // 放调用点则漏一处就是一个绕过口
+        if (!conf.isAvailable()) {
+            throw new BizException(
+                    ErrorCode.NO_AVAILABLE_ACTIVITY,
+                    "活动不可用: " + activityId + ", status=" + conf.getStatus());
+        }
+        if (!PLAY_TYPE_FISSION.equals(conf.getPlayType())) {
+            throw new BizException(
+                    ErrorCode.INVALID_PARAM,
+                    "活动玩法不是裂变: " + activityId + ", playType=" + conf.getPlayType());
         }
 
         Integer maxRound = groupMapper.selectMaxRound(activityId, sponsorId);
@@ -383,6 +413,26 @@ public class FissionServiceImpl implements FissionService {
 
         FissionGroup group = requireRunningGroup(req.getGroupId());
 
+        // 请求里的 sponsorId 只用于校验，此后一律取轮次上的值（BR-C-06 的同一条原则：
+        // 客户端声明仅作提示，以服务端上下文为准）。
+        //
+        // 不校验就直接用请求值时，知道他人 groupId 即可往那一轮里塞一条 sponsor_id 是自己的
+        // 关系 —— 同组关系带着两个不同的师傅，而师傅返奖按关系上的 sponsor_id 发，奖直接
+        // 落到伪造者头上。这是控制面契约没有落进执行面的典型：followerJoin 用的已经是
+        // group.getSponsorId()，只有本方法信了请求。
+        //
+        // 校验须先于过滤：FilterContext 也带 sponsorId，它决定「已有关系」「已是师傅」这些
+        // 规则按谁来判 —— 传请求值等于让攻击者指定过滤基准，而过滤结果直接决定建哪些关系。
+        String sponsorId = group.getSponsorId();
+        if (!sponsorId.equals(req.getSponsorId())) {
+            log.warn(
+                    "shareInvite sponsor mismatch, groupId={}, claimed={}, actual={}",
+                    req.getGroupId(),
+                    req.getSponsorId(),
+                    sponsorId);
+            throw new BizException(ErrorCode.SPONSOR_NOT_GROUP_OWNER, "分享者不是该轮次的师傅");
+        }
+
         List<String> targets = new ArrayList<>();
         for (String followerId : req.getFollowerIds()) {
             if (followerId == null || followerId.isBlank()) {
@@ -390,7 +440,7 @@ public class FissionServiceImpl implements FissionService {
             }
             // 师徒非同人：分享给自己不成立。先于过滤判 —— 自邀是刷奖入口，不该混在
             // 「未通过过滤」这个较软的结论里
-            if (followerId.equals(req.getSponsorId())) {
+            if (followerId.equals(sponsorId)) {
                 throw new BizException(ErrorCode.SPONSOR_IS_FOLLOWER, "师徒不能为同一人");
             }
             targets.add(followerId);
@@ -407,7 +457,7 @@ public class FissionServiceImpl implements FissionService {
                 new FilterContext(
                         req.getGroupId(),
                         group.getActivityId(),
-                        req.getSponsorId(),
+                        sponsorId,
                         group.getConfigVersion(),
                         INFLUENCE_THRESHOLD);
         List<String> passed = filterChain.filter(ctx, targets, false);
@@ -425,7 +475,7 @@ public class FissionServiceImpl implements FissionService {
                 tx.createInvitedRelation(
                         req.getGroupId(),
                         group.getActivityId(),
-                        req.getSponsorId(),
+                        sponsorId,
                         followerId,
                         req.getShareMethod(),
                         relationExpireOf(group));
@@ -458,6 +508,15 @@ public class FissionServiceImpl implements FissionService {
     public boolean followerConnect(String groupId, String followerId) {
         requireText(groupId, "groupId");
         requireText(followerId, "followerId");
+
+        // 与分享、加入同一道闸：终结或已过期的轮次不得再推进关系。
+        //
+        // 缺了它，三条写路径对「轮次还能不能动」给出两种答案 —— 分享与加入拒绝，建联放行。
+        // 表现是终结轮次里的 INVITED 仍能被推成 CONNECTED，而 PR-4 的双向发奖以关系状态为
+        // 判据，一条本该随轮次一起作废的关系就这样进了发奖范围。
+        //
+        // 幂等性不受影响：本方法的幂等来自下面那条条件更新的 status 谓词，不来自「不校验」
+        requireRunningGroup(groupId);
 
         // 条件更新 WHERE status='INVITED'：重复点击命中 0 行，天然幂等（BR-F-13）。
         // 不先查后判 —— 那在并发下会两个线程都读到 INVITED 各推进一次
@@ -493,11 +552,27 @@ public class FissionServiceImpl implements FissionService {
             throw new BizException(ErrorCode.SPONSOR_IS_FOLLOWER, "师徒不能为同一人");
         }
 
-        // 幂等前置查：outFlowNo 标识本次操作，命中直接返回原关系
-        String hitOpNo = opRecordMapper.selectOpNoByIdempotentKey(req.getOutFlowNo());
-        if (hitOpNo != null) {
+        // 幂等前置查：outFlowNo 标识本次操作，命中且确属同一件事才返回原关系
+        FissionOpRecordMapper.OpRecordBinding hit =
+                opRecordMapper.selectBindingByIdempotentKey(req.getOutFlowNo());
+        if (hit != null) {
+            // 命中只证明「这个流水号用过」，不证明「用在了同一件事上」。
+            //
+            // uk_idempotent 是全局唯一键，上游若把某次操作的 outFlowNo 复用到另一次加入
+            // （不同徒弟、不同关系，甚至不同 op_type），此处仍然命中。若就此回查
+            // (groupId, followerId) 的 active 关系并返回，返回的是「当前请求对应的那条关系」——
+            // 而它可能仍停在 INVITED，从没被这次调用推进过。调用方拿到一个非空 relationId，
+            // 会认为加入已成功。
+            //
+            // 这类失效是静默的：没有异常、没有错误码，只有一条状态不对的关系。故命中后
+            // 必须比对绑定字段，不一致按幂等键冲突（4002）显式拒绝
+            requireSameOperation(hit, req);
+
             FissionRelation r = relationMapper.selectActive(req.getGroupId(), req.getFollowerId());
-            log.info("followerJoin idempotent hit, outFlowNo={}", req.getOutFlowNo());
+            log.info(
+                    "followerJoin idempotent hit, outFlowNo={}, opNo={}",
+                    req.getOutFlowNo(),
+                    hit.getOpNo());
             return r == null ? null : r.getRelationId();
         }
 
@@ -683,7 +758,58 @@ public class FissionServiceImpl implements FissionService {
     // 辅助
     // ------------------------------------------------------------------
 
-    /** 取进行中的裂变组，不存在或已终结即拒绝 —— 往已结束的轮次里拉人不成立。 */
+    /**
+     * 幂等命中后校验「原操作」与「本次请求」是否同一件事，不是则按幂等键冲突拒绝。
+     *
+     * <p>比对三项，各挡一类复用：
+     *
+     * <ul>
+     *   <li>{@code op_type} —— 挡「完成操作的流水号被当成加入重传」。二者是不同动作，PRD BR-F-14/15 把 {@code outBizNo} 与
+     *       {@code outFlowNo} 分开正是为此
+     *   <li>{@code subject_id} —— 挡「甲的加入流水号用在乙的加入上」。它是操作主体，即徒弟
+     *   <li>{@code out_biz_no} —— 挡「同一徒弟、不同师徒关系」。它标识一次师徒关系（BR-F-14）
+     * </ul>
+     *
+     * <p><b>判 {@code 4002} 而非静默返回</b>：幂等的语义是「同一请求重复执行结果相同」，前提是 「同一请求」。请求不同却复用了幂等键，是上游的单号生成有问题 ——
+     * 静默按命中处理会把 这个问题埋起来，且返回的关系状态未必对。归 4xxx：同一组合重试结果不变，重试无意义。
+     *
+     * <p>不比 {@code activityId}：请求里没有这个字段，它由 {@code groupId} 推出，已被 {@code out_biz_no} 那一项覆盖。
+     */
+    private static void requireSameOperation(
+            FissionOpRecordMapper.OpRecordBinding hit, FollowerJoinReq req) {
+        boolean sameType = "FOLLOWER_JOIN".equals(hit.getOpType());
+        boolean sameSubject = req.getFollowerId().equals(hit.getSubjectId());
+        boolean sameBiz = req.getOutBizNo().equals(hit.getOutBizNo());
+        if (sameType && sameSubject && sameBiz) {
+            return;
+        }
+        log.warn(
+                "followerJoin idempotent key reused across operations, outFlowNo={},"
+                        + " opType={}/{}, subject={}/{}, outBizNo={}/{}",
+                req.getOutFlowNo(),
+                hit.getOpType(),
+                "FOLLOWER_JOIN",
+                hit.getSubjectId(),
+                req.getFollowerId(),
+                hit.getOutBizNo(),
+                req.getOutBizNo());
+        throw new BizException(
+                ErrorCode.IDEMPOTENT_KEY_CONFLICT, "外部流水号已用于另一次操作: " + req.getOutFlowNo());
+    }
+
+    /**
+     * 取进行中的裂变组，不存在、已终结或已过期即拒绝 —— 往已结束的轮次里拉人不成立。
+     *
+     * <p><b>「进行中」的判据必须与 {@code selectRunning} 一致</b>：状态 {@code RUNNING} <b>且</b>未过期。
+     * 只判状态时本类会有两套「进行中」定义 —— 进场那条路（走 {@code selectRunning}）认为轮次已经不可用 不再复用它，而分享/加入这条路（走本方法）仍然放行。
+     *
+     * <p>放行的后果不止是「多了几条关系」：{@link #relationExpireOf} 把关系有效期取自轮次， 于是建出来的关系<b>诞生即过期</b>；而 PR-5
+     * 的过期治理尚未落地，没有任何东西会终结这一轮， 这些关系就永远停在那里 —— 既发不了奖，也不会被清理。
+     *
+     * <p>过期判定<b>用库时钟</b>（{@code selectRunning} 的 {@code expire_time > NOW(3)}）而非在 Java 侧比 {@code
+     * LocalDateTime.now()}：{@code expire_time} 由库的 {@code DATE_ADD(NOW(3), ...)} 算出，
+     * 两端取自同一个时钟才不会因应用与库的时差产生边界抖动（与《分阶段方案》§5.6 ⑦ 对 {@code next_time} 的处置同源）。
+     */
     private FissionGroup requireRunningGroup(String groupId) {
         FissionGroup group = groupMapper.selectByGroupId(groupId);
         if (group == null) {
@@ -691,6 +817,12 @@ public class FissionServiceImpl implements FissionService {
         }
         if (!"RUNNING".equals(group.getStatus())) {
             throw new BizException(ErrorCode.GROUP_NOT_RUNNING, "裂变组已终结: " + group.getStatus());
+        }
+        // 状态为 RUNNING 但已过期：轮次过期治理（PR-5）尚未把它推到 EXPIRED，此处按已终结拒绝
+        if (!groupMapper.isUnexpired(groupId)) {
+            throw new BizException(
+                    ErrorCode.GROUP_NOT_RUNNING,
+                    "裂变组已过期: " + groupId + ", expireTime=" + group.getExpireTime());
         }
         return group;
     }

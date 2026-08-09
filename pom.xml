@@ -81,6 +81,16 @@
         <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
         <version>${mybatis-plus.version}</version>
       </dependency>
+      <!--
+        分页插件所在 artifact。MyBatis-Plus 3.5.9 起把依赖 JSqlParser 的
+        PaginationInnerInterceptor 从 mybatis-plus-extension 拆到此处，starter 不再传递引入。
+        缺它时 selectPage 编译不过（而非运行期静默失效），故与分页查询同时加。
+      -->
+      <dependency>
+        <groupId>com.baomidou</groupId>
+        <artifactId>mybatis-plus-jsqlparser</artifactId>
+        <version>${mybatis-plus.version}</version>
+      </dependency>
       <dependency>
         <groupId>com.github.f4b6a3</groupId>
         <artifactId>uuid-creator</artifactId>
