@@ -68,6 +68,44 @@ public interface PlayOpRecordMapper extends BaseMapper<PlayOpRecord> {
             @Param("operator") String operator,
             @Param("reason") String reason);
 
+    /**
+     * 幂等插入并落审计人。{@link #upsert} 的带 {@code operator} 版本。
+     *
+     * <p><b>人工路径的写操作必须留下是谁做的</b>（BR-C-27）：技术方案 §6.4 把「人工通道显式开口」 与「留审计」写成同一条 ——
+     * 谓词给人工路径开例外，代价是那次操作必须可追溯到人。只开口 不留痕等于悄悄放宽了状态机。
+     *
+     * <p>{@code operator} 为 {@code null} 时该列保持原值，即自动路径不留痕 —— 对账据此区分人工干预 与自动收敛，算得出真实的自动收敛率。
+     *
+     * <p><b>重入时新的 {@code operator} 覆盖旧值，但 {@code null} 不覆盖</b>（{@code COALESCE(VALUES(...),
+     * operator)}，注意方向）。两个方向各错一类：
+     *
+     * <ul>
+     *   <li>无条件覆盖 —— 人工拉回后的自动重试会把操作人冲成 {@code NULL}，查不出人工介入过
+     *   <li>一律保留原值 —— 第二次人工处置的操作人写不进去，而<b>本方法的用途正是记录「谁把这单从 退款失败拉回来的」</b>，那必然发生在已有记录之后
+     * </ul>
+     *
+     * <p>故取「新值优先、空值不覆盖」：每次人工介入都留下最新的那个人，自动路径不抹掉它。
+     */
+    @Update(
+            "INSERT INTO play_op_record (op_no, idempotent_key, play_biz_record_no, subject_id,"
+                    + " activity_id, op_type, op_seq, status, operator, reason, retry_count)"
+                    + " VALUES (#{opNo}, #{idempotentKey}, #{bizNo}, #{subjectId}, #{activityId},"
+                    + " #{opType}, #{opSeq}, #{status}, #{operator}, #{reason}, 0)"
+                    + " ON DUPLICATE KEY UPDATE retry_count = retry_count + 1,"
+                    + " operator = COALESCE(VALUES(operator), operator),"
+                    + " reason = COALESCE(VALUES(reason), reason)")
+    int upsertWithOperator(
+            @Param("opNo") String opNo,
+            @Param("idempotentKey") String idempotentKey,
+            @Param("bizNo") String bizNo,
+            @Param("subjectId") String subjectId,
+            @Param("activityId") String activityId,
+            @Param("opType") String opType,
+            @Param("opSeq") String opSeq,
+            @Param("status") String status,
+            @Param("operator") String operator,
+            @Param("reason") String reason);
+
     /** 某单某类操作的操作人，审计断言用。 */
     @org.apache.ibatis.annotations.Select(
             "SELECT operator FROM play_op_record WHERE play_biz_record_no = #{bizNo}"
