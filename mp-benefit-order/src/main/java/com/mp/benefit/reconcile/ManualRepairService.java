@@ -38,8 +38,12 @@ import org.springframework.stereotype.Service;
  * <p><b>重试退款只查不发</b>：与 {@code QUERY_REFUND} 的设计一致 —— 多发一笔奖可回收，多退一笔钱要走
  * 人工追讨，两者的失效代价不对称。人工点「重试退款」时想要的是「把它推到终态」，而查单能做到这件事 且无副作用。
  *
- * <p><b>审计与动作同事务落库</b>：{@code operator} / {@code reason} 写进 {@code play_op_record}，不另开审计表 ——
- * 分表则存在「动作执行了而审计没落」的窗口。
+ * <p><b>审计与动作写同一张表</b>：{@code operator} / {@code reason} 落进 {@code play_op_record}，不另开审计表 ——
+ * 分表则要在两处各写一次，而那两次之间的窗口正是「动作执行了而审计没落」。
+ *
+ * <p><b>但两者刻意不在同一个事务里</b>，理由见 {@link #repair}：审计先落且独立提交，动作失败时它要留下来。 包成一个事务会让 {@code rollbackFor =
+ * Exception.class} 把审计一并回滚，那次处置就此不留痕迹 —— 与本类要达成的相反。两个写各自幂等（审计撞 {@code uk_biz_op}、补建任务撞 {@code
+ * uk_biz_type_op}）， 没有需要原子性的跨写不变量。
  */
 @Service
 public class ManualRepairService {

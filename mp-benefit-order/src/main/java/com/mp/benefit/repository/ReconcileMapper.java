@@ -89,13 +89,23 @@ public interface ReconcileMapper {
      *
      * <p>{@code pay_amount IS NULL} 不算差异：它是 {@code applyPaidAfterClosing} 有意留下的「实付未知」
      * 状态，由支付通知回填；把它算成差异会让每一笔走关单收敛的单都报一次。<b>退款侧对它的处置是拒绝 退款（{@code 1754}），不是当成金额错误</b>。
+     *
+     * <p><b>时间下界与其余项一致</b>（PR-10 后置 review 补）：本项曾是十五项里唯一不带下界的扫描，于是 每轮都要扫全部已支付单，而其余项只看「长期未收敛」的那批。
+     *
+     * <p>下界在这里不只是省开销，它同样是判据的一部分：{@code pay_amount} 由支付通知回填，而一笔刚 走完关单收敛的单在通知到达前 {@code pay_amount} 与
+     * {@code order_amount} 本就可能不等 —— 没有下界时 这个正常的中间态每轮都会被报成金额差异。<b>而假告警会让资损哨兵失效</b>，第 5 项正是哨兵之一。
+     *
+     * <p>补下界之后本条走 {@code idx_pay_update(pay_status, update_time)}；{@code pay_amount <>
+     * order_amount} 是两列比较，任何索引都用不上，只能作为回表后的过滤。
      */
     @Select(
             "SELECT play_biz_record_no FROM play_biz_record"
                     + " WHERE pay_status = 'PAY_SUCCESS'"
                     + " AND pay_amount IS NOT NULL AND pay_amount <> order_amount"
+                    + " AND update_time < DATE_SUB(NOW(3), INTERVAL #{staleSeconds} SECOND)"
                     + " LIMIT #{limit}")
-    List<String> scanAmountMismatch(@Param("limit") int limit);
+    List<String> scanAmountMismatch(
+            @Param("staleSeconds") int staleSeconds, @Param("limit") int limit);
 
     /**
      * 第 6 项 a：超卖检出。{@code locked + consumed > total} 即为已发生的超卖。
@@ -218,6 +228,22 @@ public interface ReconcileMapper {
     /** 已支付单的全部 SKU，供第 6 项逐 SKU 比对。 */
     @Select("SELECT DISTINCT sku_id FROM play_biz_record WHERE pay_status = 'PAY_SUCCESS'")
     List<String> selectPaidSkuIds();
+
+    /**
+     * 这批单号里哪些本地存在。第 8 项按支付方对账文件逐批反查。
+     *
+     * <p><b>批量而非逐笔查</b>：对账文件是支付方一天的全部收款流水，逐笔一次查询会让第 8 项自己成为 最慢的一项 —— 而对账一轮跑不完，第 5/6/11 项的哨兵指标就停止更新。
+     *
+     * <p>走 {@code uk_biz_no}。返回存在的那些，调用方做差集得出「支付方有而本地无」的。<b>反过来写 （查不存在的）做不到</b>：本地没有的行查不出来，SQL
+     * 只能告诉你表里有什么。
+     */
+    @Select({
+        "<script>",
+        "SELECT play_biz_record_no FROM play_biz_record WHERE play_biz_record_no IN",
+        "<foreach item='no' collection='bizNos' open='(' separator=',' close=')'>#{no}</foreach>",
+        "</script>"
+    })
+    List<String> selectExistingBizNos(@Param("bizNos") List<String> bizNos);
 
     /** 主单快照，对账按当前状态决定补哪一种任务（BR-C-23 先查证再动）。 */
     @Select(

@@ -209,6 +209,45 @@ class ShapeFreezeTest {
     }
 
     /**
+     * 对账与人工处置两个类<b>不得带事务注解</b>。
+     *
+     * <p>这条冻结的是一个<b>反向结论</b>：它们看起来「漏了 {@code @BenefitTx}」，实则加上就是缺陷 —— 曾被作为 review
+     * 意见提出过，故用静态检查把判断固定下来，免得每轮 review 重来一次。
+     *
+     * <p>{@code ReconcileService} 加事务违反标准 26：它调 {@code rewardService.batchQueryByOpNos}（跨库 RPC），
+     * 且一轮扫十项、每项 200 行。而<b>标准 26 的检查只读 {@code OrderTxService} 一个文件</b>（见 {@link
+     * #transactionalMethodsContainNoRemoteCall} 的注释「全部事务边界收在 OrderTxService，故只需检查这一个类」）——
+     * 所以那处违规<b>它自己检查不出来</b>，只能由本条守住。
+     *
+     * <p>{@code ManualRepairService} 加事务会真的生效（跨 bean 调用），代价是 {@code rollbackFor = Exception.class}
+     * 把审计行一起回滚 —— 而三个动作在落审计之后才抛 {@code BizException}。「审计先于动作、 动作失败也要留痕」是它明写的约束，包事务正好破坏它。
+     *
+     * <p>两者的写各自幂等（{@code uk_biz_op} / {@code uk_biz_type_op}），没有需要原子性的跨写不变量 —— 事务本就不必要，不只是有害。
+     */
+    @Test
+    void reconcileAndManualRepairCarryNoTransactionAnnotation() {
+        for (String path :
+                List.of(
+                        "mp-benefit-order/src/main/java/com/mp/benefit/reconcile/ReconcileService.java",
+                        "mp-benefit-order/src/main/java/com/mp/benefit/reconcile/ManualRepairService.java",
+                        "mp-fission/src/main/java/com/mp/fission/reconcile/FissionReconcileService.java")) {
+            List<String> annotated =
+                    read(path)
+                            .lines()
+                            .map(String::strip)
+                            // 只看代码行：注释里解释「为什么不加」正是本条要鼓励的写法
+                            .filter(line -> !line.startsWith("*") && !line.startsWith("//"))
+                            .filter(
+                                    line ->
+                                            line.startsWith("@BenefitTx")
+                                                    || line.startsWith("@FissionTx")
+                                                    || line.startsWith("@Transactional"))
+                            .toList();
+            assertThat(annotated).as("%s 不得带事务注解 —— 事务内有 RPC 与长扫描，且会回滚掉先落的审计", path).isEmpty();
+        }
+    }
+
+    /**
      * 任务领取的锁子句必须直接作用于目标表，不得塞进派生表。
      *
      * <p>为绕开 MySQL 错误 1093 很容易写成 {@code UPDATE ... WHERE id IN (SELECT id FROM (SELECT ... FOR

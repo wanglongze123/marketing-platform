@@ -143,6 +143,14 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
     private final ManualRepairService manualRepairService;
     private final long tokenTtlSeconds;
 
+    /**
+     * 本平台在支付方的商户号。支付通知须属于它，否则一律拒绝（技术方案 §5.3 ①.5）。
+     *
+     * <p><b>不给代码内默认值</b>：与 {@code mp.pay-notify.secret} 同一条约定 —— 给了默认值，缺配置时应用照常
+     * 启动、校验照常「通过」，而那个值是谁写的没人知道。缺配置就启动失败，比带着一个错的商户号跑起来安全。
+     */
+    private final String expectedMerchantId;
+
     public BenefitOrderServiceImpl(
             OrderTxService tx,
             BenefitSkuMapper skuMapper,
@@ -157,7 +165,9 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             ContentionMetrics contention,
             ReconcileService reconcileService,
             ManualRepairService manualRepairService,
-            @Value("${mp.consult-token.ttl-seconds}") long tokenTtlSeconds) {
+            @Value("${mp.consult-token.ttl-seconds}") long tokenTtlSeconds,
+            @Value("${mp.pay.merchant-id}") String expectedMerchantId) {
+        this.expectedMerchantId = expectedMerchantId;
         this.reconcileService = reconcileService;
         this.manualRepairService = manualRepairService;
         this.tx = tx;
@@ -451,6 +461,23 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
         }
 
         PayStatus target = parsePayStatus(req.getPayStatus());
+
+        // 商户校验：**无条件做，不分通知类型**（技术方案 §5.3 ①.5）。
+        //
+        // 与金额校验刻意不同：金额只在收款通知里有内容可校验，而「这笔属不属于本商户」
+        // 对每一类通知都成立 —— 一条来自别的商户的 CLOSED 通知同样不该推进本单状态。
+        // 放进下面的 PAY_SUCCESS 分支即等于只拦收款、放行关闭与失败。
+        //
+        // 与验签挡的不是一回事：验签证明「消息来自持密钥方」，本校验证明「这笔属于本商户」。
+        // 多商户共用一把密钥、或密钥泄露后伪造他人商户的单，只有后者拦得住
+        if (!expectedMerchantId.equals(req.getMerchantId())) {
+            log.error(
+                    "payCallback merchant mismatch, bizNo={}, expect={}, actual={}",
+                    bizNo,
+                    expectedMerchantId,
+                    req.getMerchantId());
+            throw new BizException(ErrorCode.PAY_AMOUNT_MISMATCH, "支付商户号不一致");
+        }
 
         // 金额校验：仅验签不够 —— 验签只证明消息来自支付方，不证明金额与本单应付一致。
         // 校验失败不推进任何状态（V2 补对账记录与 P0 告警）

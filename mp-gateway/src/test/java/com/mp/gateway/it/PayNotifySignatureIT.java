@@ -180,6 +180,62 @@ class PayNotifySignatureIT extends AbstractMySqlIT {
         assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.WAIT_PAY.name());
     }
 
+    /**
+     * <b>他人商户的通知被拒</b>（{@code 1731}，技术方案 §5.3 ①.5）。
+     *
+     * <p>本条与 {@link #notificationSignedWithWrongKeyChangesNothing} 的差别正是商户校验存在的理由：那条
+     * 用错密钥签，本条<b>用正确的密钥签</b> —— 签名合法，只是商户号不是本平台的。
+     *
+     * <p>它对应两个真实场景：支付方多商户共用一把通知密钥；或密钥泄露后照着别家商户的单伪造。 两者<b>验签都会通过</b>，只有商户校验拦得住。
+     */
+    @Test
+    void notificationFromAnotherMerchantIsRejected() {
+        String bizNo = createOrder("foreignMch");
+
+        PayCallbackReq req = newPayCallback(bizNo, "PAY1_" + bizNo, "NS_fm", "SUCCESS");
+        req.setMerchantId("MCH_SOMEONE_ELSE");
+        // 按改后的商户号重新签名：签名合法，商户号不是本平台的
+        req.setSign(payNotifySigner.sign(req.signFields()));
+        assertThat(payNotifySigner.verify(req.signFields(), req.getSign()))
+                .as("用例前提：这条通知验签必须是通过的，否则测的是验签而非商户校验")
+                .isTrue();
+
+        assertThatThrownBy(() -> benefitOrderService.payCallback(req))
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.PAY_AMOUNT_MISMATCH);
+
+        assertThat(orderField("pay_status", bizNo))
+                .as("商户不符不得推进支付态")
+                .isEqualTo(PayStatus.WAIT_PAY.name());
+        assertThat(opRecordCount(bizNo, "PAY_CALLBACK")).as("商户不符不得留操作记录").isZero();
+    }
+
+    /**
+     * <b>商户校验对非收款通知同样生效</b> —— 这条守的是校验的<b>位置</b>。
+     *
+     * <p>把商户校验写进 {@code PAY_SUCCESS} 分支（与金额校验并排）是最自然的写法，而那样只拦收款通知： 一条来自他人商户的 {@code CLOSED}
+     * 通知照样能把本单关掉，库存与额度随之释放。
+     *
+     * <p>两者的判据不同：金额只在收款通知里有内容可校验（{@code FAILED} / {@code CLOSED} 不带金额是常态）， 而「这笔属不属于本商户」对每一类通知都成立。
+     */
+    @Test
+    void merchantIsCheckedOnNonPaymentNotificationsToo() {
+        String bizNo = createOrder("foreignMchClose");
+
+        PayCallbackReq req = newPayCallback(bizNo, "PAY1_" + bizNo, "NS_fmc", "FAILED");
+        req.setMerchantId("MCH_SOMEONE_ELSE");
+        req.setSign(payNotifySigner.sign(req.signFields()));
+
+        assertThatThrownBy(() -> benefitOrderService.payCallback(req))
+                .as("非收款通知也须校验商户 —— 否则他人商户能关掉本平台的单")
+                .isInstanceOf(BizException.class)
+                .extracting(e -> ((BizException) e).getCode())
+                .isEqualTo(ErrorCode.PAY_AMOUNT_MISMATCH);
+
+        assertThat(orderField("pay_status", bizNo)).isEqualTo(PayStatus.WAIT_PAY.name());
+    }
+
     // ------------------------------------------------------------------
 
     private String createOrder(String tag) {

@@ -33,8 +33,20 @@ public enum ReconcileItem {
     /** 第 7 项：徒弟已发师傅未返 → 补建 {@code SPONSOR_REWARD} 任务 */
     SPONSOR_NOT_REWARDED(true),
 
-    /** 第 8 项：支付成功本地无单 → 补记 + 建履约任务。V3 无对账文件，留位不实现 */
-    PAY_WITHOUT_ORDER(true),
+    /**
+     * 第 8 项：支付方已收款而本地无单 → <b>告警人工核，不自动补记主单</b>。
+     *
+     * <p><b>{@code autoRepair} 取 {@code false}，与技术方案原文的「补记主单 + 建履约任务」不同</b>（V3 PR-10
+     * 后置实施时降级）：支付对账文件只有 {@code outTradeNo} / {@code tradeNo} / 金额三个字段 —— 支付方 不知道这笔钱对应哪个活动、哪个
+     * SKU、买了几份。补记主单需要 {@code activity_id} / {@code sku_id} / {@code price_snapshot} / {@code
+     * benefit_snapshot} 一整套业务数据，全都只能填占位值。
+     *
+     * <p>而<b>凭占位值造出来的单会被后续履约当成真单发奖</b>，比「本地无单」本身更糟：前者是一笔查不到 来源的发放，后者只是一笔待人工核对的收款。
+     *
+     * <p>这与第 3 项「不自动补发」、第 5 项「禁止自动改单」是同一条判断：<b>正确值取决于历史，猜不出来 就只告警</b>。第 10 项在 PR-10
+     * 里也做过同类降级（重放入口对已终态关系命中 0 行，改为只告警）。
+     */
+    PAY_WITHOUT_ORDER(false),
 
     /** 第 9 项：已关闭单仍占库存 → 补建 {@code STOCK_RELEASE} 任务 */
     CLOSED_HOLDING_STOCK(true),
