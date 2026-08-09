@@ -94,6 +94,28 @@ public class ProviderLedger {
         return orderNoByOpNo.computeIfAbsent(opNo, k -> "PRV" + seq.incrementAndGet() + "_" + k);
     }
 
+    /** 每个 {@code opNo} 发出去的份数。键取首次记账时的值 —— 重复请求不覆盖，与单号同一口径 */
+    private final Map<String, Integer> grantedQtyByOpNo = new ConcurrentHashMap<>();
+
+    /**
+     * 记账并记下<b>发了几份</b>。
+     *
+     * <p><b>不记份数就无法验证「买 N 份发 N 份」</b>：平台侧的履约明细只有状态没有数量，对账十五项 也不比对这个维度 —— 于是一个把份数写死成 1
+     * 的实现，在平台侧看来处处正常（明细 {@code SUCCESS}、 账本一条、金额收足），<b>只有供应方数得清到底发了几份</b>。
+     *
+     * <p>这与「重复发奖 = 0 的判据取下游账本」是同一条理由：跨过服务边界的事实，只能在边界另一侧断言。
+     */
+    public String record(String opNo, int qty) {
+        String orderNo = record(opNo);
+        grantedQtyByOpNo.putIfAbsent(opNo, qty);
+        return orderNo;
+    }
+
+    /** 该 {@code opNo} 实际发出的份数；未发过返回 0。 */
+    public int grantedQty(String opNo) {
+        return grantedQtyByOpNo.getOrDefault(opNo, 0);
+    }
+
     /**
      * 记一次发放请求的到达，无论本次是否记账。
      *
@@ -191,6 +213,7 @@ public class ProviderLedger {
 
     public void clear() {
         orderNoByOpNo.clear();
+        grantedQtyByOpNo.clear();
         grantAttemptsByOpNo.clear();
         usageByGrantOpNo.clear();
         revokeOrderNoByRevokeNo.clear();

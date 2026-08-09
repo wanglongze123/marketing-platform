@@ -268,11 +268,27 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
                 () -> doCreateTrade(req));
     }
 
+    /**
+     * 单笔订单的份数上限。
+     *
+     * <p><b>上限必须存在</b>：{@code quantity} 参与库存预占、限购扣减与金额相乘，三者都按它线性放大。 不设上限时一个 {@code
+     * Integer.MAX_VALUE} 的入参会让 {@code salePrice × qty} 溢出 —— 而 {@code Math.multiplyExact} 抛的是
+     * {@code ArithmeticException}，落进「异常一律 UNKNOWN」后表现为下单结果未定。
+     *
+     * <p>取 99 而非更大：单笔买超过 99 份的场景不存在于 C 端零售，而它同时是限购与库存的自然上界。
+     */
+    private static final int MAX_QUANTITY = 99;
+
     private CreateTradeResp doCreateTrade(CreateTradeReq req) {
-        // V1 冻结 quantity = 1。显式拒绝而非默默忽略 —— 后者会让调用方付一份钱得一份权益且无报错
-        if (req.getQuantity() != 1) {
+        // 份数校验：下界挡 0 与负数，上界防相乘溢出（见 MAX_QUANTITY）。
+        //
+        // V1~V3 此处冻结为 quantity=1，放开时**必须同时改三处**：order_amount 乘份数、
+        // 履约 RewardItem.qty 传份数、快照带上份数。漏任一处的表现都不是报错：
+        // 漏第一处是买 3 份收 1 份钱，漏第二处是收 3 份钱发 1 份货，且账面处处自洽
+        if (req.getQuantity() < 1 || req.getQuantity() > MAX_QUANTITY) {
             throw new BizException(
-                    ErrorCode.INVALID_PARAM, "V1 仅支持 quantity=1，实际 " + req.getQuantity());
+                    ErrorCode.INVALID_PARAM,
+                    "购买份数须在 1~" + MAX_QUANTITY + " 之间，实际 " + req.getQuantity());
         }
 
         // ① 验凭证：签名 + 时效 + 逐字段比对。不通过则 4003，不建单
@@ -791,7 +807,12 @@ public class BenefitOrderServiceImpl implements BenefitOrderService {
             ri.setRewardType(s.benefitType());
             ri.setProviderType(s.providerType());
             ri.setProviderProductId(s.providerProductId());
-            ri.setQty(1);
+            // 份数取订单的，不是写死 1。**权益包内每项恒为 1 份**（benefit_item 没有数量列），
+            // 故「这一项发几份」完全由订单份数决定：买 3 份权益包 = 每一项各发 3 份。
+            //
+            // 写死 1 的后果是收 3 份钱发 1 份货，而**下游看不出异常**：它只按入参发放，
+            // 平台侧的履约明细也照常置 SUCCESS —— 对账十五项无一比对「发放数量」这个维度
+            ri.setQty(order.getQuantity());
             ri.setCore(s.core());
             rewardItems.add(ri);
         }

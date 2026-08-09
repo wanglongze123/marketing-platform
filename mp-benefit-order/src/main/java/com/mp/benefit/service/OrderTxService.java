@@ -130,7 +130,14 @@ public class OrderTxService {
         // 额度态取决于这一单到底扣没扣，不能跟着库存一律置 LOCKED —— 不限购的单没有额度行，
         // 置 LOCKED 会让它在释放时把同用户另一笔单的额度还掉（该行是共享计数器，下界拦不住）
         record.setQuotaStatus(quotaLocked ? QuotaStatus.LOCKED.name() : QuotaStatus.NONE.name());
-        record.setOrderAmount(salePrice);
+        // 应付 = 单价 × 份数。**salePrice 是单价，不是总价** —— preConsult 签发凭证时不带
+        // quantity（咨询阶段还没有份数这个概念），故 token.dealPrice 与服务端重算价比的
+        // 一直是单价，比价那一步不受份数影响。
+        //
+        // 漏乘份数的后果是买 3 份收 1 份钱，且**没有任何下游能发现**：支付方按 order_amount
+        // 收款、金额校验拿 pay_amount 与它比，两边一致；对账第 5 项比的也是这两个数。
+        // 库存与限购却按 3 份扣 —— 于是货发了 3 份、钱收了 1 份，账面还处处自洽
+        record.setOrderAmount(Math.multiplyExact(salePrice, qty));
         record.setCurrency("CNY");
         record.setConfigVersion(configVersion);
         record.setPriceSnapshot(priceSnapshot);

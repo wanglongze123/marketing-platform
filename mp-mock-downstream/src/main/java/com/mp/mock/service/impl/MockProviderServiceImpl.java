@@ -74,7 +74,7 @@ public class MockProviderServiceImpl implements MockProviderService {
             case TIMEOUT_AFTER_COMMIT -> {
                 // 关键场景：下游已执行成功，但调用方收不到结果。
                 // 此时平台若把 UNKNOWN 误判为 FAIL 去补发，就是重复发放
-                String orderNo = ledger.record(opNo);
+                String orderNo = ledger.record(opNo, req.getQty());
                 log.warn(
                         "mock provider committed then timed out, opNo={}, orderNo={}",
                         opNo,
@@ -95,7 +95,7 @@ public class MockProviderServiceImpl implements MockProviderService {
                 return resp(RetStatus.FAIL, null, ErrorCode.INVALID_PARAM);
             }
             default -> {
-                String orderNo = ledger.record(opNo);
+                String orderNo = ledger.record(opNo, req.getQty());
                 log.info(
                         "mock provider granted, opNo={}, product={}, providerOrderNo={}",
                         opNo,
@@ -122,6 +122,9 @@ public class MockProviderServiceImpl implements MockProviderService {
 
         if (injector.providerMode() == FaultMode.PROCESSING) {
             if (injector.processingShouldSucceedNow(opNo)) {
+                // 查单路径没有请求体，拿不到份数 —— 走不记份数的重载。
+                // 这一支只在「先 PROCESSING、后由查单确认成功」时到达，份数已在首次
+                // grant 请求里记过；此处若强行填 0 反而会把真实值覆盖掉
                 String orderNo = ledger.record(opNo);
                 log.info("mock provider processing completed on query, opNo={}", opNo);
                 return resp(RetStatus.SUCCESS, orderNo, null);

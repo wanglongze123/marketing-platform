@@ -72,7 +72,9 @@ class HttpEndpointIT extends AbstractMySqlIT {
     @Test
     void businessRejectionReturnsHttp200WithBizCode() {
         CreateTradeReq req = newTradeReq("httpQty");
-        req.setQuantity(2);
+        // 取 0 而非 2：V3 放开多份购买后 2 是合法份数，而本条要的只是「一个会被业务拒绝的入参」——
+        // 它验的是响应形状（200 + 业务码），不是份数规则本身
+        req.setQuantity(0);
 
         ResponseEntity<JsonNode> resp =
                 rest.postForEntity("/api/benefit/trade", req, JsonNode.class);
