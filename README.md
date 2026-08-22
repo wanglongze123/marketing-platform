@@ -50,7 +50,7 @@
 
 | 模块 | 职责 |
 | --- | --- |
-| `mp-gateway` | 接入层，V0–V2 单进程启动入口 |
+| `mp-gateway` | 接入层，V0–V3 单进程启动入口，兼托管前端静态产物 |
 | `mp-fission` | 裂变关系、好友过滤、双向发奖编排 |
 | `mp-benefit-order` | 订单、支付对接、履约编排、退款回收 |
 | `mp-activity` | 活动配置、配置版本、资格决策 |
@@ -58,6 +58,7 @@
 | `mp-mock-downstream` | mock 支付、mock 供应方 |
 | `mp-common` | 结果码、四分类枚举、单号与幂等键生成、异常 |
 | `mp-api` | 对外接口定义，按服务拆五个子模块 |
+| `web` | Vue3 前端工程，独立构建，不进 Maven 生命周期 |
 
 数据按服务分库：`db_activity` / `db_fission` / `db_benefit` / `db_reward`，禁止跨库 JOIN 与跨库事务。V1 以单数据源承载全部表，多数据源在 V2 配置（[分阶段方案](docs/营销活动平台-分阶段方案.md) §7.3 第 8 条）。
 
@@ -113,7 +114,7 @@ V1 实测记录（实施偏差、缺陷、形状冻结落地情况）见[分阶�
 
 ## 快速开始
 
-环境要求：JDK 21、Maven 3.9+、Docker。
+环境要求：JDK 21、Maven 3.9+、Docker。前端另需 Node 18.19+。
 
 ```bash
 mvn validate                          # 安装 git 钩子，克隆后需执行一次
@@ -122,24 +123,62 @@ mvn verify                            # 编译、单测、集成测试
 mvn -pl mp-gateway spring-boot:run
 ```
 
-权益售卖正向链路演示。演示数据由 seed 脚本初始化：活动 `ACT_DEMO_001`、SKU `SKU_DEMO_001`、售价 99 元、含两个分属不同供应方的权益项。
+静态产物已随仓库提交，`localhost:8080` 直接可用，改前端才需要重新构建：
 
 ```bash
-# ① 下单，返回 bizNo 与 tradeNo
+cd web && npm install
+npm run verify                        # 枚举一致性 + 类型检查
+npm run build                         # 产物直接输出到 mp-gateway 静态目录
+npm run dev                           # 或起 :5173 dev server，/api 代理到 :8080
+```
+
+### 页面演示
+
+浏览器打开 `localhost:8080`，默认进商品页。演示数据由 seed 脚本初始化：活动 `ACT_DEMO_001`、SKU `SKU_DEMO_001`、售价 99 元、含两个分属不同供应方的权益项。
+
+| 路径 | 用途 |
+| --- | --- |
+| `/shop` | 商品页，下单 → 模拟支付 → 观察发放 |
+| `/my-orders`、`/benefit/orders/:bizNo` | 订单列表与详情（含操作记录时间线） |
+| `/fission/rounds` | 裂变轮次与关系 |
+| `/ops/tasks`、`/ops/reconcile` | 可靠任务看板、对账 |
+| `/devtools` | 故障注入与场景断言，迁自旧 `console.html` |
+
+### 命令行演示
+
+链路与页面一致。**下单必须带 `consultToken`、支付通知必须带 `sign`** —— 二者分别自 V2 的 L1 防线起强制，缺则返回 `4003` / `4731`。
+
+```bash
+# ① 预咨询，返回 consultToken 与 dealPrice
+curl -s -X POST localhost:8080/api/benefit/consult \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"U001","activityId":"ACT_DEMO_001","skuId":"SKU_DEMO_001"}'
+
+# ② 下单，consultToken 填上一步的返回值，返回 bizNo 与 tradeNo
 curl -s -X POST localhost:8080/api/benefit/trade \
   -H 'Content-Type: application/json' \
   -d '{"userId":"U001","activityId":"ACT_DEMO_001","skuId":"SKU_DEMO_001",
-       "clientReqNo":"REQ001","quantity":1}'
+       "clientReqNo":"REQ001","quantity":1,"consultToken":"<consultToken>"}'
 
-# ② 支付结果通知，outTradeNo 填上一步的 bizNo
+# ③ 取签名。真实链路由支付方算出，mock 支付方不主动回调，故留了这个演示端点
+curl -s -X POST localhost:8080/api/fault/pay-notify/sign \
+  -H 'Content-Type: application/json' \
+  -d '{"outTradeNo":"<bizNo>","tradeNo":"<tradeNo>","notifySeq":"NS001",
+       "payStatus":"SUCCESS","payAmount":9900,"currency":"CNY",
+       "merchantId":"MCH_LOCAL_DEMO"}'
+
+# ④ 支付结果通知，sign 填上一步的返回值
 curl -s -X POST localhost:8080/api/benefit/pay-callback \
   -H 'Content-Type: application/json' \
   -d '{"outTradeNo":"<bizNo>","tradeNo":"<tradeNo>","notifySeq":"NS001",
-       "payStatus":"SUCCESS","payAmount":9900,"currency":"CNY"}'
+       "payStatus":"SUCCESS","payAmount":9900,"currency":"CNY",
+       "merchantId":"MCH_LOCAL_DEMO","sign":"<sign>"}'
 
-# ③ 查单，pay_status=PAY_SUCCESS、grant_status=GRANT_SUCCESS、两条履约明细
+# ⑤ 查单，pay_status=PAY_SUCCESS、grant_status=GRANT_SUCCESS、两条履约明细
 curl -s localhost:8080/api/benefit/order/<bizNo>
 ```
+
+`/api/fault/**` 是演示设施，能签发通知等于能伪造收款，V4 拆分布式时下线或移入独立运维端口。
 
 macOS 环境搭建注意事项见[环境与依赖](docs/营销活动平台-环境与依赖.md) §1.1。
 
@@ -151,6 +190,7 @@ macOS 环境搭建注意事项见[环境与依赖](docs/营销活动平台-环�
 | [分阶段方案](docs/营销活动平台-分阶段方案.md) | 阶段划分、形状冻结清单、各阶段退出标准 |
 | [开发规范](docs/营销活动平台-开发规范.md) | 工程结构、建表、幂等键、事务边界、合入前检查 |
 | [环境与依赖](docs/营销活动平台-环境与依赖.md) | 版本锁定、环境搭建、中间件配置 |
+| [前端技术方案](docs/营销活动平台-前端技术方案.md) | 前端选型、契约层、页面结构、部署 |
 | [PRD](docs/营销活动平台-PRD.md) | 业务需求与验收标准 |
 
 ## 协作约定
