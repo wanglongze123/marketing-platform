@@ -96,6 +96,16 @@
       <groupId>io.micrometer</groupId>
       <artifactId>micrometer-registry-prometheus</artifactId>
     </dependency>
+
+    <!-- 限流降级（V4 第 4 项）。只在 gateway 侧设防：入口拦住了，后段就不用各自设限 -->
+    <dependency>
+      <groupId>com.alibaba.csp</groupId>
+      <artifactId>sentinel-spring-webmvc-v6x-adapter</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.alibaba.csp</groupId>
+      <artifactId>sentinel-core</artifactId>
+    </dependency>
   </dependencies>
 
   <build>

@@ -11,7 +11,7 @@ import org.springframework.core.Ordered;
  * 运维端点令牌校验的装配。V4 第 9 项。
  *
  * <p><b>顺序排在 {@code TraceIdFilter} 之后</b>（它是 {@code @Order(1)}）：被拒的请求也要有 traceId，
- * 否则「谁在什么时候被挡了」这条线索在日志里断掉 —— 而运维端点被拒恰恰是最需要追查的一类事件。
+ * 否则「谁在什么时候被挡了」这条线索在日志里断掉 —— 而运维端点被拒是最需要追查的一类事件。
  *
  * <p><b>类名与 {@code @Bean} 方法名都带前缀</b>：单进程形态下 gateway 扫 {@code com.mp}，与 mock 侧的同名类、同名方法都会撞 —— 默认
  * bean 名取类的短名与方法名，Spring 分别报 {@code ConflictingBeanDefinitionException} 与 {@code

@@ -40,6 +40,8 @@
     <redisson.version>3.52.0</redisson.version>
     <!-- 活动配置本地缓存，V4 第 10 项。Boot BOM 不管理它 -->
     <caffeine.version>3.1.8</caffeine.version>
+    <!-- 限流降级，V4 第 4 项 -->
+    <sentinel.version>1.8.8</sentinel.version>
 
     <spotless.version>2.44.0</spotless.version>
     <git-build-hook.version>3.5.0</git-build-hook.version>
@@ -135,6 +137,21 @@
         <groupId>com.github.ben-manes.caffeine</groupId>
         <artifactId>caffeine</artifactId>
         <version>${caffeine.version}</version>
+      </dependency>
+      <!--
+        Sentinel：gateway 与关键接口的流控（§2.3）。保护后段 —— 玩法层与公共能力层
+        的容量由数据库与下游决定，入口不设限时它们会被压垮，而那时的表现是全链路超时，
+        比明确拒绝一部分请求糟得多。
+      -->
+      <dependency>
+        <groupId>com.alibaba.csp</groupId>
+        <artifactId>sentinel-spring-webmvc-v6x-adapter</artifactId>
+        <version>${sentinel.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.alibaba.csp</groupId>
+        <artifactId>sentinel-core</artifactId>
+        <version>${sentinel.version}</version>
       </dependency>
 
       <!-- 本工程各模块 -->
