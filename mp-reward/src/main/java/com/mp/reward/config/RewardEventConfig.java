@@ -1,10 +1,13 @@
 package com.mp.reward.config;
 
+import com.mp.common.event.EventTopics;
 import com.mp.common.event.GrantResultPublisher;
 import com.mp.common.security.ProviderNotifySigner;
+import org.apache.rocketmq.spring.core.RocketMQTemplate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -41,6 +44,10 @@ public class RewardEventConfig {
      * 那是用更强的一致性要求去保护 一条本就允许丢的通路，且重试会再发一次事件，反而放大问题。
      */
     @Bean
+    @ConditionalOnProperty(
+            name = "mp.event.transport",
+            havingValue = "spring",
+            matchIfMissing = true)
     public GrantResultPublisher grantResultPublisher(
             ApplicationEventPublisher springPublisher,
             @Value("${mp.event.enabled:true}") boolean enabled) {
@@ -53,6 +60,39 @@ public class RewardEventConfig {
         return event -> {
             try {
                 springPublisher.publishEvent(event);
+            } catch (Exception e) {
+                log.warn(
+                        "publish grant result event failed, convergence falls back to query,"
+                                + " opNo={}",
+                        event.opNo(),
+                        e);
+            }
+        };
+    }
+
+    /**
+     * RocketMQ 实现。V4 分布式形态用，由 {@code mp.event.transport=rocketmq} 切换。
+     *
+     * <p><b>这个 {@code @Bean} 就是本类注释里预告的那处改动</b>：{@code RewardServiceImpl} 的发布代码 一行未动，它只认 {@link
+     * GrantResultPublisher} 接口。V3 定下这层接口时写的「V4 换 RocketMQ 只改本类一个 @Bean」，此处兑现。
+     *
+     * <p><b>发布失败同样吞掉</b>，理由与进程内实现一字不差：事件是加速手段，没送到只意味着收敛 退回查单周期。抛给调用方会让一次已成功的回调处理被判为失败进而重试。
+     *
+     * <p><b>用同步 {@code syncSend} 而非 {@code asyncSend}</b>：异步发送的失败回调发生在另一个线程上， 那时调用方的 {@code
+     * providerCallback} 早已返回 ACK —— 日志里会出现「发送失败」，但没有任何 上下文能把它关联回哪一笔发放。同步发送的耗时（毫秒级）远小于它换来的可诊断性。
+     */
+    @Bean
+    @ConditionalOnProperty(name = "mp.event.transport", havingValue = "rocketmq")
+    public GrantResultPublisher rocketMqGrantResultPublisher(
+            RocketMQTemplate template, @Value("${mp.event.enabled:true}") boolean enabled) {
+        if (!enabled) {
+            log.warn("grant result event DISABLED — 仅用于退出标准 17 的对照组，收敛退化为查单周期");
+            return event -> log.info("event publishing disabled, skip, opNo={}", event.opNo());
+        }
+        log.info("grant result event transport = rocketmq, topic={}", EventTopics.GRANT_RESULT);
+        return event -> {
+            try {
+                template.syncSend(EventTopics.GRANT_RESULT, event);
             } catch (Exception e) {
                 log.warn(
                         "publish grant result event failed, convergence falls back to query,"

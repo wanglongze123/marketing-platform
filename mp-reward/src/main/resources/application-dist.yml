@@ -46,16 +46,29 @@ dubbo:
 mp:
   dubbo:
     remote: true
+  event:
+    # 事件传输方式。injvm 形态取默认的 spring（进程内总线），分布式取 rocketmq。
+    # 换的只是 RewardEventConfig 里装配哪个 @Bean，发布与消费的业务代码一行不动
+    transport: ${MP_EVENT_TRANSPORT:rocketmq}
+    # 发奖结果事件开关。置 false 即退出标准第 17 条的对照组：
+    # 断言仍由 QUERY_GRANT 收敛到终态、发放记录仍为 1 条
+    enabled: ${MP_EVENT_ENABLED:true}
   # 供应方通知验签密钥。本服务是 providerCallback 的接收方，缺它启动即失败
   # （无代码内默认值，见 ConsultTokenConfig 的同类处置与 ShapeFreezeTest 的断言）
   provider-notify:
     secret: ${MP_PROVIDER_NOTIFY_SECRET:local-dev-provider-notify-secret-do-not-use-in-prod}
-  # 发奖结果事件开关。置 false 即退出标准第 17 条的对照组：
-  # 断言仍由 QUERY_GRANT 收敛到终态、发放记录仍为 1 条
-  event:
-    enabled: ${MP_EVENT_ENABLED:true}
 
 logging:
   level:
     root: INFO
     com.mp: DEBUG
+
+rocketmq:
+  name-server: ${MP_ROCKETMQ_NAMESRV:localhost:9876}
+  producer:
+    # 生产方。消费方也要配 producer group —— starter 在装配 RocketMQTemplate 时
+    # 强制要求它非空，即便本服务从不发消息
+    group: mp-grant-result-producer
+    # 发送失败不重试：事件是加速手段，丢了由查单兜底。框架层重试会在 broker
+    # 短暂不可用时把一次回调处理拖成数秒
+    retry-times-when-send-failed: 0

@@ -1,6 +1,7 @@
 package com.mp.gateway.config;
 
 import com.mp.api.benefit.service.BenefitOrderService;
+import com.mp.api.reward.service.RewardService;
 import org.apache.dubbo.config.annotation.DubboReference;
 import org.apache.dubbo.config.spring.ReferenceBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -26,6 +27,18 @@ public class GatewayRemoteConfig {
     @Bean
     @DubboReference(protocol = "tri", timeout = 10000, retries = 0, check = false)
     public ReferenceBean<BenefitOrderService> gatewayBenefitOrderService() {
+        return new ReferenceBean<>();
+    }
+
+    /**
+     * 供应方回调的转发目标。V4 新增，配合 {@code RewardCallbackController}。
+     *
+     * <p><b>{@code retries = 0}</b>：回调处理内部会推进发放状态并发事件，框架层重试等于把 同一条通知处理两遍。它幂等（{@code opNo +
+     * notifySeq} 唯一），但重试掩盖的是「第一次到底 成没成」这个信息 —— 供应方那边会因超时而自己重投，那才是这条通路该有的重试。
+     */
+    @Bean
+    @DubboReference(protocol = "tri", timeout = 10000, retries = 0, check = false)
+    public ReferenceBean<RewardService> gatewayRewardService() {
         return new ReferenceBean<>();
     }
 }
