@@ -60,6 +60,22 @@
         <type>pom</type>
         <scope>import</scope>
       </dependency>
+      <!--
+        Nacos 注册中心的客户端实现。V4 引入。
+
+        dubbo-spring-boot-starter 不含任何注册中心实现 —— registry.address=N/A
+        （V0~V3 的 injvm 形态）时用不到，配成 nacos:// 后缺它启动即失败，报的是
+        ClassNotFoundException: com.alibaba.nacos.api.exception.NacosException，
+        堆栈全在 Dubbo 内部，看不出是少了一个依赖。
+
+        版本由 dubbo-bom 管理，不单独指定：Dubbo 3.3.x 对 Nacos 客户端有版本
+        适配要求，自己写死会在升级 Dubbo 时静默错配。
+      -->
+      <dependency>
+        <groupId>org.apache.dubbo</groupId>
+        <artifactId>dubbo-registry-nacos</artifactId>
+        <version>${dubbo.version}</version>
+      </dependency>
       <dependency>
         <groupId>org.testcontainers</groupId>
         <artifactId>testcontainers-bom</artifactId>

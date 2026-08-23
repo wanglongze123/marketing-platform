@@ -25,7 +25,7 @@ public class GatewayRemoteConfig {
 
     @Bean
     @DubboReference(protocol = "tri", timeout = 10000, retries = 0, check = false)
-    public ReferenceBean<BenefitOrderService> benefitOrderService() {
+    public ReferenceBean<BenefitOrderService> gatewayBenefitOrderService() {
         return new ReferenceBean<>();
     }
 }

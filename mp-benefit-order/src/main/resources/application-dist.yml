@@ -32,7 +32,18 @@ dubbo:
     logger: slf4j
   protocol:
     name: tri
+    # -1 表示随机端口。多副本部署时固定端口会撞，而撞的表现是第二个实例启动失败
     port: -1
+    # 注册到注册中心的地址由此指定。
+    #
+    # 不指定时 Dubbo 自己挑一块网卡，而三机拓扑下每个容器接了两个网络（本层的
+    # net-b/net-c 与共用的 net-infra）—— 它挑中层内网段时，别层的服务拿到地址却
+    # 路由不过去，表现为 UNAVAILABLE: upstream xxx is unavailable 与 metadata
+    # 拉取失败。服务发现看起来一切正常，只有调用全挂。
+    #
+    # 容器编排注入 MP_DUBBO_HOST（取容器名），走 DNS 解析到 infra 网段，
+    # 三层之间由它承载连通性。
+    host: ${MP_DUBBO_HOST:}
   registry:
     address: nacos://${MP_NACOS_HOST:localhost}:${MP_NACOS_PORT:8848}
   scan:

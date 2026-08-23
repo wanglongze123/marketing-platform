@@ -27,7 +27,7 @@ public class RewardRemoteConfig {
      */
     @Bean
     @DubboReference(protocol = "tri", timeout = 5000, retries = 0, check = false)
-    public ReferenceBean<MockProviderService> mockProviderService() {
+    public ReferenceBean<MockProviderService> rewardMockProviderService() {
         return new ReferenceBean<>();
     }
 }

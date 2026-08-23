@@ -6,16 +6,21 @@
 #   docker compose -f docker-compose-dist.yml up -d --build
 #
 # ------------------------------------------------------------------
-# 三机拓扑（技术方案 §1.6）用三个 network 模拟：
+# 三机拓扑（技术方案 §1.6）—— 服务分组见下方注释：
 #
-#   net-infra   机器 A：全部中间件
-#   net-b       机器 B：gateway + benefit-order + fission（接入与玩法层）
-#   net-c       机器 C：activity + reward + mock 下游（公共能力层）
+#   机器 A  全部中间件（MySQL / Redis / Nacos / RocketMQ）
+#   机器 B  gateway + benefit-order + fission（接入与玩法层）
+#   机器 C  activity + reward + mock 下游（公共能力层）
 #
-# B 与 C 之间没有共同网段，跨层调用一律经 net-infra 上的 Nacos 做服务发现后
-# 再连——这正是「玩法层调公共能力层是跨机器 RPC」那条要验的事。
+# 三组共用一个 network。初版给 B、C 各建了一个独立网段想「模拟机器边界」，
+# 结果是服务发现正常而调用全部 UNAVAILABLE：容器接了两块网卡，Dubbo 注册时
+# 挑中层内网段的 IP（172.19.x / 172.20.x），别层的服务拿到地址却路由不过去。
+# 日志里表现为 upstream unavailable 与 metadata 拉取失败，看起来像注册中心
+# 出问题，其实是拓扑建错了 —— 真实的三台机器在同一个内网里，B 调 C 是跨机器
+# 而不是跨网络隔离。
 #
-# 中间件容器由主 compose 创建，此处以 external network 接入它们所在的网络。
+# 分组保留在注释与启动顺序上，这是它本来该有的形态：机器边界体现为「不同进程、
+# 经注册中心发现、走网络调用」，而不是「互相 ping 不通」。
 # ------------------------------------------------------------------
 
 x-common: &common
@@ -49,7 +54,7 @@ services:
     environment:
       <<: *common-env
       MP_SERVER_PORT: "8081"
-    networks: [net-infra, net-c]
+    networks: [net-infra]
     ports:
       - "8081:8081"
 
@@ -65,7 +70,7 @@ services:
     environment:
       <<: *common-env
       MP_SERVER_PORT: "8082"
-    networks: [net-infra, net-c]
+    networks: [net-infra]
     ports:
       - "8082:8082"
 
@@ -81,7 +86,7 @@ services:
     environment:
       <<: *common-env
       MP_SERVER_PORT: "8090"
-    networks: [net-infra, net-c]
+    networks: [net-infra]
     ports:
       - "8090:8090"
 
@@ -104,7 +109,7 @@ services:
       # 时序参数留给验证脚本覆盖。默认取生产值，见 application-dist.yml 的注释
       MP_TASK_LEASE_SECONDS: "${MP_TASK_LEASE_SECONDS:-30}"
       MP_TASK_INTERVAL_MILLIS: "${MP_TASK_INTERVAL_MILLIS:-1000}"
-    networks: [net-infra, net-b]
+    networks: [net-infra]
 
   fission:
     <<: *common
@@ -118,7 +123,7 @@ services:
     environment:
       <<: *common-env
       MP_SERVER_PORT: "8084"
-    networks: [net-infra, net-b]
+    networks: [net-infra]
     ports:
       - "8084:8084"
 
@@ -134,7 +139,7 @@ services:
     environment:
       <<: *common-env
       MP_SERVER_PORT: "8080"
-    networks: [net-infra, net-b]
+    networks: [net-infra]
     ports:
       - "8080:8080"
 
@@ -144,7 +149,3 @@ networks:
   net-infra:
     external: true
     name: marketing-platform_default
-  net-b:
-    driver: bridge
-  net-c:
-    driver: bridge

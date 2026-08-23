@@ -36,7 +36,7 @@ public class BenefitRemoteConfig {
     /** 活动配置与资格决策。查配置在下单主链路上，超时取 3 秒。 */
     @Bean
     @DubboReference(protocol = "tri", timeout = 3000, check = false)
-    public ReferenceBean<ActivityService> activityService() {
+    public ReferenceBean<ActivityService> benefitActivityService() {
         return new ReferenceBean<>();
     }
 
@@ -51,14 +51,14 @@ public class BenefitRemoteConfig {
      */
     @Bean
     @DubboReference(protocol = "tri", timeout = 5000, retries = 0, check = false)
-    public ReferenceBean<RewardService> rewardService() {
+    public ReferenceBean<RewardService> benefitRewardService() {
         return new ReferenceBean<>();
     }
 
     /** mock 支付方。{@code retries = 0} 同上：支付相关调用一律不由框架重试。 */
     @Bean
     @DubboReference(protocol = "tri", timeout = 5000, retries = 0, check = false)
-    public ReferenceBean<MockPayService> mockPayService() {
+    public ReferenceBean<MockPayService> benefitMockPayService() {
         return new ReferenceBean<>();
     }
 }

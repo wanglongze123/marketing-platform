@@ -1,48 +1,28 @@
-# 五个服务共用一份 Dockerfile，靠 build arg 指定模块。
+# 五个服务共用一份镜像定义，靠 build arg 指定模块。
 #
-# 为什么不给每个服务写一份：它们的构建步骤逐字相同，差别只有 jar 路径。五份重复的
-# Dockerfile 意味着改基础镜像要改五处，而漏改一处的表现是「那个服务的 JDK 版本不一样」
-# —— 跑得起来，只在某些行为上不同。
+# 为什么不给每个服务写一份：构建步骤逐字相同，差别只有 jar 路径。五份重复的
+# Dockerfile 意味着改基础镜像要改五处，而漏改一处的表现是「那个服务的 JDK
+# 版本不一样」—— 跑得起来，只在某些行为上不同。
 #
-# 用法（在仓库根目录执行，构建上下文是根目录）：
-#   docker build -f docker/Dockerfile --build-arg MODULE=mp-benefit-order -t mp/benefit-order .
-
-# ---------- 构建阶段 ----------
-FROM maven:3.9-eclipse-temurin-21 AS build
-WORKDIR /src
-
-# 先只拷 pom 做依赖预热：源码改动不会让依赖层失效，重建从分钟级降到秒级
-COPY pom.xml .
-COPY mp-common/pom.xml            mp-common/
-COPY mp-api/pom.xml               mp-api/
-COPY mp-api/mp-api-activity/pom.xml mp-api/mp-api-activity/
-COPY mp-api/mp-api-benefit/pom.xml  mp-api/mp-api-benefit/
-COPY mp-api/mp-api-fission/pom.xml  mp-api/mp-api-fission/
-COPY mp-api/mp-api-mock/pom.xml     mp-api/mp-api-mock/
-COPY mp-api/mp-api-reward/pom.xml   mp-api/mp-api-reward/
-COPY mp-activity/pom.xml          mp-activity/
-COPY mp-reward/pom.xml            mp-reward/
-COPY mp-fission/pom.xml           mp-fission/
-COPY mp-benefit-order/pom.xml     mp-benefit-order/
-COPY mp-mock-downstream/pom.xml   mp-mock-downstream/
-COPY mp-gateway/pom.xml           mp-gateway/
-RUN mvn -B -q dependency:go-offline -DskipTests || true
-
-COPY . .
-
-ARG MODULE
-# -am 连带构建依赖的模块；跳过测试与 git 钩子安装（容器里没有 .git 的写权限需求）
-RUN mvn -B -pl ${MODULE} -am package -DskipTests -Dspotless.check.skip=true
-
-# ---------- 运行阶段 ----------
+# ------------------------------------------------------------------
+# 只拷 jar，不在容器里编译。
+#
+# 初版写的是多阶段构建（maven 镜像里跑 mvn package），实测单个服务超过 9 分钟
+# 还没完成：容器内的 ~/.m2 是空的，dependency:go-offline 要把全部依赖重新下一遍，
+# 而宿主机上它们早就在了。六个服务就是六次重复下载。
+#
+# 代价是构建前必须先在宿主机 mvn package —— 这一步本来也要做（CI 要跑测试），
+# 且 compose 会在 jar 缺失时直接报错，不会悄悄打出一个空镜像。
+# ------------------------------------------------------------------
 FROM eclipse-temurin:21-jre
+
 WORKDIR /app
 
 ARG MODULE
 # 取 -boot 后缀那个：repackage 配了 classifier，同目录下还有一个同名的普通库
-# jar（只有几十 K，供模块间依赖用）。通配 *.jar 会两个都匹配到，COPY 随即失败；
-# 就算只匹配到一个，拿错了那个的表现是「no main manifest attribute」
-COPY --from=build /src/${MODULE}/target/*-boot.jar app.jar
+# jar（几十 K，供模块间依赖）。通配 *.jar 会两个都匹配到，COPY 随即失败；
+# 就算只匹配到一个，拿错了的表现是「no main manifest attribute」
+COPY ${MODULE}/target/*-boot.jar app.jar
 
 # 容器内时区与 MySQL 的 +8:00 对齐 —— 不一致会让 next_time 与库时钟差 8 小时，
 # 任务要么立刻全部到期、要么永远不到期，而两者都不报错

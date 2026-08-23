@@ -25,14 +25,14 @@ public class FissionRemoteConfig {
     /** 活动配置与资格决策。师傅进场要先过资格校验，在主链路上。 */
     @Bean
     @DubboReference(protocol = "tri", timeout = 3000, check = false)
-    public ReferenceBean<ActivityService> activityService() {
+    public ReferenceBean<ActivityService> fissionActivityService() {
         return new ReferenceBean<>();
     }
 
     /** 统一发奖。{@code retries = 0} 的理由同 benefit 侧：超时由查单收敛，不由框架重试。 */
     @Bean
     @DubboReference(protocol = "tri", timeout = 5000, retries = 0, check = false)
-    public ReferenceBean<RewardService> rewardService() {
+    public ReferenceBean<RewardService> fissionRewardService() {
         return new ReferenceBean<>();
     }
 
@@ -44,7 +44,7 @@ public class FissionRemoteConfig {
      */
     @Bean
     @DubboReference(protocol = "tri", timeout = 5000, check = false)
-    public ReferenceBean<MockSocialService> socialService() {
+    public ReferenceBean<MockSocialService> fissionSocialService() {
         return new ReferenceBean<>();
     }
 }
