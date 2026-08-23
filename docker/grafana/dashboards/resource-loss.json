@@ -1,0 +1,135 @@
+{
+  "title": "业务资损大盘",
+  "uid": "mp-resource-loss",
+  "tags": ["mp", "资损"],
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "type": "row",
+      "title": "资损哨兵（三项恒为 0）",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "title": "重复发奖",
+      "description": "对账第 11 项检出。请求路径埋点埋的是代码自己的判断，与缺陷同源，故此指标必须由对账产出。",
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 1 },
+      "targets": [
+        { "expr": "sum(reward_duplicate)", "legendFormat": "笔" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" }
+    },
+    {
+      "type": "stat",
+      "title": "超卖",
+      "description": "对账第 6 项：locked + consumed > total 的行数。",
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 1 },
+      "targets": [
+        { "expr": "sum(stock_oversold)", "legendFormat": "行" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" }
+    },
+    {
+      "type": "stat",
+      "title": "重复退款",
+      "description": "单据级唯一约束应当挡住它，检出即说明约束被绕过。",
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 1 },
+      "targets": [
+        { "expr": "sum(refund_duplicate)", "legendFormat": "笔" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" }
+    },
+    {
+      "type": "row",
+      "title": "对账差异（按项分列）",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
+    },
+    {
+      "type": "timeseries",
+      "title": "对账差异按类型",
+      "description": "十五项的处置动作不同：有的补建任务（幂等，自动），有的只告警（转人工）。合成一个总数就无法回答「要不要叫人」。",
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 7 },
+      "targets": [
+        {
+          "expr": "sum by (type) (reconcile_diff)",
+          "legendFormat": "{{type}}"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "当前差异明细",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 7 },
+      "targets": [
+        {
+          "expr": "sum by (type) (reconcile_diff) > 0",
+          "instant": true,
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "缓存与任务",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 }
+    },
+    {
+      "type": "timeseries",
+      "title": "活动配置缓存命中率",
+      "description": "命中率过低时缓存是纯开销。§7.7 的秒级 TTL 在读热点上应当有较高命中。",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "activity_cache_hit_rate", "legendFormat": "{{application}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } }
+    },
+    {
+      "type": "timeseries",
+      "title": "JVM 堆使用",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum by (application) (jvm_memory_used_bytes{area=\"heap\"})",
+          "legendFormat": "{{application}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+# Alertmanager 路由。V4 第 7 项。
+#
+# 本地演示无真实通知通道，全部路由到 webhook 落日志 —— 重点是证明「分级路由存在
+# 且规则能触发」，而不是真的发短信。生产替换 receiver 的 config 即可，路由树不变。
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by: ['alertname', 'severity']
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+  routes:
+    # P0 资损：立即、且不做分组等待 —— 分组等待是为了把同类告警攒一批再发，
+    # 而资损这类「一条就要叫人」的告警攒批只会延迟响应
+    - matchers: [severity="P0"]
+      receiver: p0
+      group_wait: 0s
+      repeat_interval: 10m
+
+receivers:
+  - name: default
+    webhook_configs:
+      - url: 'http://mp-alertmanager:9093/-/reload'
+        send_resolved: false
+  - name: p0
+    webhook_configs:
+      - url: 'http://mp-alertmanager:9093/-/reload'
+        send_resolved: true

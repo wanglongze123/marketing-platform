@@ -17,6 +17,15 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter</artifactId>
     </dependency>
+    <!--
+      web：本服务自身不暴露业务 HTTP 接口（对外只走 Dubbo），但 V4 起要暴露
+      /actuator/prometheus 供指标抓取 —— 没有 web 容器时 Boot 起的是非 web 应用，
+      actuator 端点根本不存在，Prometheus 抓到的是连接被拒。
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
     <dependency>
       <groupId>com.baomidou</groupId>
       <artifactId>mybatis-plus-spring-boot3-starter</artifactId>

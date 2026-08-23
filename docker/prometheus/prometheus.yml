@@ -1,0 +1,41 @@
+# Prometheus 抓取配置。V4 第 6 项。
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['mp-alertmanager:9093']
+
+scrape_configs:
+  # 六个服务各自暴露 /actuator/prometheus。
+  #
+  # 用静态目标而非服务发现：Nacos 的 Prometheus SD 需要额外的 exporter，
+  # 而本地演示只有六个固定服务，静态清单看得见、改得动，且不会因为注册中心
+  # 抖动而丢掉抓取目标 —— 监控自己不该依赖被监控的组件。
+  - job_name: 'mp-services'
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets:
+          - 'mp-gateway:8080'
+          - 'mp-activity:8081'
+          - 'mp-reward:8082'
+          - 'mp-fission:8084'
+          - 'mp-mock:8090'
+        labels:
+          env: local
+      # benefit-order 多副本，容器名带序号。三副本时逐个列出 ——
+      # compose 的 DNS 对同名服务返回轮询结果，Prometheus 抓到的会是随机一个实例，
+      # 指标在多个实例间跳变，看起来像数据在抖
+      - targets:
+          - 'marketing-platform-benefit-order-1:8083'
+        labels:
+          env: local
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

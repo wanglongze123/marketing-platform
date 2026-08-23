@@ -105,5 +105,59 @@ services:
       timeout: 3s
       retries: 20
 
+  # ------------------------------------------------------------------
+  # 可观测栈（V4 第 5、6、7 项）。与业务服务同 profile，一条命令全起。
+  # ------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: mp-prometheus
+    profiles: ["v4"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+      # 演示环境保留 6 小时够用。默认 15 天会让本地磁盘无谓地涨
+      - --web.enable-lifecycle
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: mp-alertmanager
+    profiles: ["v4"]
+    volumes:
+      - ./docker/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: mp-grafana
+    profiles: ["v4"]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      # 演示环境关掉登录墙：面试时不想在投屏上敲密码，
+      # 而这个实例只监听本机、只读 Prometheus
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: light
+      TZ: Asia/Shanghai
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+
 volumes:
   mp-mysql-data:

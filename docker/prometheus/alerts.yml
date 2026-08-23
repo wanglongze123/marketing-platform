@@ -1,0 +1,103 @@
+# 告警规则。V4 第 7 项，对齐技术方案 §8.4 的分级表。
+#
+# 分级原则：资损哨兵最高优先级。P0 是「立即叫人」，P1 是「群里说一声」，
+# P2 是「看一眼」。分级的意义在于回答「要不要现在起床」—— 全都设成 P0 等于没分级。
+groups:
+  - name: 资损哨兵
+    rules:
+      # 三条恒为 0 的指标，任一非 0 即资损已经发生。
+      # 它们由对账任务产出，不是请求路径埋点 —— 后者埋的是代码自己的判断，与缺陷同源
+      - alert: P0_重复发奖
+        expr: reward_duplicate > 0
+        for: 0m
+        labels: { severity: P0, kind: 资损 }
+        annotations:
+          summary: "对账检出重复发奖 {{ $value }} 笔（服务 {{ $labels.application }}）"
+          description: "同一 biz_order_no + receiver_id + 奖励项存在两条 SUCCESS。查对账第 11 项。"
+
+      - alert: P0_超卖
+        expr: stock_oversold > 0
+        for: 0m
+        labels: { severity: P0, kind: 资损 }
+        annotations:
+          summary: "对账检出超卖 {{ $value }} 行"
+          description: "locked + consumed > total。查对账第 6 项与 marketing_stock。"
+
+      - alert: P0_重复退款
+        expr: refund_duplicate > 0
+        for: 0m
+        labels: { severity: P0, kind: 资损 }
+        annotations:
+          summary: "对账检出重复退款 {{ $value }} 笔"
+          description: "同一订单存在两笔有效退款。单据级唯一约束应当挡住它，检出说明约束被绕过。"
+
+  - name: 收敛与一致性
+    rules:
+      # UNKNOWN 与 PROCESSING 分开设阈值：两者的收敛窗口本就不同（§6.6），
+      # 合并统计会让长退避的 PROCESSING 单误触 UNKNOWN 的告警
+      - alert: P0_UNKNOWN未收敛
+        expr: reconcile_diff{type="OP_UNRESOLVED"} > 0
+        for: 30m
+        labels: { severity: P0, kind: 收敛 }
+        annotations:
+          summary: "存在 30 分钟未收敛的非终态操作记录"
+          description: "可能是资损前兆：结果未知的调用既没查单收敛，也没被对账补偿。"
+
+      - alert: P0_已收款未发奖
+        expr: reconcile_diff{type="PAID_NOT_GRANTED"} > 0
+        for: 5m
+        labels: { severity: P0, kind: 履约 }
+        annotations:
+          summary: "对账检出已收款未发奖 {{ $value }} 单"
+          description: "钱已收、货未发。对账第 1 项应当补建 GRANT 任务，持续非 0 说明补偿也没生效。"
+
+      - alert: P1_金额不一致
+        expr: reconcile_diff{type="AMOUNT_MISMATCH"} > 0
+        for: 5m
+        labels: { severity: P1, kind: 资损 }
+        annotations:
+          summary: "对账检出金额不一致 {{ $value }} 笔"
+          description: "支付金额与订单应付不符。禁止自动改单（AC-04），一律人工核。"
+
+      - alert: P1_任务进死信
+        expr: increase(task_dead_total[10m]) > 0
+        for: 0m
+        labels: { severity: P1, kind: 任务 }
+        annotations:
+          summary: "10 分钟内有任务进入死信"
+          description: "重试耗尽仍未成功，需人工介入。查 benefit_task / fission_task 的 DEAD 行。"
+
+  - name: 系统健康
+    rules:
+      - alert: P1_接口时延超标
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_server_requests_seconds_bucket[5m])) by (le, uri, application)) > 1
+        for: 5m
+        labels: { severity: P1, kind: 时延 }
+        annotations:
+          summary: "{{ $labels.application }} {{ $labels.uri }} P99 超 1 秒"
+
+      - alert: P1_错误率超标
+        expr: |
+          sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m])) by (application)
+          / sum(rate(http_server_requests_seconds_count[5m])) by (application) > 0.001
+        for: 5m
+        labels: { severity: P1, kind: 错误 }
+        annotations:
+          summary: "{{ $labels.application }} 5xx 错误率超 0.1%"
+
+      - alert: P2_连接池吃紧
+        expr: hikaricp_connections_active / hikaricp_connections_max > 0.8
+        for: 10m
+        labels: { severity: P2, kind: 容量 }
+        annotations:
+          summary: "{{ $labels.application }} 连接池使用率超 80%"
+
+      - alert: P2_服务不可达
+        expr: up == 0
+        for: 1m
+        labels: { severity: P2, kind: 可用性 }
+        annotations:
+          summary: "{{ $labels.instance }} 抓取失败"
+          description: "服务可能已停止。多副本场景下单个实例失联属正常（kill -9 验证时会触发）。"

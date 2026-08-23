@@ -23,7 +23,11 @@ import org.springframework.stereotype.Component;
 public class ReconcileMetricsBinder {
 
     public ReconcileMetricsBinder(ReconcileMetrics metrics, MeterRegistry registry) {
-        // 三个资损哨兵：Grafana「业务资损大盘」的绿色指标墙就是它们
+        // 三个资损哨兵：Grafana「业务资损大盘」的绿色指标墙就是它们。
+        //
+        // 名字不带 _total 后缀：Micrometer 把那视为 counter 的命名约定，注册成 gauge 时
+        // 会把它剥掉 —— 写 reward_duplicate_total，导出的是 reward_duplicate，而 PromQL
+        // 按原名查会返回空。这个不一致不报错，表现为「看板一片空白但服务明明在跑」
         registry.gauge("reward_duplicate_total", metrics, ReconcileMetrics::rewardDuplicateCount);
         registry.gauge("stock_oversold_total", metrics, ReconcileMetrics::stockOversoldCount);
         registry.gauge("refund_duplicate_total", metrics, ReconcileMetrics::refundDuplicateCount);

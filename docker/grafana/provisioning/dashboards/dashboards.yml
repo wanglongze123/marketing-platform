@@ -1,0 +1,11 @@
+# 看板自动加载。三块看板对应技术方案 §8.7 的三类受众。
+apiVersion: 1
+providers:
+  - name: 'mp'
+    orgId: 1
+    folder: '营销活动平台'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards
