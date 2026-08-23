@@ -15,7 +15,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * {@code @Component} 一并装配 —— 拆服务后若某个实现 jar 因传递依赖仍在 classpath 上， 广扫会把它悄悄装进本进程，于是「拆了但没真拆」，调用走本地 bean
  * 而非远程。
  *
- * <p><b>无 {@code @EnableScheduling}</b>：本模块没有可靠任务调度器。加了不报错但会凭空起一个空转的 调度线程池，反而让「哪些服务在跑任务」这件事变模糊。
+ * <p><b>无 {@code @EnableScheduling}</b>：本模块没有可靠任务调度器。加了不报错，但会多起一个空转的调度线程池， 反而让「哪些服务在跑任务」这件事变模糊。
  */
 @SpringBootApplication(scanBasePackages = {"com.mp.activity", "com.mp.common"})
 @EnableDubbo(scanBasePackages = "com.mp.activity")

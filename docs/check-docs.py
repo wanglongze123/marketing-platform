@@ -189,19 +189,25 @@ def check_against_repo(txt):
             continue
         check(want in env, f'{label} 版本与 pom 一致（{want}）')
 
-    # HTTP 端点：文档表格中的路径必须在 controller 中存在。
+    # HTTP 端点：文档表格中的路径必须在某个 controller 中存在。
     # 逐个 controller 解析各自的 @RequestMapping 前缀 —— 拼接后只取第一个前缀会让
-    # 后续 controller 的路径全部拼错，表现为「已实现的端点被报成未实现」
-    ctl_dir = 'mp-gateway/src/main/java/com/mp/gateway/controller'
+    # 后续 controller 的路径全部拼错，表现为「已实现的端点被报成未实现」。
+    #
+    # 全仓扫描而非只扫 gateway：V4 把 /api/fault/** 按「控制面随状态走」拆到了
+    # mock-downstream 与 benefit-order —— 只扫一个目录会把那 8 个端点报成未实现，
+    # 而它们只是换了归属，URL 一个没变。
     paths = set()
-    for f in os.listdir(os.path.join(ROOT, ctl_dir)):
-        if not f.endswith('.java'):
+    for mod_dir, _, files in os.walk(ROOT):
+        if '/target/' in mod_dir or '/src/test/' in mod_dir:
             continue
-        src = read(os.path.join(ctl_dir, f))
-        base = re.search(r'@RequestMapping\("([^"]+)"\)', src)
-        prefix = base.group(1) if base else ''
-        paths |= {prefix + p
-                  for p in re.findall(r'@(?:Get|Post|Put|Delete)Mapping\("([^"]*)"\)', src)}
+        for f in files:
+            if not f.endswith('Controller.java'):
+                continue
+            src = read(os.path.relpath(os.path.join(mod_dir, f), ROOT))
+            base = re.search(r'@RequestMapping\("([^"]+)"\)', src)
+            prefix = base.group(1) if base else ''
+            paths |= {prefix + p
+                      for p in re.findall(r'@(?:Get|Post|Put|Delete)Mapping\("([^"]*)"\)', src)}
     quoted_paths = set(re.findall(r'`(/api/[\w/{}-]+)`', txt['分阶段方案']))
     ghost_paths = {p for p in quoted_paths if p not in paths}
     check(not ghost_paths, f'文档列出的 HTTP 端点均已实现（{len(paths)} 个）'
