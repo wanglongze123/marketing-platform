@@ -57,13 +57,6 @@
       <groupId>com.mp</groupId>
       <artifactId>mp-api-mock</artifactId>
     </dependency>
-    <dependency>
-      <groupId>com.mp</groupId>
-      <artifactId>mp-activity</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.mp</groupId>
-      <artifactId>mp-reward</artifactId>
-    </dependency>
+    <!-- V4 起只留 api，不依赖 mp-activity / mp-reward 的实现 jar。理由见 mp-benefit-order/pom.xml 同处注释 -->
   </dependencies>
 </project>

@@ -69,17 +69,15 @@
       <groupId>com.mp</groupId>
       <artifactId>mp-api-mock</artifactId>
     </dependency>
-    <dependency>
-      <groupId>com.mp</groupId>
-      <artifactId>mp-activity</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.mp</groupId>
-      <artifactId>mp-reward</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.mp</groupId>
-      <artifactId>mp-mock-downstream</artifactId>
-    </dependency>
+    <!--
+      V4 起不再依赖 mp-activity / mp-reward / mp-mock-downstream 的实现 jar，只留 api。
+
+      留着的后果不是编译错误而是「拆了但没真拆」：实现类进了本服务的 fat jar，Dubbo
+      发现同进程有 @DubboService 暴露的同接口实现，就会优先走本地 bean，跨服务 RPC
+      根本不发生 —— Nacos 上看得到注册，调用却从未出网。
+
+      代码层面本就没有跨模块 import（全走 com.mp.api.*），删掉零改动。单进程形态由
+      mp-gateway 显式聚合这三个实现模块，不受影响。
+    -->
   </dependencies>
 </project>
