@@ -39,7 +39,10 @@ FROM eclipse-temurin:21-jre
 WORKDIR /app
 
 ARG MODULE
-COPY --from=build /src/${MODULE}/target/*.jar app.jar
+# 取 -boot 后缀那个：repackage 配了 classifier，同目录下还有一个同名的普通库
+# jar（只有几十 K，供模块间依赖用）。通配 *.jar 会两个都匹配到，COPY 随即失败；
+# 就算只匹配到一个，拿错了那个的表现是「no main manifest attribute」
+COPY --from=build /src/${MODULE}/target/*-boot.jar app.jar
 
 # 容器内时区与 MySQL 的 +8:00 对齐 —— 不一致会让 next_time 与库时钟差 8 小时，
 # 任务要么立刻全部到期、要么永远不到期，而两者都不报错

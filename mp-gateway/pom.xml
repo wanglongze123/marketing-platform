@@ -76,6 +76,15 @@
             <goals>
               <goal>repackage</goal>
             </goals>
+            <configuration>
+              <!--
+                与其余五个模块统一：产出 mp-gateway-*-boot.jar 供容器启动，
+                原 jar 保持普通库形态。gateway 目前无人依赖，加 classifier
+                只为让 docker/Dockerfile 有单一取 jar 规则 —— 六个服务一份
+                Dockerfile，靠 *-boot.jar 通配，不必为 gateway 开特例。
+              -->
+              <classifier>boot</classifier>
+            </configuration>
           </execution>
         </executions>
       </plugin>

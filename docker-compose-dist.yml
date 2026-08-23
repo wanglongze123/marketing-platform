@@ -1,0 +1,150 @@
+# V4 分布式形态：五服务独立部署，三机拓扑。
+#
+# 用法（中间件先起，它在主 compose 里）：
+#   docker compose --profile v4 up -d           # 机器 A：MySQL/Redis/Nacos/RocketMQ
+#   mvn -B package -DskipTests                  # 产出六个 -boot.jar
+#   docker compose -f docker-compose-dist.yml up -d --build
+#
+# ------------------------------------------------------------------
+# 三机拓扑（技术方案 §1.6）用三个 network 模拟：
+#
+#   net-infra   机器 A：全部中间件
+#   net-b       机器 B：gateway + benefit-order + fission（接入与玩法层）
+#   net-c       机器 C：activity + reward + mock 下游（公共能力层）
+#
+# B 与 C 之间没有共同网段，跨层调用一律经 net-infra 上的 Nacos 做服务发现后
+# 再连——这正是「玩法层调公共能力层是跨机器 RPC」那条要验的事。
+#
+# 中间件容器由主 compose 创建，此处以 external network 接入它们所在的网络。
+# ------------------------------------------------------------------
+
+x-common: &common
+  restart: unless-stopped
+  environment: &common-env
+    TZ: Asia/Shanghai
+    SPRING_PROFILES_ACTIVE: dist
+    # 中间件都在机器 A，容器间走服务名。这些名字由主 compose 的 container_name 决定
+    MP_MYSQL_HOST: mp-mysql
+    MP_MYSQL_PORT: "3306"
+    MP_REDIS_HOST: mp-redis
+    MP_REDIS_PORT: "6379"
+    MP_NACOS_HOST: mp-nacos
+    MP_NACOS_PORT: "8848"
+    MP_ROCKETMQ_NAMESRV: mp-rocketmq-namesrv:9876
+
+services:
+  # ---------- 机器 C：公共能力层 ----------
+  # 先起：玩法层依赖它们，虽然 check=false 不会因缺提供者而启动失败，
+  # 但先起能让第一次调用就命中，省去一轮重试
+
+  activity:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        MODULE: mp-activity
+    image: mp/activity:v4
+    container_name: mp-activity
+    environment:
+      <<: *common-env
+      MP_SERVER_PORT: "8081"
+    networks: [net-infra, net-c]
+    ports:
+      - "8081:8081"
+
+  reward:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        MODULE: mp-reward
+    image: mp/reward:v4
+    container_name: mp-reward
+    environment:
+      <<: *common-env
+      MP_SERVER_PORT: "8082"
+    networks: [net-infra, net-c]
+    ports:
+      - "8082:8082"
+
+  mock-downstream:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        MODULE: mp-mock-downstream
+    image: mp/mock-downstream:v4
+    container_name: mp-mock
+    environment:
+      <<: *common-env
+      MP_SERVER_PORT: "8090"
+    networks: [net-infra, net-c]
+    ports:
+      - "8090:8090"
+
+  # ---------- 机器 B：接入层与玩法层 ----------
+
+  # benefit-order 不设 container_name：kill -9 验证要起多副本，
+  # 固定名字会让 --scale 直接失败
+  benefit-order:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        MODULE: mp-benefit-order
+    image: mp/benefit-order:v4
+    environment:
+      <<: *common-env
+      # 不映射固定端口，多副本时由 Docker 分配 —— 同理，映射了就没法 --scale
+      MP_SERVER_PORT: "8083"
+      # 时序参数留给验证脚本覆盖。默认取生产值，见 application-dist.yml 的注释
+      MP_TASK_LEASE_SECONDS: "${MP_TASK_LEASE_SECONDS:-30}"
+      MP_TASK_INTERVAL_MILLIS: "${MP_TASK_INTERVAL_MILLIS:-1000}"
+    networks: [net-infra, net-b]
+
+  fission:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        MODULE: mp-fission
+    image: mp/fission:v4
+    container_name: mp-fission
+    environment:
+      <<: *common-env
+      MP_SERVER_PORT: "8084"
+    networks: [net-infra, net-b]
+    ports:
+      - "8084:8084"
+
+  gateway:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        MODULE: mp-gateway
+    image: mp/gateway:v4
+    container_name: mp-gateway
+    environment:
+      <<: *common-env
+      MP_SERVER_PORT: "8080"
+    networks: [net-infra, net-b]
+    ports:
+      - "8080:8080"
+
+networks:
+  # 中间件所在网络，由主 compose 创建。名字取 <项目名>_default —— 主 compose
+  # 没有显式声明 network，Docker 给它建的就是这个
+  net-infra:
+    external: true
+    name: marketing-platform_default
+  net-b:
+    driver: bridge
+  net-c:
+    driver: bridge
