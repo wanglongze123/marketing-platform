@@ -1,0 +1,39 @@
+# mock 下游服务的分布式形态配置。V4 新增。
+#
+# 它扮演外部系统（支付方、权益供应方、社交关系），故无数据源、无 Flyway ——
+# 账本是进程内 ConcurrentHashMap，重启即清空，这是有意的。
+spring:
+  application:
+    name: mp-mock-downstream
+  threads:
+    virtual:
+      enabled: true
+
+server:
+  # 端口取《环境与依赖》§3.2 的既定约定
+  port: ${MP_SERVER_PORT:8090}
+
+dubbo:
+  application:
+    name: mp-mock-downstream
+    qos-enable: false
+    logger: slf4j
+  protocol:
+    name: tri
+    port: -1
+  registry:
+    address: nacos://${MP_NACOS_HOST:localhost}:${MP_NACOS_PORT:8848}
+  scan:
+    base-packages: com.mp.mock
+
+mp:
+  dubbo:
+    remote: true
+  # 无签名密钥配置：mock 既不验签也不签发。两个签名端点留在 gateway
+  # （见 MockFaultController 类注释），签名器由各自模块 @Bean 显式装配，
+  # mp-common 本身不含任何 @Component，扫到也不会要求配置
+
+logging:
+  level:
+    root: INFO
+    com.mp: DEBUG

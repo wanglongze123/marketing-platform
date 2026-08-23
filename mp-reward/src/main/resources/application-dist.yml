@@ -1,0 +1,50 @@
+# reward 服务的分布式形态配置。V4 新增。
+spring:
+  application:
+    name: mp-reward
+  threads:
+    virtual:
+      enabled: true
+
+  datasource:
+    reward:
+      url: jdbc:mysql://${MP_MYSQL_HOST:localhost}:${MP_MYSQL_PORT:3306}/db_reward?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_reward
+      password: mp_reward
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 2
+
+server:
+  port: ${MP_SERVER_PORT:8082}
+
+dubbo:
+  application:
+    name: mp-reward
+    qos-enable: false
+    logger: slf4j
+  protocol:
+    name: tri
+    port: -1
+  registry:
+    address: nacos://${MP_NACOS_HOST:localhost}:${MP_NACOS_PORT:8848}
+  scan:
+    base-packages: com.mp.reward
+
+mp:
+  dubbo:
+    remote: true
+  # 供应方通知验签密钥。本服务是 providerCallback 的接收方，缺它启动即失败
+  # （无代码内默认值，见 ConsultTokenConfig 的同类处置与 ShapeFreezeTest 的断言）
+  provider-notify:
+    secret: ${MP_PROVIDER_NOTIFY_SECRET:local-dev-provider-notify-secret-do-not-use-in-prod}
+  # 发奖结果事件开关。置 false 即退出标准第 17 条的对照组：
+  # 断言仍由 QUERY_GRANT 收敛到终态、发放记录仍为 1 条
+  event:
+    enabled: ${MP_EVENT_ENABLED:true}
+
+logging:
+  level:
+    root: INFO
+    com.mp: DEBUG

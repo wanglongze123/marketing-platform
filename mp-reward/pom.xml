@@ -48,4 +48,36 @@
     </dependency>
     <!-- V4 起只留 api，不依赖 mp-mock-downstream 的实现 jar。理由见 mp-benefit-order/pom.xml 同处注释 -->
   </dependencies>
+
+  <!--
+    可执行 jar。V4 起本模块可作为独立服务启动（见 RewardApplication），
+    故需 repackage 产出 fat jar。单进程形态不受影响 —— 那时由 mp-gateway
+    的 jar 承载全部模块，本 jar 只是不被用到。
+  -->
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>repackage</goal>
+            </goals>
+            <configuration>
+              <!--
+                classifier 不可省。默认 repackage 会把原 jar 替换成 fat jar，
+                而 fat jar 里的类挪到了 BOOT-INF/classes/ 下 —— 依赖本模块的
+                其他模块（mp-gateway 及其测试）随即 import 不到任何类。
+
+                配上之后产出两个文件：mp-xxx.jar 仍是普通库 jar 供模块间依赖，
+                mp-xxx-boot.jar 是可执行 fat jar 供容器启动。
+              -->
+              <classifier>boot</classifier>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>

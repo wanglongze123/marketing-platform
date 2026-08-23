@@ -1,0 +1,56 @@
+# fission 服务的分布式形态配置。V4 新增。
+spring:
+  application:
+    name: mp-fission
+  threads:
+    virtual:
+      enabled: true
+
+  datasource:
+    fission:
+      url: jdbc:mysql://${MP_MYSQL_HOST:localhost}:${MP_MYSQL_PORT:3306}/db_fission?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_fission
+      password: mp_fission
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 2
+
+server:
+  port: ${MP_SERVER_PORT:8084}
+
+dubbo:
+  application:
+    name: mp-fission
+    qos-enable: false
+    logger: slf4j
+  protocol:
+    name: tri
+    port: -1
+  registry:
+    address: nacos://${MP_NACOS_HOST:localhost}:${MP_NACOS_PORT:8848}
+  scan:
+    base-packages: com.mp.fission
+
+mp:
+  dubbo:
+    remote: true
+
+  # 配置键与权益侧各自独立（任务表分库，各库各有一个调度器），
+  # 改一个不会作用于另一个——多实例验证时两侧都要配
+  fission:
+    task:
+      lease-seconds: ${MP_FISSION_TASK_LEASE_SECONDS:30}
+      interval-millis: ${MP_FISSION_TASK_INTERVAL_MILLIS:1000}
+      timer:
+        # 同时管住调度器与到期关系播种器：「播了没人跑」与「有人跑但没得播」
+        # 都是半截状态，故共用一个开关
+        enabled: ${MP_FISSION_TASK_TIMER_ENABLED:true}
+    filter:
+      # 好友过滤下推。置 false 走基线实现（逐用户查），仅用于产出对照数据
+      pushdown: ${MP_FISSION_PUSHDOWN:true}
+
+logging:
+  level:
+    root: INFO
+    com.mp: DEBUG

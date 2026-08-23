@@ -1,0 +1,50 @@
+# activity 服务的分布式形态配置。V4 新增。
+#
+# 单进程形态不读本文件（那时由 mp-gateway 的 application.yml + application-local.yml 承载），
+# 故这里只写「作为独立服务时才需要的东西」，不重复业务开关。
+spring:
+  application:
+    name: mp-activity
+  threads:
+    virtual:
+      enabled: true
+
+  datasource:
+    # 只配自己那个库。拆服务后本进程再没有别库的连接池 ——
+    # 「禁止跨库 JOIN」从权限约束升级为物理约束：连都连不上
+    activity:
+      url: jdbc:mysql://${MP_MYSQL_HOST:localhost}:${MP_MYSQL_PORT:3306}/db_activity?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_activity
+      password: mp_activity
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 2
+
+server:
+  port: ${MP_SERVER_PORT:8081}
+
+dubbo:
+  application:
+    name: mp-activity
+    qos-enable: false
+    logger: slf4j
+  protocol:
+    name: tri
+    # -1 表示随机端口。多副本部署时固定端口会撞，而撞的表现是第二个实例启动失败
+    port: -1
+  registry:
+    address: nacos://${MP_NACOS_HOST:localhost}:${MP_NACOS_PORT:8848}
+  scan:
+    base-packages: com.mp.activity
+
+mp:
+  # 本服务不消费任何下游，无需远程引用配置。这一项仍显式写出 ——
+  # 缺省会让人以为是漏配的
+  dubbo:
+    remote: true
+
+logging:
+  level:
+    root: INFO
+    com.mp: DEBUG

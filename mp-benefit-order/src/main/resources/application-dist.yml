@@ -1,0 +1,70 @@
+# benefit-order 服务的分布式形态配置。V4 新增。
+spring:
+  application:
+    name: mp-benefit-order
+  threads:
+    virtual:
+      enabled: true
+
+  data:
+    redis:
+      host: ${MP_REDIS_HOST:localhost}
+      port: ${MP_REDIS_PORT:6379}
+
+  datasource:
+    benefit:
+      url: jdbc:mysql://${MP_MYSQL_HOST:localhost}:${MP_MYSQL_PORT:3306}/db_benefit?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: mp_benefit
+      password: mp_benefit
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        # 主链路所在库，池最大
+        maximum-pool-size: 15
+        minimum-idle: 5
+
+server:
+  port: ${MP_SERVER_PORT:8083}
+
+dubbo:
+  application:
+    name: mp-benefit-order
+    qos-enable: false
+    logger: slf4j
+  protocol:
+    name: tri
+    port: -1
+  registry:
+    address: nacos://${MP_NACOS_HOST:localhost}:${MP_NACOS_PORT:8848}
+  scan:
+    base-packages: com.mp.benefit
+
+mp:
+  dubbo:
+    remote: true
+  lock:
+    enabled: ${MP_LOCK_ENABLED:true}
+  pay:
+    merchant-id: ${MP_MERCHANT_ID:MCH_LOCAL_DEMO}
+  consult-token:
+    secret: ${MP_CONSULT_SECRET:local-dev-consult-secret-do-not-use-in-prod}
+    ttl-seconds: 900
+  pay-notify:
+    secret: ${MP_PAY_NOTIFY_SECRET:local-dev-pay-notify-secret-do-not-use-in-prod}
+
+  # 可靠任务调度。三项都可由环境变量覆盖，kill -9 验证时压缩时序用：
+  #
+  #   默认租约 30s + 僵尸回收每 10 轮（RECLAIM_EVERY_N_ROUNDS 硬编码）× 扫描
+  #   间隔 1s = 最坏接管延迟约 40 秒。演示等不及，验证脚本会压到 5s/500ms，
+  #   接管延迟随之降到约 10 秒。
+  #
+  # 回收频率无法单独调——它是「每 N 轮一次」，只能通过扫描间隔间接影响。
+  task:
+    lease-seconds: ${MP_TASK_LEASE_SECONDS:30}
+    interval-millis: ${MP_TASK_INTERVAL_MILLIS:1000}
+    timer:
+      enabled: ${MP_TASK_TIMER_ENABLED:true}
+
+logging:
+  level:
+    root: INFO
+    com.mp: DEBUG

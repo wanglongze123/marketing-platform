@@ -1,0 +1,42 @@
+# gateway 的分布式形态配置。V4 新增。
+#
+# 与 application-local.yml 的关键差别：这里没有任何数据源。拆服务后 gateway
+# 只做接入层——鉴权、限流、路由、统一响应，业务数据一律经 Dubbo 向后取。
+# 四个 DataSourceConfig 随各自模块走，它们的 jar 已不在本服务的 classpath 上。
+spring:
+  application:
+    name: mp-gateway
+  threads:
+    virtual:
+      enabled: true
+
+server:
+  port: ${MP_SERVER_PORT:8080}
+
+dubbo:
+  application:
+    name: mp-gateway
+    qos-enable: false
+    logger: slf4j
+  protocol:
+    name: tri
+    port: -1
+  registry:
+    address: nacos://${MP_NACOS_HOST:localhost}:${MP_NACOS_PORT:8848}
+  scan:
+    base-packages: com.mp.gateway
+
+mp:
+  dubbo:
+    remote: true
+  # 两个签名端点留在 gateway（见 FaultInjectionController 类注释），
+  # 故两把密钥仍需配置。取值须与对应服务一致，否则签出来的验不过
+  pay-notify:
+    secret: ${MP_PAY_NOTIFY_SECRET:local-dev-pay-notify-secret-do-not-use-in-prod}
+  provider-notify:
+    secret: ${MP_PROVIDER_NOTIFY_SECRET:local-dev-provider-notify-secret-do-not-use-in-prod}
+
+logging:
+  level:
+    root: INFO
+    com.mp: DEBUG
