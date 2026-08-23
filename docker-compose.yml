@@ -24,7 +24,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: mp-redis
-    profiles: ["v2", "v3"]
+    profiles: ["v2", "v3", "v4"]
     ports:
       - "6379:6379"
     healthcheck:
@@ -32,6 +32,78 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # ------------------------------------------------------------------
+  # V4 中间件：docker compose --profile v4 up -d
+  #
+  # 端口取《环境与依赖》§3.2 的既定约定，不另起一套。
+  # ------------------------------------------------------------------
+
+  # 注册中心。V4 前 dubbo.registry.address=N/A（全 injvm，不注册）。
+  nacos:
+    image: nacos/nacos-server:v2.4.3
+    container_name: mp-nacos
+    profiles: ["v4"]
+    environment:
+      # 单机模式，配置存内嵌 derby。生产要换 MySQL，本地演示不必 ——
+      # 注册数据本来就是易失的，实例重连即恢复
+      MODE: standalone
+      # 关掉鉴权：本地演示环境，开了还要在每个服务里配用户名密码
+      NACOS_AUTH_ENABLE: "false"
+      JVM_XMS: 256m
+      JVM_XMX: 512m
+      TZ: Asia/Shanghai
+    ports:
+      - "8848:8848"
+      # gRPC 端口，Nacos 2.x 客户端必须能连上它。只开 8848 的话服务能注册但
+      # 订阅收不到推送 —— 表现为「注册成功但调用方找不到提供者」
+      - "9848:9848"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8848/nacos/v1/console/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # 消息队列，只做跨层事件广播（技术方案 §6.7：一致性不依赖它）。
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.3.1
+    container_name: mp-rocketmq-namesrv
+    profiles: ["v4"]
+    command: sh mqnamesrv
+    environment:
+      JAVA_OPT_EXT: "-Xms256m -Xmx256m -Xmn128m"
+      TZ: Asia/Shanghai
+    ports:
+      - "9876:9876"
+    # 用 bash 的 /dev/tcp 探端口：镜像里没有 netstat/nc，而 curl 对非 HTTP 端口
+    # 会以协议错误退出，两者都判不出「端口通了」
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9876"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.3.1
+    container_name: mp-rocketmq-broker
+    profiles: ["v4"]
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+    command: sh mqbroker -n rocketmq-namesrv:9876 -c /home/rocketmq/conf/broker.conf
+    environment:
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn256m"
+      TZ: Asia/Shanghai
+    volumes:
+      - ./docker/rocketmq/broker.conf:/home/rocketmq/conf/broker.conf:ro
+    ports:
+      - "10911:10911"
+      - "10909:10909"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/10911"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
   mp-mysql-data:
