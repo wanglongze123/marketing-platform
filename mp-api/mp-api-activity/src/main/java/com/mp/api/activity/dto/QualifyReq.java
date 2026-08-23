@@ -1,12 +1,14 @@
 package com.mp.api.activity.dto;
 
+import java.io.Serializable;
+
 /**
  * 资格决策入参（FR-C02）。
  *
  * <p><b>客户端上传的城市、身份、持有状态仅作提示</b>（BR-C-06）：最终以服务端上下文为准。本 DTO 里的 {@code city} / {@code channel}
  * 是客户端声明值，实现侧须以服务端解析结果覆盖 —— 否则用户改一个 请求字段就能绕开城市限制。
  */
-public class QualifyReq {
+public class QualifyReq implements Serializable {
 
     private String userId;
 

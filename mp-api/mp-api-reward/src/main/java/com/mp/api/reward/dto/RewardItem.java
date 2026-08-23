@@ -1,7 +1,9 @@
 package com.mp.api.reward.dto;
 
+import java.io.Serializable;
+
 /** 奖励项。一次 grantReward 调用内的项必须同属一个 provider_type。 */
-public class RewardItem {
+public class RewardItem implements Serializable {
 
     /**
      * 组内下标，<b>相对本次调用的 rewardItems 列表从 0 起连续编号</b>，不是订单内全局下标。

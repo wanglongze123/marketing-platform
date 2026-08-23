@@ -1,9 +1,10 @@
 package com.mp.api.reward.dto;
 
 import com.mp.common.enums.RetStatus;
+import java.io.Serializable;
 
 /** 单个奖励项的发放结果。每项独立四分类，不因整体成功而掩盖单项失败。 */
-public class GrantItemResult {
+public class GrantItemResult implements Serializable {
 
     private int itemSeq;
 

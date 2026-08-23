@@ -1,9 +1,10 @@
 package com.mp.api.benefit.dto;
 
 import com.mp.common.enums.ItemGrantStatus;
+import java.io.Serializable;
 
 /** 履约明细项。注意用 ItemGrantStatus 而非主单的 GrantStatus。 */
-public class FulfillmentItem {
+public class FulfillmentItem implements Serializable {
 
     private String fulfillmentNo;
     private String benefitItemId;

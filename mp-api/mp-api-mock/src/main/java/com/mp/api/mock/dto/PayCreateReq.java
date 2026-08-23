@@ -1,7 +1,9 @@
 package com.mp.api.mock.dto;
 
+import java.io.Serializable;
+
 /** mock 支付下单入参。 */
-public class PayCreateReq {
+public class PayCreateReq implements Serializable {
 
     /** 商户订单号（= bizNo），支付方回调时原样带回 */
     private String outTradeNo;

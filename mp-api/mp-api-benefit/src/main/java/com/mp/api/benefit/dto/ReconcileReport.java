@@ -1,5 +1,6 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -12,7 +13,7 @@ import java.util.Map;
  * <p><b>{@code repaired} 与 {@code diffs} 分列</b>：检出与修复是两件事。一条差异被检出但没能修复（如金额 不一致，按规定禁止自动改单），在这里表现为
  * {@code diffs} 有而 {@code repaired} 无 —— 合成一个数则「已 自愈」与「等人工」分不开，而后者才需要告警。
  */
-public class ReconcileReport {
+public class ReconcileReport implements Serializable {
 
     /** 各项检出的差异条数，键为 {@link ReconcileItem#name()} */
     private final Map<String, Integer> diffs = new LinkedHashMap<>();

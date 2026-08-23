@@ -1,10 +1,11 @@
 package com.mp.api.reward.dto;
 
 import com.mp.common.enums.RetStatus;
+import java.io.Serializable;
 import java.util.List;
 
 /** 统一发放出参。汇总态 + 每项独立态。 */
-public class GrantRewardResp {
+public class GrantRewardResp implements Serializable {
 
     /** 汇总四分类。调用方据此决定推进终态、补偿、还是挂查单任务 */
     private RetStatus retStatus;

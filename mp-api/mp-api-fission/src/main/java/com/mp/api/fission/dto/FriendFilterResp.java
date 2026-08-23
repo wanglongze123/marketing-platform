@@ -1,5 +1,6 @@
 package com.mp.api.fission.dto;
 
+import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
 
@@ -13,7 +14,7 @@ import java.util.Map;
  *
  * <p><b>降级清单与拒绝集合是两回事</b>：后者说「谁不能被邀请」，前者说「这个结论是在什么条件下 算出来的」。一次大面积降级与一次正常过滤，若不记降级清单，在调用方看来完全一样。
  */
-public class FriendFilterResp {
+public class FriendFilterResp implements Serializable {
 
     /** 最终可分享的好友 */
     private List<String> passed;

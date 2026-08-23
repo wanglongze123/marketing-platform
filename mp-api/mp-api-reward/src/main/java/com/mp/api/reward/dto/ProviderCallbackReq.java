@@ -1,6 +1,7 @@
 package com.mp.api.reward.dto;
 
 import com.mp.common.enums.RetStatus;
+import java.io.Serializable;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -13,7 +14,7 @@ import java.util.Map;
  * <p><b>验签字段集合与 {@link #signFields()} 一致</b>：签名覆盖全部业务字段而非只签结果 —— 只签结果 则攻击者可以拿一条真实的成功通知改掉 {@code
  * opNo}，把 A 单的发放算到 B 单头上，结果没变、签名照样对。 这与支付通知验签是同一处置（{@code PayNotifySigner} 的注释）。
  */
-public class ProviderCallbackReq {
+public class ProviderCallbackReq implements Serializable {
 
     /** 发奖幂等键，通知据它定位原发放 */
     private String opNo;

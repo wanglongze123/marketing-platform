@@ -1,5 +1,7 @@
 package com.mp.api.fission.dto;
 
+import java.io.Serializable;
+
 /**
  * 徒弟加入（FR-F06）。
  *
@@ -12,7 +14,7 @@ package com.mp.api.fission.dto;
  *
  * <p>把两者当成一个字段，会让「同一关系的加入与完成」和「同一次调用的重传」共用一把键 —— 完成操作会被当成加入的重传而静默命中幂等。
  */
-public class FollowerJoinReq {
+public class FollowerJoinReq implements Serializable {
 
     private String groupId;
 

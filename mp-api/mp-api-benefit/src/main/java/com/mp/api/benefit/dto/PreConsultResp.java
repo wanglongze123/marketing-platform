@@ -1,5 +1,7 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
+
 /**
  * 预咨询出参：试算结果 + 咨询凭证。
  *
@@ -9,7 +11,7 @@ package com.mp.api.benefit.dto;
  * <p>V2 未做资格决策与人群频控（{@code qualifyResult} / {@code reasonCode}），SKU 不可售时直接抛 {@code 4001}。字段留待 V3 接
  * {@code decideQualification} 时补 —— 提前加空字段会让调用方以为 平台已经做了资格判断。
  */
-public class PreConsultResp {
+public class PreConsultResp implements Serializable {
 
     private String activityId;
     private String skuId;

@@ -1,7 +1,9 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
+
 /** 预咨询入参。只读，无业务单据副作用。 */
-public class PreConsultReq {
+public class PreConsultReq implements Serializable {
 
     private String userId;
     private String activityId;

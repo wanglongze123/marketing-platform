@@ -1,6 +1,7 @@
 package com.mp.api.benefit.dto;
 
 import com.mp.common.enums.RetStatus;
+import java.io.Serializable;
 
 /**
  * 退款准入结果。
@@ -16,7 +17,7 @@ import com.mp.common.enums.RetStatus;
  *
  * <p>合成一个字段会让「不能退」与「还不知道能不能退」不可区分，而前者该给用户提示、后者该等待。
  */
-public class RevokeAdmitResp {
+public class RevokeAdmitResp implements Serializable {
 
     /** 准入是否通过 */
     private boolean admitted;

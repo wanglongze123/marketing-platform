@@ -1,6 +1,7 @@
 package com.mp.api.reward.dto;
 
 import com.mp.common.enums.RetStatus;
+import java.io.Serializable;
 
 /**
  * 回收结果。
@@ -10,7 +11,7 @@ import com.mp.common.enums.RetStatus;
  *
  * <p>故平台侧的前置查询<b>只作准入初筛，不作最终依据</b>：初筛把明显不可退的挡在外面（省一次 RPC），最终以本字段为准。
  */
-public class RevokeRewardResp {
+public class RevokeRewardResp implements Serializable {
 
     private RetStatus retStatus;
 

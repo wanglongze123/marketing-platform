@@ -1,10 +1,11 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** 支付结果通知入参。 */
-public class PayCallbackReq {
+public class PayCallbackReq implements Serializable {
 
     /**
      * 商户订单号（= bizNo）。<b>回调据此定位主单，不用 tradeNo</b>。

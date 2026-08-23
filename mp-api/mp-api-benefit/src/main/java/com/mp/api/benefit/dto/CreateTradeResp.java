@@ -1,7 +1,9 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
+
 /** 下单出参。 */
-public class CreateTradeResp {
+public class CreateTradeResp implements Serializable {
 
     /** 业务主单号，同时作为支付侧的商户订单号 */
     private String bizNo;

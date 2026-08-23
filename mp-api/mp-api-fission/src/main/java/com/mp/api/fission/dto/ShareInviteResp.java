@@ -1,5 +1,6 @@
 package com.mp.api.fission.dto;
 
+import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
 
@@ -12,7 +13,7 @@ import java.util.Map;
  * <p><b>三类互不重叠，且含义各不相同</b>：新建是「这次生效了」，已邀请是「上次就生效了」
  * （BR-F-11，不是错误），未通过过滤是「这个人本轮不能被邀请」（BR-F-12）。合并任意两类都会 让端上无从区分该显示什么。
  */
-public class ShareInviteResp {
+public class ShareInviteResp implements Serializable {
 
     /** 本次新建 {@code INVITED} 关系的徒弟 */
     private List<String> invitedFollowerIds;

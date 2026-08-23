@@ -1,5 +1,6 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
 import java.util.List;
 
 /**
@@ -7,7 +8,7 @@ import java.util.List;
  *
  * <p>带 {@code total} 而非只回一页数据：客服排查需要知道「共几笔」才能判断是否还有下一页。
  */
-public class QueryOrderPageResp {
+public class QueryOrderPageResp implements Serializable {
 
     private List<OrderListItem> items;
 

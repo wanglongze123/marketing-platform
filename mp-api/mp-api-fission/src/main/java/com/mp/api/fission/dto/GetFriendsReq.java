@@ -1,11 +1,13 @@
 package com.mp.api.fission.dto;
 
+import java.io.Serializable;
+
 /**
  * 拉可分享好友（FR-F03）。
  *
  * <p>召回过程中回调过滤（FR-F04）—— 两者是一次请求的两段，不是两个接口：先过滤后召回无从谈起， 而召回完不过滤则端上会显示一批点了没反应的头像。
  */
-public class GetFriendsReq {
+public class GetFriendsReq implements Serializable {
 
     private String groupId;
 

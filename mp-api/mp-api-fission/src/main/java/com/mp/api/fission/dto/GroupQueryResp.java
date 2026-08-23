@@ -1,5 +1,6 @@
 package com.mp.api.fission.dto;
 
+import java.io.Serializable;
 import java.util.List;
 
 /**
@@ -7,7 +8,7 @@ import java.util.List;
  *
  * <p>三个返回开关（含历史轮次 / 含已完成徒弟列表 / 含阶梯奖励）<b>默认全关</b>（BR-F-05）：默认全开 会让每次查询都拉出膨胀表的明细，而多数调用方只要当前轮的进度。
  */
-public class GroupQueryResp {
+public class GroupQueryResp implements Serializable {
 
     private String activityId;
 
@@ -52,7 +53,7 @@ public class GroupQueryResp {
     }
 
     /** 单个轮次的公开信息。 */
-    public static class RoundInfo {
+    public static class RoundInfo implements Serializable {
         private String groupId;
         private Integer roundNo;
         private String status;

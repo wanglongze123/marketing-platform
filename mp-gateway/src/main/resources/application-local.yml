@@ -43,8 +43,9 @@ spring:
   data:
     redis:
       # V2 起启用：docker compose --profile v2 up -d
-      host: localhost
-      port: 6379
+      # 占位符形态供容器化注入（V4）：本地默认值不变，dist 形态由环境变量指向服务名
+      host: ${MP_REDIS_HOST:localhost}
+      port: ${MP_REDIS_PORT:6379}
 
   datasource:
     # 四库各用仅授权自身 schema 的账号 —— 权限隔离让「禁止跨库 JOIN」在运行期成为约束，
@@ -53,7 +54,7 @@ spring:
     # 迁移由各模块的 DataSourceConfig 以独立 Flyway 实例驱动，不走 spring.flyway —— 后者
     # 只认单一 DataSource，四库共用一份配置正是 V1 九张表全落 db_reward 的原因。
     activity:
-      url: jdbc:mysql://localhost:3306/db_activity?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      url: jdbc:mysql://${MP_MYSQL_HOST:localhost}:${MP_MYSQL_PORT:3306}/db_activity?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
       username: mp_activity
       password: mp_activity
       driver-class-name: com.mysql.cj.jdbc.Driver
@@ -63,7 +64,7 @@ spring:
         maximum-pool-size: 10
         minimum-idle: 2
     benefit:
-      url: jdbc:mysql://localhost:3306/db_benefit?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      url: jdbc:mysql://${MP_MYSQL_HOST:localhost}:${MP_MYSQL_PORT:3306}/db_benefit?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
       username: mp_benefit
       password: mp_benefit
       driver-class-name: com.mysql.cj.jdbc.Driver
@@ -72,7 +73,7 @@ spring:
         maximum-pool-size: 15
         minimum-idle: 5
     reward:
-      url: jdbc:mysql://localhost:3306/db_reward?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      url: jdbc:mysql://${MP_MYSQL_HOST:localhost}:${MP_MYSQL_PORT:3306}/db_reward?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
       username: mp_reward
       password: mp_reward
       driver-class-name: com.mysql.cj.jdbc.Driver
@@ -80,7 +81,7 @@ spring:
         maximum-pool-size: 10
         minimum-idle: 2
     fission:
-      url: jdbc:mysql://localhost:3306/db_fission?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      url: jdbc:mysql://${MP_MYSQL_HOST:localhost}:${MP_MYSQL_PORT:3306}/db_fission?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
       username: mp_fission
       password: mp_fission
       driver-class-name: com.mysql.cj.jdbc.Driver

@@ -1,11 +1,13 @@
 package com.mp.api.fission.dto;
 
+import java.io.Serializable;
+
 /**
  * 徒弟完成，触发双向发奖（FR-F07）。
  *
  * <p>{@code outBizNo} 须与加入时携带的一致（BR-F-14）—— 它标识这一次师徒关系；{@code outFlowNo} 标识本次确权，两把发奖幂等键由它同源派生。
  */
-public class FollowerDoneReq {
+public class FollowerDoneReq implements Serializable {
 
     private String groupId;
 

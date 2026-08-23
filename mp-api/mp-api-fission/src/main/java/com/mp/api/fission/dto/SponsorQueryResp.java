@@ -1,12 +1,14 @@
 package com.mp.api.fission.dto;
 
+import java.io.Serializable;
+
 /**
  * 师傅进场结果（FR-F01）。
  *
  * <p><b>无可参与活动是正常业务结果</b>（BR-F-01）：{@code available=false} + {@code reasonCode}，
  * 与系统异常使用不同响应码。把它做成异常会让「这个用户今天没活动可参与」和「资格服务挂了」 在调用方看来一样。
  */
-public class SponsorQueryResp {
+public class SponsorQueryResp implements Serializable {
 
     /** 是否有可参与活动 */
     private boolean available;

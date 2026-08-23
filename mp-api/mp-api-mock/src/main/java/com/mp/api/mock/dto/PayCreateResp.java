@@ -1,9 +1,10 @@
 package com.mp.api.mock.dto;
 
 import com.mp.common.enums.RetStatus;
+import java.io.Serializable;
 
 /** mock 支付下单出参。结构为四分类形状，V2 加注入开关时只改实现不改契约。 */
-public class PayCreateResp {
+public class PayCreateResp implements Serializable {
 
     private RetStatus retStatus;
     private String tradeNo;

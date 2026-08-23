@@ -1,11 +1,13 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
+
 /**
  * 订单列表入参。
  *
  * <p>四个筛选项均可为空，为空即不限。<b>只读查询，无副作用</b>，不携带幂等键。
  */
-public class QueryOrderPageReq {
+public class QueryOrderPageReq implements Serializable {
 
     /** 用户 ID。为空时查全量，仅供运营/客服；端侧调用应始终传值 */
     private String userId;

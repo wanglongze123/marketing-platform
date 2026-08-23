@@ -3,6 +3,7 @@ package com.mp.api.benefit.dto;
 import com.mp.common.enums.GrantStatus;
 import com.mp.common.enums.PayStatus;
 import com.mp.common.enums.RefundStatus;
+import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
@@ -12,7 +13,7 @@ import java.time.LocalDateTime;
  *
  * <p>三子状态各自返回，与 {@link QueryOrderResp} 一致：列表页同样需要区分「支付成功且退款中」 这类组合，合并成单一状态就表达不了。
  */
-public class OrderListItem {
+public class OrderListItem implements Serializable {
 
     private String bizNo;
     private String skuId;

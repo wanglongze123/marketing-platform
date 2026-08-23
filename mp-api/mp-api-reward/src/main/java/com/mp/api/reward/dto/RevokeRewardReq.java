@@ -1,5 +1,7 @@
 package com.mp.api.reward.dto;
 
+import java.io.Serializable;
+
 /**
  * 统一回收入参（BR-B-30）。
  *
@@ -11,7 +13,7 @@ package com.mp.api.reward.dto;
  *
  * <p><b>{@code opNo} 是被回收的那笔发奖</b>，不是本次操作的幂等键。两者都要传：前者定位回收对象， 后者保证不二次回收。
  */
-public class RevokeRewardReq {
+public class RevokeRewardReq implements Serializable {
 
     /** 回收幂等键，与发奖 {@code opNo} 不复用 */
     private String revokeNo;

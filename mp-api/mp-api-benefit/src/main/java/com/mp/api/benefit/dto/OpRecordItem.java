@@ -1,5 +1,6 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
@@ -12,7 +13,7 @@ import java.time.LocalDateTime;
  *
  * <p>字段类型用 String 而非枚举：本接口是排查视图，需要如实回显库里的值。若库中因历史数据 存在枚举外的取值，用枚举反序列化会直接抛异常，反而看不到问题。
  */
-public class OpRecordItem {
+public class OpRecordItem implements Serializable {
 
     private String opNo;
     private String opType;

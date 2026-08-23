@@ -1,6 +1,7 @@
 package com.mp.api.mock.dto;
 
 import com.mp.common.enums.RetStatus;
+import java.io.Serializable;
 
 /**
  * mock 关单出参。
@@ -14,7 +15,7 @@ import com.mp.common.enums.RetStatus;
  *   <li>{@code UNKNOWN} / {@code PROCESSING} —— 结果未定，进 {@code CLOSING} 并查单，<b>不释放库存</b>
  * </ul>
  */
-public class PayCloseResp {
+public class PayCloseResp implements Serializable {
 
     private RetStatus retStatus;
 

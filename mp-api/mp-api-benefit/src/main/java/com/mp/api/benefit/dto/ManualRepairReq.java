@@ -1,5 +1,7 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
+
 /**
  * 人工处置入参（FR-C07）。V3 PR-10 引入。
  *
@@ -9,7 +11,7 @@ package com.mp.api.benefit.dto;
  * <p><b>{@code ticketNo} 参与幂等键，取外部工单号</b>：一次处置一条审计记录，多次重试各留一条痕 （{@code play_op_record.op_seq}
  * 取它）。<b>但它不参与业务幂等键的派生</b> —— 重试发奖仍用原 {@code grantOpNo}，否则两次人工重试就是两笔发放。
  */
-public class ManualRepairReq {
+public class ManualRepairReq implements Serializable {
 
     private String bizNo;
 

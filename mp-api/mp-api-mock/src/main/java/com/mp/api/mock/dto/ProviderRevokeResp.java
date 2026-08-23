@@ -1,6 +1,7 @@
 package com.mp.api.mock.dto;
 
 import com.mp.common.enums.RetStatus;
+import java.io.Serializable;
 
 /**
  * mock 供应方回收出参。
@@ -9,7 +10,7 @@ import com.mp.common.enums.RetStatus;
  * 「这次回收操作成没成」。已核销的券回收失败，两个字段分别是 {@code USED} 与 {@code FAIL} ——
  * 合成一个的话，调用方无从区分「回收失败因为已用掉」与「回收失败因为供应方报错」，而前者 不该重试、后者该。
  */
-public class ProviderRevokeResp {
+public class ProviderRevokeResp implements Serializable {
 
     private RetStatus retStatus;
 

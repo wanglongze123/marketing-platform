@@ -1,11 +1,13 @@
 package com.mp.api.activity.dto;
 
+import java.io.Serializable;
+
 /**
  * 创建活动（FR-C01）。建为 {@code DRAFT}，配置此时可以不完整 —— 完整性由发布校验把关。
  *
  * <p><b>草稿允许不完整是有意的</b>：运营分多次填配置是常态，建单时就要求齐全等于逼人一次填完， 或者逼人先填假值再改。校验点放在发布，那才是「这份配置要开始对用户生效」的时刻。
  */
-public class CreateActivityReq {
+public class CreateActivityReq implements Serializable {
 
     /** 幂等键，由调用方生成。同键重复提交返回原活动，不新建 */
     private String clientReqNo;

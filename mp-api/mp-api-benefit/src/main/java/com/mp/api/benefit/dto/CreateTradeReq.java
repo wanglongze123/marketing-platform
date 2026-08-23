@@ -1,7 +1,9 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
+
 /** 下单入参。 */
-public class CreateTradeReq {
+public class CreateTradeReq implements Serializable {
 
     private String userId;
     private String activityId;

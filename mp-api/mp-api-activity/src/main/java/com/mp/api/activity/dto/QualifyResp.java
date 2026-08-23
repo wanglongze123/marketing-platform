@@ -1,5 +1,7 @@
 package com.mp.api.activity.dto;
 
+import java.io.Serializable;
+
 /**
  * 资格决策结果（FR-C02）。
  *
@@ -8,7 +10,7 @@ package com.mp.api.activity.dto;
  *
  * <p><b>咨询阶段通过不代表下单通过</b>（BR-C-08）：本接口只读、无副作用，结果不构成对后续下单的 承诺，创建单据时须重新校验关键条件。
  */
-public class QualifyResp {
+public class QualifyResp implements Serializable {
 
     private boolean pass;
 

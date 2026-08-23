@@ -1,11 +1,13 @@
 package com.mp.api.fission.dto;
 
+import java.io.Serializable;
+
 /**
  * 师傅进场（FR-F01）。
  *
  * <p>{@code activityId} 可选：给定则查该活动，为空则按 {@code scene} 路由。
  */
-public class SponsorQueryReq {
+public class SponsorQueryReq implements Serializable {
 
     /** 师傅平台用户 ID */
     private String sponsorId;

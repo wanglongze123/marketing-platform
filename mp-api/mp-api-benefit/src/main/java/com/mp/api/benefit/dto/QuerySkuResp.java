@@ -1,5 +1,6 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
 import java.util.List;
 
 /**
@@ -9,7 +10,7 @@ import java.util.List;
  *
  * <p>价格单位为分，端侧自行换算展示。不返回格式化字符串 —— 金额格式属展示层职责。
  */
-public class QuerySkuResp {
+public class QuerySkuResp implements Serializable {
 
     private String skuId;
     private String activityId;

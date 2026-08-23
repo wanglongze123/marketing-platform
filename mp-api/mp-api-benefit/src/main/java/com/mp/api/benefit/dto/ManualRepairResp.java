@@ -1,11 +1,13 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
+
 /**
  * 人工处置结果（FR-C07）。V3 PR-10 引入。
  *
  * <p>{@code reusedKey} 回报本次复用的原幂等键，供操作人核对——<b>它是「没有新造键」的可见证据</b>。 连点两次时两次返回同一个键，而账本里仍只有一条。
  */
-public class ManualRepairResp {
+public class ManualRepairResp implements Serializable {
 
     private boolean accepted;
 

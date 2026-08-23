@@ -1,11 +1,13 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
+
 /**
  * 权益项视图，供商品详情展示。
  *
  * <p>与履约明细的 {@link FulfillmentItem} 是不同东西：此处是<b>配置</b>（这个包卖什么）， 那边是<b>履约结果</b>（这一单发成了什么）。前者无状态。
  */
-public class BenefitItemView {
+public class BenefitItemView implements Serializable {
 
     private String benefitItemId;
     private String benefitType;

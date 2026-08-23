@@ -1,5 +1,7 @@
 package com.mp.api.reward.dto;
 
+import java.io.Serializable;
+
 /**
  * 通知处理结果（ACK）。V3 PR-9 引入。
  *
@@ -8,7 +10,7 @@ package com.mp.api.reward.dto;
  *
  * <p><b>验签不过是唯一返回 {@code accepted=false} 的情形</b>：它意味着这条通知不可信，不能 ACK。
  */
-public class ProviderCallbackResp {
+public class ProviderCallbackResp implements Serializable {
 
     private boolean accepted;
 

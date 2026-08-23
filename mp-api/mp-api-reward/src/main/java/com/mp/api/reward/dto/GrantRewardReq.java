@@ -1,5 +1,6 @@
 package com.mp.api.reward.dto;
 
+import java.io.Serializable;
 import java.util.List;
 
 /**
@@ -10,7 +11,7 @@ import java.util.List;
  *
  * <p>因此字段中<b>不得出现 orderId / tradeNo 等权益售卖专有概念</b>。 V1 只有权益售卖一个调用方时，手会自然地把 orderId 塞进来，届时接口就废了。
  */
-public class GrantRewardReq {
+public class GrantRewardReq implements Serializable {
 
     /** FISSION / BENEFIT_SELL。落 reward_grant_record.play_type，NOT NULL */
     private String playType;

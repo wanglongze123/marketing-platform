@@ -1,7 +1,9 @@
 package com.mp.api.activity.dto;
 
+import java.io.Serializable;
+
 /** 活动配置。V1 直接查库，V3 加本地缓存 + 版本快照。 */
-public class ActivityConfResp {
+public class ActivityConfResp implements Serializable {
 
     private String activityId;
     private String name;

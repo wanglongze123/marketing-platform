@@ -1,7 +1,9 @@
 package com.mp.api.mock.dto;
 
+import java.io.Serializable;
+
 /** mock 供应方发放入参。 */
-public class ProviderGrantReq {
+public class ProviderGrantReq implements Serializable {
 
     /** 调用方幂等号，供应方据此去重 */
     private String opNo;

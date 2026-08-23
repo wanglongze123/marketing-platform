@@ -1,5 +1,7 @@
 package com.mp.api.mock.dto;
 
+import java.io.Serializable;
+
 /**
  * 支付方对账文件里的一行：一笔已收款的交易。V3 PR-10 后置补入（§6.8 第 8 项）。
  *
@@ -16,4 +18,5 @@ package com.mp.api.mock.dto;
  * @param tradeNo 支付方交易号
  * @param payAmount 实付金额，分
  */
-public record PaidTradeRow(String outTradeNo, String tradeNo, long payAmount) {}
+public record PaidTradeRow(String outTradeNo, String tradeNo, long payAmount)
+        implements Serializable {}

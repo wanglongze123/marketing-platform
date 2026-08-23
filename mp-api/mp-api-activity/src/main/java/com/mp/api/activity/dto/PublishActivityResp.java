@@ -1,7 +1,9 @@
 package com.mp.api.activity.dto;
 
+import java.io.Serializable;
+
 /** 发布结果：新版本号 + 发布后状态。 */
-public class PublishActivityResp {
+public class PublishActivityResp implements Serializable {
 
     private String activityId;
 

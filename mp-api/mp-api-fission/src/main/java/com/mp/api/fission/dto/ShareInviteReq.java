@@ -1,5 +1,6 @@
 package com.mp.api.fission.dto;
 
+import java.io.Serializable;
 import java.util.List;
 
 /**
@@ -7,7 +8,7 @@ import java.util.List;
  *
  * <p>被分享对象须已通过好友过滤（BR-F-12）—— 过滤在 PR-6 落地，此前由调用方保证。
  */
-public class ShareInviteReq {
+public class ShareInviteReq implements Serializable {
 
     private String groupId;
 

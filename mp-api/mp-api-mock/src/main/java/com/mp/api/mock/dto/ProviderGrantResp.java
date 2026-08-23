@@ -1,13 +1,14 @@
 package com.mp.api.mock.dto;
 
 import com.mp.common.enums.RetStatus;
+import java.io.Serializable;
 
 /**
  * mock 供应方发放出参。
  *
  * <p><b>结构必须是四分类形状</b>，即使 V1 只会返回 SUCCESS —— V2 给 mock 加注入开关时只改实现不改契约。
  */
-public class ProviderGrantResp {
+public class ProviderGrantResp implements Serializable {
 
     private RetStatus retStatus;
 

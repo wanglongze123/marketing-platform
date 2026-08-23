@@ -3,6 +3,7 @@ package com.mp.api.benefit.dto;
 import com.mp.common.enums.GrantStatus;
 import com.mp.common.enums.PayStatus;
 import com.mp.common.enums.RefundStatus;
+import java.io.Serializable;
 import java.util.List;
 
 /**
@@ -10,7 +11,7 @@ import java.util.List;
  *
  * <p><b>三子状态各自返回，不合并成单一 biz_status</b> —— 展示态由三者派生、不落库， 因为「支付成功且退款中」这类组合无法由单一枚举表达。
  */
-public class QueryOrderResp {
+public class QueryOrderResp implements Serializable {
 
     private String bizNo;
     private String userId;

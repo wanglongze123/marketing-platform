@@ -1,5 +1,7 @@
 package com.mp.api.benefit.dto;
 
+import java.io.Serializable;
+
 /**
  * 退款准入 + 权益回收入参（FR-B08）。
  *
@@ -8,7 +10,7 @@ package com.mp.api.benefit.dto;
  *
  * <p>取内部计数器会让重试产生新键、绕过唯一索引 —— 那正是「同一订单退两次」的成因（技术方案 §4.1 的第 2 条铁律）。
  */
-public class RevokeAdmitReq {
+public class RevokeAdmitReq implements Serializable {
 
     private String bizNo;
 
