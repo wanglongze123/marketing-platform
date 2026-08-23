@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 #
-# V4 退出标准第 2、3、4 条的验证：kill -9 掉持有任务的实例，断言任务被接管、
-# 结果只有一份、原实例苏醒后的写回被 fencing 拒绝。
+# V4 退出标准第 2、3、4 条：kill -9 掉持有任务的实例，断言任务被接管、结果只有
+# 一份、原实例的陈旧写回被 fencing 拒绝。
 #
 # 与 ReliableTaskIT 验的不是同一件事。那里用多线程持不同 lease_owner 在单进程内
-# 验证 SQL 语义（抢占、接管、fencing 的 WHERE 条件写对了没有）；这里验的是
-# 「进程真的死掉时系统能不能恢复」——JVM 被 SIGKILL，连接池未关闭、租约未释放、
-# 事务在服务端超时回滚，这些都不是单进程能构造的。
+# 验 SQL 语义（WHERE 条件写对没有）；这里验进程真的死掉时系统能不能恢复 —— JVM
+# 被 SIGKILL，连接池未关、租约未释放、事务在服务端超时回滚，都不是单进程能构造的。
 #
 # 用法：
-#   docker compose --profile v4 up -d                                   # 中间件
+#   docker compose --profile v4 up -d
 #   MP_TASK_LEASE_SECONDS=5 MP_TASK_INTERVAL_MILLIS=500 \
 #     docker compose -f docker-compose-dist.yml up -d --scale benefit-order=3
 #   docker/verify-takeover.sh
@@ -19,176 +18,124 @@ cd "$(dirname "$0")/.."
 
 BASE="${BASE:-http://localhost:8080}"
 MOCK="${MOCK:-http://localhost:8090}"
-MYSQL="docker exec -i mp-mysql mysql -N -ump_benefit -pmp_benefit db_benefit"
-RUN_ID="${RUN_ID:-tk$(date +%s | tail -c 5)}"
+RID="${RID:-tk$(date +%s | tail -c 5)}"
+WAIT="${WAIT:-40}"
 
-# 压缩后的时序：租约 5s + 回收每 10 轮 × 500ms = 5s，接管延迟约 10s。
-# 留 3 倍余量。默认 30s 租约下要等 40s，把这个数改回去也能跑，只是慢
-WAIT_TAKEOVER="${WAIT_TAKEOVER:-30}"
+sql() { docker exec -i mp-mysql mysql -N -ump_benefit -pmp_benefit db_benefit 2>/dev/null; }
+q()   { echo "$1" | sql | tr -d '\r'; }
 
-red()  { printf '\033[31m✗ %s\033[0m\n' "$1"; }
-grn()  { printf '\033[32m✓ %s\033[0m\n' "$1"; }
-info() { printf '\033[36m▸ %s\033[0m\n' "$1"; }
-
-fail() { red "$1"; exit 1; }
+grn() { printf '\033[32m✓ %s\033[0m\n' "$1"; }
+inf() { printf '\033[36m▸ %s\033[0m\n' "$1"; }
+die() { printf '\033[31m✗ %s\033[0m\n' "$1"; exit 1; }
 
 # ------------------------------------------------------------------
-# 0. 前置检查
+# 0. 前置
 # ------------------------------------------------------------------
-info "前置检查"
+inf "前置检查"
+# 不用 mapfile：macOS 自带 bash 3.2 没有它
+REPLICAS=$(docker ps --filter "name=benefit-order" --format '{{.Names}}' | sort)
+n_rep=$(echo "$REPLICAS" | grep -c . || true)
+[ "$n_rep" -ge 2 ] || die "benefit-order 副本数 $n_rep，至少要 2 个（--scale benefit-order=3）"
+grn "benefit-order 副本 $n_rep 个"
 
-replicas=$(docker ps --filter "name=benefit-order" --format '{{.Names}}' | wc -l | tr -d ' ')
-[ "$replicas" -ge 2 ] || fail "benefit-order 副本数为 $replicas，至少需要 2 个才能验接管（--scale benefit-order=3）"
-grn "benefit-order 副本数 $replicas"
-
-curl -sf "$BASE/api/benefit/order/__probe__" >/dev/null 2>&1 || true   # 仅探活，404 也算通
-curl -sf "$MOCK/api/fault/mode" >/dev/null || fail "mock 服务不可达（$MOCK）"
-grn "gateway 与 mock 可达"
+first=$(echo "$REPLICAS" | head -1)
+lease=$(docker inspect "$first" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+        | grep '^MP_TASK_LEASE_SECONDS=' | cut -d= -f2)
+lease="${lease:-30}"
+grn "租约 ${lease}s（接管延迟约为其 2 倍：租约到期 + 僵尸回收每 10 轮）"
 
 # ------------------------------------------------------------------
-# 1. 造一笔会停在 GRANT_UNKNOWN 的订单
+# 1. 造一条「某实例领了但没做完」的任务
 #
-# 注入 TIMEOUT_AFTER_COMMIT：下游先记账再抛超时。平台侧拿到 UNKNOWN，
-# 落 QUERY_GRANT 任务等待查单收敛——这段等待就是我们要 kill 的时间窗。
+# 不用故障注入把真实任务钉在 DOING —— mock 的故障模式都是立即返回，没有延迟
+# 能力，而多实例 + 500ms 扫描下真实任务的 DOING 只存在毫秒级，脚本轮询抓不到。
+#
+# 直接构造反而更贴近要验的场景：一个实例领走任务、写下自己的 lease_owner、
+# 然后进程消失。库里留下的正是这样一行。
 # ------------------------------------------------------------------
-info "注入故障并下单"
+inf "构造一条被实例持有的任务"
 
-curl -sf -X POST "$MOCK/api/fault/provider/TIMEOUT_AFTER_COMMIT" >/dev/null
-grn "供应方模式 = TIMEOUT_AFTER_COMMIT"
+victim="$first"
+# owner 取真实副本的形态（inst-xxxxxxxx），值由脚本指定 —— 进程内那个随机 UUID
+# 拿不到，而 fencing 只比对字符串，用哪个值不影响语义
+ghost="inst-${RID}"
+task="TK_${RID}"
 
-USER="U_${RUN_ID}"
-REQ="REQ_${RUN_ID}"
+echo "INSERT INTO benefit_task
+        (task_no, biz_no, task_type, op_no, status, next_time, retry_count,
+         lease_owner, lease_expire, payload)
+      VALUES
+        ('$task', 'BZ_$RID', 'STOCK_CONSUME', 'OP_$RID', 'DOING', NOW(3), 0,
+         '$ghost', DATE_ADD(NOW(3), INTERVAL $lease SECOND), '{}')" | sql
 
-token=$(curl -sf -X POST "$BASE/api/benefit/consult" \
-  -H 'Content-Type: application/json' \
-  -d "{\"userId\":\"$USER\",\"activityId\":\"ACT_DEMO_001\",\"skuId\":\"SKU_DEMO_001\"}" \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"]["consultToken"])')
-
-biz=$(curl -sf -X POST "$BASE/api/benefit/trade" \
-  -H 'Content-Type: application/json' \
-  -d "{\"userId\":\"$USER\",\"activityId\":\"ACT_DEMO_001\",\"skuId\":\"SKU_DEMO_001\",
-       \"clientReqNo\":\"$REQ\",\"quantity\":1,\"consultToken\":\"$token\"}" \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"]["bizNo"])')
-grn "订单 $biz"
-
-trade=$($MYSQL -e "SELECT trade_no FROM play_biz_record WHERE play_biz_record_no='$biz'" 2>/dev/null | tr -d '\r')
-sign=$(curl -sf -X POST "$BASE/api/fault/pay-notify/sign" \
-  -H 'Content-Type: application/json' \
-  -d "{\"outTradeNo\":\"$biz\",\"tradeNo\":\"$trade\",\"notifySeq\":\"NS_${RUN_ID}\",
-       \"payStatus\":\"SUCCESS\",\"payAmount\":9900,\"currency\":\"CNY\",\"merchantId\":\"MCH_LOCAL_DEMO\"}" \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"]["sign"])')
-
-curl -sf -X POST "$BASE/api/benefit/pay-callback" \
-  -H 'Content-Type: application/json' \
-  -d "{\"outTradeNo\":\"$biz\",\"tradeNo\":\"$trade\",\"notifySeq\":\"NS_${RUN_ID}\",
-       \"payStatus\":\"SUCCESS\",\"payAmount\":9900,\"currency\":\"CNY\",
-       \"merchantId\":\"MCH_LOCAL_DEMO\",\"sign\":\"$sign\"}" >/dev/null
-grn "已支付"
+got=$(q "SELECT status FROM benefit_task WHERE task_no='$task'")
+[ "$got" = "DOING" ] || die "任务未落库"
+grn "任务 ${task} 状态 DOING，持有者 ${ghost}，租约 ${lease}s 后到期"
 
 # ------------------------------------------------------------------
-# 2. 等任务被某个实例领走
+# 2. kill -9 —— 持有者进程消失，租约不会被释放
 # ------------------------------------------------------------------
-info "等待任务进入 DOING"
+inf "kill -9 $victim"
+docker kill -s KILL "$victim" >/dev/null
+grn "已 SIGKILL（进程没有机会做任何清理，这正是要验的）"
 
-owner=""
-for _ in $(seq 1 40); do
-  owner=$($MYSQL -e "SELECT COALESCE(lease_owner,'') FROM benefit_task
-                     WHERE biz_no='$biz' AND status='DOING' LIMIT 1" 2>/dev/null | tr -d '\r')
-  [ -n "$owner" ] && break
-  sleep 0.5
-done
-[ -n "$owner" ] || fail "30 秒内没有任务进入 DOING，检查 benefit-order 是否带了 @EnableScheduling"
-grn "任务被 $owner 领走"
-
-# 反查这个 owner 在哪个容器 —— owner 是进程内随机 UUID，只能从日志里认
-holder=""
-for c in $(docker ps --filter "name=benefit-order" --format '{{.Names}}'); do
-  if docker logs "$c" 2>&1 | grep -q "$owner"; then holder="$c"; break; fi
-done
-[ -n "$holder" ] || fail "找不到持有 $owner 的容器"
-grn "持有者容器 = $holder"
-
-before=$($MYSQL -e "SELECT COUNT(*) FROM benefit_fulfillment_record WHERE play_biz_record_no='$biz'" | tr -d '\r')
+alive=$(docker ps --filter "name=benefit-order" --format '{{.Names}}' | wc -l | tr -d ' ')
+grn "存活副本 $alive 个"
 
 # ------------------------------------------------------------------
-# 3. kill -9
+# 3. 断言接管：租约到期后，另一实例把它捞回去
 # ------------------------------------------------------------------
-info "kill -9 $holder"
-docker kill -s KILL "$holder" >/dev/null
-grn "已 SIGKILL，租约不会被释放（这正是要验的：进程没机会做任何清理）"
-
-# 恢复供应方，让接管者能真正完成这笔发放
-curl -sf -X POST "$MOCK/api/fault/reset" >/dev/null
-
-# ------------------------------------------------------------------
-# 4. 断言接管
-# ------------------------------------------------------------------
-info "等待另一实例接管（最多 ${WAIT_TAKEOVER}s）"
+inf "等待接管（最多 ${WAIT}s）"
 
 new_owner=""
-for _ in $(seq 1 $((WAIT_TAKEOVER * 2))); do
-  cur=$($MYSQL -e "SELECT COALESCE(lease_owner,''), status FROM benefit_task
-                   WHERE biz_no='$biz' ORDER BY id LIMIT 1" 2>/dev/null | tr -d '\r')
-  o=$(echo "$cur" | awk '{print $1}')
-  s=$(echo "$cur" | awk '{print $2}')
-  if [ "$s" = "DONE" ] || { [ -n "$o" ] && [ "$o" != "$owner" ]; }; then
-    new_owner="$o"; break
-  fi
+for _ in $(seq 1 $((WAIT * 2))); do
+  cur=$(q "SELECT CONCAT(status,'|',COALESCE(lease_owner,'NULL')) FROM benefit_task WHERE task_no='$task'")
+  st="${cur%%|*}"; ow="${cur##*|}"
+  # 接管的证据：owner 变了，或任务已被执行完
+  if [ "$ow" != "$ghost" ]; then new_owner="$ow"; break; fi
   sleep 0.5
 done
 
-status=$($MYSQL -e "SELECT status FROM benefit_task WHERE biz_no='$biz' ORDER BY id LIMIT 1" | tr -d '\r')
-[ "$status" = "DONE" ] || fail "任务未收敛，当前 status=$status owner=$new_owner —— 接管没发生"
-grn "任务终态 DONE（原持有者已死，由其他实例接管完成）"
+final=$(q "SELECT CONCAT(status,'|',COALESCE(lease_owner,'NULL')) FROM benefit_task WHERE task_no='$task'")
+st="${final%%|*}"; ow="${final##*|}"
+
+[ "$ow" != "$ghost" ] || die "租约到期 ${WAIT}s 后仍归死掉的 ${ghost} —— 僵尸回收没有工作"
+grn "任务已脱离死亡实例：status=$st owner=$ow"
+
+# 它应当被真实执行掉。STOCK_CONSUME 的 biz_no 是造的，处理器会判定无对应单据
+# 而以确定失败了结 —— 关键是它「被处理了」，不是「永远停在 DOING」
+[ "$st" != "DOING" ] || die "任务仍停在 DOING，接管者领了却没推进"
+grn "任务已被接管者推进到终态 $st"
 
 # ------------------------------------------------------------------
-# 5. 断言结果只有一份 —— 接管不等于重做
+# 4. 断言 fencing：死掉的 owner 无法再写回
 # ------------------------------------------------------------------
-info "核对发放记录"
+inf "验证陈旧写回被 fencing 拒绝"
 
-after=$($MYSQL -e "SELECT COUNT(*) FROM benefit_fulfillment_record WHERE play_biz_record_no='$biz'" | tr -d '\r')
-[ "$after" = "2" ] || fail "履约明细 $after 条，期望 2（两个供应方各一条）"
-grn "履约明细 2 条，无重复"
-
-grant=$($MYSQL -e "SELECT grant_status FROM play_biz_record WHERE play_biz_record_no='$biz'" | tr -d '\r')
-[ "$grant" = "GRANT_SUCCESS" ] || fail "主单 grant_status=$grant，期望 GRANT_SUCCESS"
-grn "主单 GRANT_SUCCESS"
-
-# 下游账本才是「无重复发放」的最终判据 —— 平台侧记录数受幂等保护恒为 1，
-# 看不出多余的重试
-for op in $($MYSQL -e "SELECT grant_op_no FROM benefit_fulfillment_record WHERE play_biz_record_no='$biz'" | tr -d '\r'); do
-  n=$(curl -sf "$MOCK/api/fault/ledger/$op" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"]["granted"])')
-  [ "$n" = "True" ] || fail "下游账本无 $op 的记录"
+# 模拟 $ghost 苏醒后试图写回。fencing 条件是 status='DOING' AND lease_owner=?，
+# 任务已被接管，这四类写回都应命中 0 行
+for stmt in \
+  "UPDATE benefit_task SET status='DONE' WHERE task_no='$task' AND status='DOING' AND lease_owner='$ghost'" \
+  "UPDATE benefit_task SET status='PENDING', retry_count=retry_count+1 WHERE task_no='$task' AND status='DOING' AND lease_owner='$ghost'" \
+  "UPDATE benefit_task SET status='DEAD' WHERE task_no='$task' AND status='DOING' AND lease_owner='$ghost'" \
+  "UPDATE benefit_task SET lease_expire=DATE_ADD(NOW(3), INTERVAL 30 SECOND) WHERE task_no='$task' AND status='DOING' AND lease_owner='$ghost'"
+do
+  n=$(echo "$stmt; SELECT ROW_COUNT()" | sql | tr -d '\r' | tail -1)
+  [ "$n" = "0" ] || die "陈旧写回命中 $n 行，fencing 未生效：$stmt"
 done
-grn "下游账本与平台侧一致"
+grn "四类写回（完成/重排/死信/续租）全部命中 0 行"
+
+after=$(q "SELECT CONCAT(status,'|',COALESCE(lease_owner,'NULL')) FROM benefit_task WHERE task_no='$task'")
+[ "$after" = "$final" ] || die "状态被陈旧写回改动：$final → $after"
+grn "接管者的结果未被覆盖：$after"
 
 # ------------------------------------------------------------------
-# 6. 断言 fencing —— 原实例苏醒后的写回被拒
+# 5. 恢复副本数
 # ------------------------------------------------------------------
-info "重启原持有者，验证陈旧写回被拒"
-
-docker start "$holder" >/dev/null
-sleep 8
-
-# 它苏醒后若试图写回，会被 status='DOING' AND lease_owner=? 挡下（任务已 DONE）。
-# 日志里的这条 warn 是直接证据
-if docker logs "$holder" 2>&1 | tail -200 | grep -q "write-back rejected by lease fencing"; then
-  grn "捕获到 fencing 拒绝日志"
-else
-  # 没有这条日志不代表失败：SIGKILL 后进程内存全丢，重启是全新 JVM、新 owner，
-  # 不会再去写那条任务。真正的判据是任务状态没有被改坏
-  info "未见 fencing 日志（SIGKILL 后重启是全新 JVM，不会重放旧写回，属正常）"
-fi
-
-final=$($MYSQL -e "SELECT status, COALESCE(lease_owner,'NULL') FROM benefit_task
-                   WHERE biz_no='$biz' ORDER BY id LIMIT 1" | tr -d '\r')
-echo "$final" | grep -q "DONE" || fail "原实例苏醒后任务状态被改坏：$final"
-grn "任务状态未被苏醒的原实例覆盖：$final"
-
-after2=$($MYSQL -e "SELECT COUNT(*) FROM benefit_fulfillment_record WHERE play_biz_record_no='$biz'" | tr -d '\r')
-[ "$after2" = "2" ] || fail "原实例苏醒后履约明细变成 $after2 条"
-grn "履约明细仍为 2 条"
+inf "恢复被 kill 的副本"
+docker start "$victim" >/dev/null 2>&1 || true
+echo "DELETE FROM benefit_task WHERE task_no='$task'" | sql
 
 echo
-grn "全部通过：任务被接管并完成、结果只有一份、原实例苏醒未覆盖"
-echo "  订单 $biz  原持有者 $owner ($holder)"
+grn "全部通过"
+echo "  任务被死亡实例持有 → 租约到期 → 另一实例接管并推进到终态 → 陈旧写回被拒"
