@@ -13,9 +13,15 @@
 
   <!-- 依赖方向由此处强制，见《开发规范》§3.2：只声明允许方向的依赖 -->
   <dependencies>
+    <!--
+      web：V4 起本模块自带故障注入控制面（FaultInjectionController）。
+      拆服务后 gateway 不再包含 mock 实现，控制面必须随状态所在的进程走 ——
+      FaultInjector / PayLedger / ProviderLedger 都是进程内 ConcurrentHashMap，
+      隔进程调用改不到它们。
+    -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter</artifactId>
+      <artifactId>spring-boot-starter-web</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.dubbo</groupId>
@@ -24,6 +30,15 @@
     <dependency>
       <groupId>com.mp</groupId>
       <artifactId>mp-api-mock</artifactId>
+    </dependency>
+    <!--
+      ApiResponse 与 TraceIdHolder。不引 mp-api-benefit / mp-api-reward ——
+      签名端点的入参是玩法层与公共能力层的 DTO，本模块是最下层，引它们即依赖倒挂。
+      故两个签名端点留在 gateway（它们只依赖 mp-common 的签名器）。
+    -->
+    <dependency>
+      <groupId>com.mp</groupId>
+      <artifactId>mp-common</artifactId>
     </dependency>
   </dependencies>
 </project>

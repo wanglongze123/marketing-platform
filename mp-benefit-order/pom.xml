@@ -13,9 +13,14 @@
 
   <!-- 依赖方向由此处强制，见《开发规范》§3.2：只声明允许方向的依赖 -->
   <dependencies>
+    <!--
+      web：V4 起本模块自带 L3 冲突计数端点（ContentionController）。
+      ContentionMetrics 是进程内 LongAdder，计数发生在本模块的建单与库存扣减路径上，
+      拆服务后 gateway 读不到它，故控制面随状态所在的进程走。
+    -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter</artifactId>
+      <artifactId>spring-boot-starter-web</artifactId>
     </dependency>
     <dependency>
       <groupId>com.baomidou</groupId>
