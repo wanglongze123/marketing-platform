@@ -18,6 +18,9 @@ cd "$(dirname "$0")/.."
 
 BASE="${BASE:-http://localhost:8080}"
 MOCK="${MOCK:-http://localhost:8090}"
+# 运维端点令牌（V4 第 9 项）。/api/fault/** 加了鉴权，脚本要带上
+OPS_TOKEN="${OPS_TOKEN:-local-dev-ops-token-do-not-use-in-prod}"
+OPS_HDR="X-Ops-Token: $OPS_TOKEN"
 RID="${RID:-tk$(date +%s | tail -c 5)}"
 WAIT="${WAIT:-40}"
 

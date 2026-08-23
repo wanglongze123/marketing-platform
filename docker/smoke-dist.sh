@@ -12,6 +12,9 @@ set -euo pipefail
 
 BASE="${BASE:-http://localhost:8080}"
 MOCK="${MOCK:-http://localhost:8090}"
+# 运维端点令牌（V4 第 9 项）。/api/fault/** 加了鉴权，脚本要带上
+OPS_TOKEN="${OPS_TOKEN:-local-dev-ops-token-do-not-use-in-prod}"
+OPS_HDR="X-Ops-Token: $OPS_TOKEN"
 MYSQL="docker exec -i mp-mysql mysql -N -ump_benefit -pmp_benefit db_benefit"
 RID="${RID:-sm$(date +%s | tail -c 5)}"
 
@@ -22,7 +25,7 @@ die() { printf '\033[31m✗ %s\033[0m\n' "$1"; exit 1; }
 jq_() { python3 -c "import sys,json; d=json.load(sys.stdin); print($1)"; }
 
 inf "复位故障注入"
-curl -sf -X POST "$MOCK/api/fault/reset" >/dev/null || die "mock 不可达"
+curl -sf -H "$OPS_HDR" -X POST "$MOCK/api/fault/reset" >/dev/null || die "mock 不可达"
 
 inf "① 预咨询（gateway → benefit-order → activity）"
 token=$(curl -sf -X POST "$BASE/api/benefit/consult" -H 'Content-Type: application/json' \
@@ -42,7 +45,7 @@ grn "订单 $biz"
 trade=$($MYSQL -e "SELECT trade_no FROM play_biz_record WHERE play_biz_record_no='$biz'" | tr -d '\r')
 
 inf "③ 取支付通知签名"
-sign=$(curl -sf -X POST "$BASE/api/fault/pay-notify/sign" -H 'Content-Type: application/json' \
+sign=$(curl -sf -H "$OPS_HDR" -X POST "$BASE/api/fault/pay-notify/sign" -H 'Content-Type: application/json' \
   -d "{\"outTradeNo\":\"$biz\",\"tradeNo\":\"$trade\",\"notifySeq\":\"NS_$RID\",
        \"payStatus\":\"SUCCESS\",\"payAmount\":9900,\"currency\":\"CNY\",\"merchantId\":\"MCH_LOCAL_DEMO\"}" \
   | jq_ 'd["data"]["sign"]')

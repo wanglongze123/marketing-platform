@@ -38,6 +38,10 @@ dubbo:
     base-packages: com.mp.mock
 
 mp:
+  ops:
+    # 运维端点令牌。守 /api/fault/** 与 /api/benefit/convergence/** ——
+    # 前者能签发支付与供应方通知，能签发通知等于能伪造收款
+    token: ${MP_OPS_TOKEN:local-dev-ops-token-do-not-use-in-prod}
   dubbo:
     remote: true
   # 无签名密钥配置：mock 既不验签也不签发。两个签名端点留在 gateway

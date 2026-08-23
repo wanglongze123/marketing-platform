@@ -1,4 +1,8 @@
 mp:
+  ops:
+    # 运维端点令牌。守 /api/fault/** 与 /api/benefit/convergence/** ——
+    # 前者能签发支付与供应方通知，能签发通知等于能伪造收款
+    token: ${MP_OPS_TOKEN:local-dev-ops-token-do-not-use-in-prod}
   lock:
     # L2 分布式锁开关。置 false 即去锁对照组（退出标准第 15 条）——
     # 断言正确性结果与开锁组完全一致，只有 DB 冲突指标不同。

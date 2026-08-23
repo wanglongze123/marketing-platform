@@ -103,6 +103,9 @@ abstract class AbstractMySqlIT {
         registry.add("mp.provider-notify.secret", () -> "it-provider-notify-secret");
         // 本平台商户号。用例构造「他人商户的通知」时取与 OWN_MERCHANT_ID 不同的值
         registry.add("mp.pay.merchant-id", () -> OWN_MERCHANT_ID);
+        // 运维端点令牌（V4 第 9 项）。无代码内默认值，缺配置即启动失败 ——
+        // 与三把签名密钥同样的处置，故测试侧必须显式给一个
+        registry.add("mp.ops.token", () -> OPS_TOKEN);
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
 
@@ -166,6 +169,9 @@ abstract class AbstractMySqlIT {
      * —— 而那是测试装配错了，不是被测代码错了。
      */
     protected static final String OWN_MERCHANT_ID = "MCH_IT";
+
+    /** 运维端点令牌，测试固定值。 */
+    static final String OPS_TOKEN = "it-ops-token";
 
     @Autowired protected BenefitOrderService benefitOrderService;
 
