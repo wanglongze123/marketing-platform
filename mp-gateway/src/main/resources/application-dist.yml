@@ -68,3 +68,23 @@ logging:
   level:
     root: INFO
     com.mp: DEBUG
+
+# 指标暴露（V4 第 5、6 项）。Prometheus 抓 /actuator/prometheus
+management:
+  endpoints:
+    web:
+      exposure:
+        # 只开必要的三个：health 供编排探活，prometheus 供抓取，metrics 供排查。
+        # 不开 * —— env / configprops 会把数据库口令与三把签名密钥原样吐出来
+        include: health,prometheus,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+  metrics:
+    tags:
+      # 所有指标带上服务名，多实例时才分得清是谁的数
+      application: ${spring.application.name}
+  prometheus:
+    metrics:
+      export:
+        enabled: true

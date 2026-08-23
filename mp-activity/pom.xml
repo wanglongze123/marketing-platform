@@ -50,6 +50,25 @@
       <groupId>com.mp</groupId>
       <artifactId>mp-api-activity</artifactId>
     </dependency>
+    <!-- 活动配置本地缓存（§7.7）。读热点扛 QPS，发布时主动失效 -->
+    <dependency>
+      <groupId>com.github.ben-manes.caffeine</groupId>
+      <artifactId>caffeine</artifactId>
+    </dependency>
+
+    <!--
+      指标暴露（V4 第 5、6 项）。actuator 提供 /actuator/prometheus 端点，
+      micrometer-registry-prometheus 负责把 Meter 转成 Prometheus 文本格式。
+      两个都要：只有 actuator 时端点在但没有 prometheus 格式的输出。
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
   </dependencies>
 
   <!--

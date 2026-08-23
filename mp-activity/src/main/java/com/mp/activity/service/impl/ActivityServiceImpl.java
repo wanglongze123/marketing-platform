@@ -1,5 +1,6 @@
 package com.mp.activity.service.impl;
 
+import com.mp.activity.cache.ActivityConfCache;
 import com.mp.activity.entity.MarketingActivity;
 import com.mp.activity.repository.ActivityOpRecordMapper;
 import com.mp.activity.repository.MarketingActivityMapper;
@@ -45,22 +46,60 @@ public class ActivityServiceImpl implements ActivityService {
     private final ActivityOpRecordMapper opRecordMapper;
     private final ActivityTxService tx;
 
+    /** 活动配置缓存（§7.7）。只缓存不随时间变化的部分，可用性每次现算 */
+    private final ActivityConfCache confCache;
+
     public ActivityServiceImpl(
             MarketingActivityMapper activityMapper,
             ActivityOpRecordMapper opRecordMapper,
-            ActivityTxService tx) {
+            ActivityTxService tx,
+            ActivityConfCache confCache) {
         this.activityMapper = activityMapper;
         this.opRecordMapper = opRecordMapper;
         this.tx = tx;
+        this.confCache = confCache;
     }
 
+    /**
+     * 查活动配置。
+     *
+     * <p><b>不走缓存</b>。返回值里的 {@code available} 由库时钟与时间窗比较得出，缓存住等于把 「此刻是否在窗口内」冻结 —— 活动到点结束后仍返回 {@code
+     * available=true}，直到 TTL 过期才 纠正，而那段时间里下的单是在一个已结束的活动上下的（§7.7 的缓存只覆盖配置本身）。
+     *
+     * <p>需要纯配置而不需要可用性的调用方走 {@link #queryActivityConfCached}。
+     */
     @Override
     public ActivityConfResp queryActivityConf(String activityId) {
         MarketingActivityMapper.ActivityRow a = activityMapper.selectWithAvailability(activityId);
         if (a == null) {
             return null;
         }
+        ActivityConfResp resp = toResp(a);
+        // 可用性由数据库判定：时间窗口的两端存在库里，比较也须用库的时钟
+        resp.setAvailable(a.isAvailable());
+        return resp;
+    }
 
+    /**
+     * 查活动配置，命中缓存则不碰库。V4 第 10 项。
+     *
+     * <p><b>返回值的 {@code available} 恒为 false，调用方不得依赖它</b> —— 它没有被计算，不是 「不可用」的意思。要判可用性走 {@link
+     * #queryActivityConf}。
+     *
+     * <p>用于只读配置的场景：取活动名称、玩法类型、当前版本号。这些在 TTL 内不变， 而它们恰好是预咨询与进场链路里被反复读取的部分。
+     */
+    public ActivityConfResp queryActivityConfCached(String activityId) {
+        return confCache.get(
+                activityId,
+                id -> {
+                    MarketingActivityMapper.ActivityRow a =
+                            activityMapper.selectWithAvailability(id);
+                    return a == null ? null : toResp(a);
+                });
+    }
+
+    /** 行转 DTO。<b>不含 available</b>，那一项由调用方按需现算。 */
+    private ActivityConfResp toResp(MarketingActivityMapper.ActivityRow a) {
         ActivityConfResp resp = new ActivityConfResp();
         resp.setActivityId(a.getActivityId());
         resp.setName(a.getName());
@@ -68,8 +107,6 @@ public class ActivityServiceImpl implements ActivityService {
         resp.setScene(a.getScene());
         resp.setStatus(a.getStatus());
         resp.setCurVersion(a.getCurVersion());
-        // 可用性由数据库判定：时间窗口的两端存在库里，比较也须用库的时钟
-        resp.setAvailable(a.isAvailable());
         return resp;
     }
 
@@ -189,6 +226,9 @@ public class ActivityServiceImpl implements ActivityService {
         resp.setActivityId(activityId);
         resp.setVersion(toVersion);
         resp.setStatus(ActivityStatus.SCHEDULED.name());
+        // 发布后立刻失效本实例缓存：运营发布后马上查，应当看到新版本号，
+        // 而不是「等几秒就好了」。其余实例等 TTL 过期，属 §7.7 接受的秒级最终一致
+        confCache.invalidate(activityId);
         log.info("publishActivity done, activityId={}, version={}", activityId, toVersion);
         return resp;
     }

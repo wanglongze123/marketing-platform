@@ -38,6 +38,8 @@
     <testcontainers.version>1.21.3</testcontainers.version>
     <uuid-creator.version>6.0.0</uuid-creator.version>
     <redisson.version>3.52.0</redisson.version>
+    <!-- 活动配置本地缓存，V4 第 10 项。Boot BOM 不管理它 -->
+    <caffeine.version>3.1.8</caffeine.version>
 
     <spotless.version>2.44.0</spotless.version>
     <git-build-hook.version>3.5.0</git-build-hook.version>
@@ -123,6 +125,16 @@
         <groupId>com.github.f4b6a3</groupId>
         <artifactId>uuid-creator</artifactId>
         <version>${uuid-creator.version}</version>
+      </dependency>
+      <!--
+        Caffeine：活动配置的进程内缓存（技术方案 §7.7）。预咨询与师傅进场都是读热点，
+        目标 ≥1000 QPS，每次都查库压力大；配置又会发布变更，不能读到脏的。
+        处置是「秒级 TTL + 发布主动失效」，容忍秒级延迟但存量单认快照。
+      -->
+      <dependency>
+        <groupId>com.github.ben-manes.caffeine</groupId>
+        <artifactId>caffeine</artifactId>
+        <version>${caffeine.version}</version>
       </dependency>
 
       <!-- 本工程各模块 -->

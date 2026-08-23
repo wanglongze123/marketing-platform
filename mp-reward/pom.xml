@@ -63,6 +63,20 @@
       <artifactId>mp-api-mock</artifactId>
     </dependency>
     <!-- V4 起只留 api，不依赖 mp-mock-downstream 的实现 jar。理由见 mp-benefit-order/pom.xml 同处注释 -->
+
+    <!--
+      指标暴露（V4 第 5、6 项）。actuator 提供 /actuator/prometheus 端点，
+      micrometer-registry-prometheus 负责把 Meter 转成 Prometheus 文本格式。
+      两个都要：只有 actuator 时端点在但没有 prometheus 格式的输出。
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
   </dependencies>
 
   <!--
