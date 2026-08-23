@@ -41,44 +41,35 @@
     </dependency>
 
     <!--
-      五个实现模块：单进程形态（GatewayApplication + 34 个集成测试）要靠它们在同
-      进程内提供 injvm 调用，故必须在 compile classpath 上；分布式形态（
-      GatewayDistApplication）则必须没有它们。
+      五个实现模块：单进程形态（GatewayApplication + 34 个集成测试）靠它们在同进程内
+      提供 injvm 调用；分布式形态（GatewayDistApplication）则必须没有它们，否则
+      @DubboService 会让 Dubbo 把本地实现注册成 bean —— 注入报「2 candidates」，
+      就算侥幸选中远程那个，调用也在同进程闭环，跨服务 RPC 从不发生。
 
-      <optional>true</optional> 恰好给出这个区分：optional 依赖参与本模块的编译与
-      测试，但不进 spring-boot-maven-plugin 打出的 fat jar。
-
-      不这么做的后果实测过两次，都不是启动失败那么直白：
-        1. 实现类进了 gateway 的 fat jar，@DubboService 让 Dubbo 把它们注册成本地
-           bean，于是 BenefitOrderController 注入时发现两个候选（本地实现与远程
-           引用），报 required a single bean but 2 were found；
-        2. 就算侥幸注入到远程那个，跨服务 RPC 也从不发生 —— Dubbo 优先走同进程
-           提供者，Nacos 上看得到注册，调用却始终在本地闭环。
+      区分靠 spring-boot-maven-plugin 的 excludes（见下方 build 段），不靠 optional：
+      optional 依赖不向下传递，标了它 Redisson / MyBatis 这些 starter 就进不了
+      gateway 的测试 classpath，34 个集成测试全报 No qualifying bean of type
+      RedissonClient。excludes 只影响 fat jar 的组装，编译与测试不受影响。
     -->
     <dependency>
       <groupId>com.mp</groupId>
       <artifactId>mp-benefit-order</artifactId>
-      <optional>true</optional>
     </dependency>
     <dependency>
       <groupId>com.mp</groupId>
       <artifactId>mp-fission</artifactId>
-      <optional>true</optional>
     </dependency>
     <dependency>
       <groupId>com.mp</groupId>
       <artifactId>mp-activity</artifactId>
-      <optional>true</optional>
     </dependency>
     <dependency>
       <groupId>com.mp</groupId>
       <artifactId>mp-reward</artifactId>
-      <optional>true</optional>
     </dependency>
     <dependency>
       <groupId>com.mp</groupId>
       <artifactId>mp-mock-downstream</artifactId>
-      <optional>true</optional>
     </dependency>
 
     <dependency>
@@ -119,7 +110,7 @@
                 装配入口，由 mvn spring-boot:run 使用；GatewayDistApplication
                 只扫 com.mp.gateway，是拆服务后的接入层入口，容器用它。
               -->
-              <mainClass>com.mp.gateway.GatewayDistApplication</mainClass>
+              <mainClass>com.mp.gateway.dist.GatewayDistApplication</mainClass>
               <!--
                 fat jar 排除五个实现模块。optional 只影响传递依赖，不影响本模块
                 自己的打包 —— 实测标了 optional 后 BOOT-INF/lib 下它们照样在。

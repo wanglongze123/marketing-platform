@@ -37,6 +37,11 @@ import org.testcontainers.utility.MountableFile;
  * RANDOM_PORT} 起真实 servlet 容器，构成第二个。 容器实例仍只有一个 —— 静态字段与上下文缓存无关。
  *
  * <p>测试间不共享数据：每个用例用自己的 {@code tag} 派生 userId 与 clientReqNo， 断言一律按 bizNo 收窄，不依赖执行顺序（《开发规范》§9.3）。
+ *
+ * <p><b>{@code classes} 必须显式指定</b>：V4 起 {@code com.mp.gateway} 下有两个 {@code @SpringBootApplication}
+ * —— 单进程形态的 {@link GatewayApplication}（扫 {@code com.mp}， 装配全部模块）与分布式形态的 {@code
+ * GatewayDistApplication}（只扫接入层）。不指定时 {@code @SpringBootTest} 按包向上找主类，找到两个即抛 {@code Found
+ * multiple @SpringBootConfiguration annotated classes} 而拒绝启动。集成测试验的是单进程形态，取前者。
  */
 @SpringBootTest
 abstract class AbstractMySqlIT {

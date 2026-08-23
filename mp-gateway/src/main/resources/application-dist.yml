@@ -6,6 +6,19 @@
 spring:
   application:
     name: mp-gateway
+  autoconfigure:
+    # 拆服务后 gateway 不连库也不用锁，但 JDBC 与 Redisson 的 jar 仍随传递依赖在
+    # classpath 上：Boot 见状就要找 spring.datasource.url，Redisson 直接试连
+    # localhost:6379，两者都会让启动失败。
+    #
+    # 写在这里而不是 @SpringBootApplication(exclude=...)：注解上的排除项会被 Spring
+    # 全局收集，即便那个类不是当前上下文的配置源 —— 单进程形态的 34 个集成测试会被
+    # 连累，全报 No qualifying bean of type RedissonClient。
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.redisson.spring.starter.RedissonAutoConfigurationV2
   threads:
     virtual:
       enabled: true
