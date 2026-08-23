@@ -213,9 +213,14 @@ def check_against_repo(txt):
     check(not ghost_paths, f'文档列出的 HTTP 端点均已实现（{len(paths)} 个）'
           + (f'  未实现: {sorted(ghost_paths)}' if ghost_paths else ''))
 
-    # V0 脚手架：smoke 端点删除后，文档不得再让人 curl 它
+    # V0 脚手架：smoke 端点删除后，文档不得再让人 curl 它。
+    #
+    # 判据取 localhost:PORT/smoke 这个完整形态，不是子串 '/smoke' ——
+    # 后者会被 docker/smoke-dist.sh 这类文件名误触发，而那是 V4 的冒烟脚本，
+    # 与被删掉的 HTTP 端点毫无关系
     readme = read('README.md')
-    check('/smoke' not in readme, 'README 未引用已删除的 smoke 端点')
+    ghost_smoke = re.search(r'localhost:\d+/smoke|/api/smoke|"/smoke"', readme)
+    check(ghost_smoke is None, 'README 未引用已删除的 smoke 端点')
 
 
 def main():

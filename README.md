@@ -48,6 +48,8 @@
 
 依赖严格自上而下，由 `pom.xml` 编译期强制：上层可依赖下层（允许跨层），下层不得依赖上层，同层不互调。
 
+**两种部署形态，同一份业务代码。** V0–V3 是模块化单体：全部模块装进 `mp-gateway` 一个进程，Dubbo 走 `injvm` 本地调用。V4 起可切分布式：五服务独立打包，`tri` 协议 + Nacos 服务发现，按三机拓扑部署（基础设施 / 接入+玩法层 / 公共能力层）。切换只改配置与装配，`src/main/java` 下无业务逻辑改动。
+
 | 模块 | 职责 |
 | --- | --- |
 | `mp-gateway` | 接入层，V0–V3 单进程启动入口，兼托管前端静态产物 |
@@ -89,9 +91,11 @@
 | 框架 | Spring Boot 3.5、Spring MVC + 虚拟线程 |
 | 服务化 | Apache Dubbo 3.3（injvm / tri 双协议） |
 | 持久层 | MyBatis-Plus、MySQL 8、Flyway |
-| 缓存与锁 | Redis + Redisson |
-| 消息 | RocketMQ（普通消息，跨层事件广播） |
-| 可观测 | SkyWalking、Prometheus + Grafana |
+| 注册中心 | Nacos 2.4（V4 起，injvm 形态不注册） |
+| 缓存与锁 | Redis + Redisson；活动配置本地缓存用 Caffeine |
+| 消息 | RocketMQ 5.3（普通消息，跨层事件广播） |
+| 流控 | Sentinel（V4 起，仅 gateway 侧） |
+| 可观测 | Micrometer + Prometheus + Grafana + Alertmanager |
 | 测试 | Testcontainers（真实 MySQL）、k6 |
 
 选型依据与备选对比见[技术方案](docs/营销活动平台-技术方案.md) §2。
@@ -106,9 +110,9 @@
 | V1 | 权益售卖正向链路 | 下单 → 支付回调 → 发放 → 查询 e2e 通过 | ✅ |
 | V2 | 四分类收敛、可靠任务、幂等三道闸、库存 | 注入超时自动收敛无重复发放；500VU 抢 100 无超卖 | ✅ |
 | V3 | 裂变全链路、逆向退款、对账、事件广播 | 新玩法接入公共能力层零改动；对账检出人为注入的差异 | ✅ |
-| V4 | 分布式化、多实例、监控看板、全链路压测 | kill 实例任务被接管；三机部署压测通过 | |
+| V4 | 分布式化、多实例、监控看板、全链路压测 | kill 实例任务被接管；三机部署压测通过 | ✅ |
 
-V1 实测记录（实施偏差、缺陷、形状冻结落地情况）见[分阶段方案](docs/营销活动平台-分阶段方案.md) §4.8，V2 见 §5.8，V3 见 §6.6。
+V1 实测记录（实施偏差、缺陷、形状冻结落地情况）见[分阶段方案](docs/营销活动平台-分阶段方案.md) §4.8，V2 见 §5.8，V3 见 §6.6，V4 见 §6A.4。
 
 各阶段详细范围与退出标准见[分阶段方案](docs/营销活动平台-分阶段方案.md)。
 
@@ -160,8 +164,10 @@ curl -s -X POST localhost:8080/api/benefit/trade \
   -d '{"userId":"U001","activityId":"ACT_DEMO_001","skuId":"SKU_DEMO_001",
        "clientReqNo":"REQ001","quantity":1,"consultToken":"<consultToken>"}'
 
-# ③ 取签名。真实链路由支付方算出，mock 支付方不主动回调，故留了这个演示端点
+# ③ 取签名。真实链路由支付方算出，mock 支付方不主动回调，故留了这个演示端点。
+#    V4 起 /api/fault/** 需带运维令牌，缺了返回 403
 curl -s -X POST localhost:8080/api/fault/pay-notify/sign \
+  -H 'X-Ops-Token: local-dev-ops-token-do-not-use-in-prod' \
   -H 'Content-Type: application/json' \
   -d '{"outTradeNo":"<bizNo>","tradeNo":"<tradeNo>","notifySeq":"NS001",
        "payStatus":"SUCCESS","payAmount":9900,"currency":"CNY",
@@ -178,7 +184,33 @@ curl -s -X POST localhost:8080/api/benefit/pay-callback \
 curl -s localhost:8080/api/benefit/order/<bizNo>
 ```
 
-`/api/fault/**` 是演示设施，能签发通知等于能伪造收款，V4 拆分布式时下线或移入独立运维端口。
+`/api/fault/**` 是演示设施，能签发通知等于能伪造收款。V4 起已加令牌校验，调用需带 `X-Ops-Token`（本地默认值见 `application-local.yml`）。
+
+### 分布式形态
+
+```bash
+docker compose --profile v4 up -d      # MySQL/Redis/Nacos/RocketMQ + 监控栈
+mvn -B package -DskipTests             # 产出六个 *-boot.jar
+docker compose -f docker-compose-dist.yml up -d --build
+
+docker/smoke-dist.sh                   # 全链路冒烟
+docker/verify-exit-criteria.sh         # 退出标准逐条验证
+```
+
+多实例与故障验证：
+
+```bash
+MP_TASK_LEASE_SECONDS=5 MP_TASK_INTERVAL_MILLIS=500 \
+  docker compose -f docker-compose-dist.yml up -d --scale benefit-order=3
+docker/verify-takeover.sh              # kill -9 后任务被接管、陈旧写回被 fencing 拒绝
+```
+
+| 端口 | 服务 |
+| --- | --- |
+| 8080 | gateway（前端与业务入口） |
+| 3000 | Grafana（免登录，两块看板） |
+| 9090 | Prometheus |
+| 8848 | Nacos 控制台 |
 
 macOS 环境搭建注意事项见[环境与依赖](docs/营销活动平台-环境与依赖.md) §1.1。
 
